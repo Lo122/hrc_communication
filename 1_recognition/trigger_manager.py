@@ -6,14 +6,14 @@ from models import RecognitionResult
 
 
 class TriggerManager:
-    """Converts recognition progress into one-time recognition trigger events."""
+    """Converts recognition progress into one-time trigger events."""
 
     def __init__(self):
         self.previous_progress = {}
         self.triggered_keys = set()
 
     def update(self, recognition_result: RecognitionResult) -> list[Event]:
-        """Evaluate all trigger rules against the latest recognition result."""
+        """Evaluate trigger rules against the latest recognition result."""
         events = []
 
         for task_id, rule in TRIGGER_RULES.items():
@@ -30,9 +30,9 @@ class TriggerManager:
         task_id: int,
         rule: dict,
     ) -> Event | None:
-        """Check one trigger rule and return RECOGNITION_TRIGGER when crossed."""
-        key = (recognition_result.round_id, task_id, recognition_result.piece_id)
-        if key in self.triggered_keys:
+        """Return RECOGNITION_TRIGGER when a configured threshold is crossed."""
+        trigger_key = (recognition_result.round_id, task_id, recognition_result.piece_id)
+        if trigger_key in self.triggered_keys:
             return None
 
         if recognition_result.step_id != rule["step_id"]:
@@ -50,7 +50,7 @@ class TriggerManager:
         threshold = rule["progress_threshold"]
 
         if previous <= threshold and current > threshold:
-            self.triggered_keys.add(key)
+            self.triggered_keys.add(trigger_key)
             return Event(
                 event_type=EventType.RECOGNITION_TRIGGER,
                 source="recognition",
@@ -66,10 +66,10 @@ class TriggerManager:
         return None
 
     def _save_previous_progress(self, recognition_result: RecognitionResult) -> None:
-        """Remember progress for threshold-crossing detection."""
-        key = (
+        """Remember progress so triggers fire on crossing, not every frame."""
+        progress_key = (
             recognition_result.round_id,
             recognition_result.step_id,
             recognition_result.piece_id,
         )
-        self.previous_progress[key] = recognition_result.progress
+        self.previous_progress[progress_key] = recognition_result.progress

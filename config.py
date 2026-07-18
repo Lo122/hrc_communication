@@ -28,6 +28,7 @@ TRIGGER_RULES = {
 PERMISSION_MESSAGES = {
     TASK_LIFT_PANEL: "Would you like me to lift the panel?",
     TASK_BRING_JOINT: "Would you like me to bring the joint piece?",
+    TASK_BRING_NEXT_PANEL: "Would you like me to bring the next panel?",
 }
 
 ROS_TOPICS = {
@@ -44,4 +45,3 @@ UDP_HOST = "127.0.0.1"
 UDP_PORT = 9000
 
 LOG_FILE_PATH = "hrc_communication_events.log"
-

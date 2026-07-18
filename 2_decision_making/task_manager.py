@@ -1,4 +1,4 @@
-"""Central HRC task state-machine skeleton."""
+"""Central HRC task state-management skeleton."""
 
 import time
 
@@ -33,7 +33,7 @@ class TaskManager:
         self.active_task: RobotTask | None = None
 
     def handle_event(self, event: Event) -> None:
-        """Route one event to its state-machine handler."""
+        """Route an event to the corresponding handler."""
         self.logger.log_event(event)
 
         handlers = {
@@ -56,20 +56,22 @@ class TaskManager:
 
         handler = handlers.get(event.event_type)
         if handler is None:
-            self._log_invalid(event, "No handler registered.")
+            self._log_invalid(event, "No handler registered for event.")
             return
+
         handler(event)
 
     def _handle_recognition_trigger(self, event: Event) -> None:
-        """Create an active task and request human permission."""
+        """Create a task and ask the human for permission."""
         if self.active_task is not None:
-            self.logger.log_message("Recognition trigger ignored because active task exists.", event.payload)
+            self.logger.log_message("Ignored trigger because an active task exists.", event.payload)
             return
 
         task_id = event.payload["task_id"]
         piece_id = event.payload["piece_id"]
         round_id = event.payload["round_id"]
         now = time.time()
+
         task = RobotTask(
             task_instance_id=self._build_task_instance_id(round_id, task_id, piece_id),
             task_id=task_id,
@@ -82,13 +84,12 @@ class TaskManager:
         )
         self.active_task = task
 
-        permission = self.message_manager.get_permission_message(task.task_id)
-        self.cli.show_permission_request(permission)
+        message = self.message_manager.get_permission_message(task.task_id)
+        self.cli.show_permission_request(message)
         self.timer.start_response_timer(task.task_instance_id, config.RESPONSE_TIMEOUT_SECONDS)
-        self.logger.log_message("Task waiting for human response.", {"task_instance_id": task.task_instance_id})
+        self.logger.log_message("Task entered R_WAITING_RESPONSE.", {"task_instance_id": task.task_instance_id})
 
     def _handle_accept(self, event: Event) -> None:
-        """Accept a waiting task and dispatch it to Grasshopper."""
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
         if task is None:
             return
@@ -96,11 +97,10 @@ class TaskManager:
         self.timer.cancel_response_timer()
         self._transition(task, RobotTaskState.R_ACCEPTED, event, "Human accepted task.")
         self.gh_dispatcher.dispatch_task(task)
-        self._transition(task, RobotTaskState.R_EXECUTING, event, "Task dispatched to GH.")
+        self._transition(task, RobotTaskState.R_EXECUTING, event, "Task dispatched to Grasshopper.")
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_refuse(self, event: Event) -> None:
-        """Move a waiting task into the pending pool as refused."""
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
         if task is None:
             return
@@ -113,7 +113,6 @@ class TaskManager:
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_defer(self, event: Event) -> None:
-        """Defer a waiting task for later automatic execution."""
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
         if task is None:
             return
@@ -124,41 +123,37 @@ class TaskManager:
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_response_timeout(self, event: Event) -> None:
-        """Move an unanswered waiting task into the pending pool."""
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
         if task is None:
             return
 
-        self._transition(task, RobotTaskState.R_PENDING, event, "Human response timeout.")
+        self._transition(task, RobotTaskState.R_PENDING, event, "Response timeout.")
         task.pending_reason = "timeout"
         self.pending_pool.add(task)
         self.active_task = None
 
     def _handle_defer_timeout(self, event: Event) -> None:
-        """Execute a deferred task after defer timeout."""
         task = self._require_active(event, RobotTaskState.R_DEFER)
         if task is None:
             return
 
         self.gh_dispatcher.dispatch_task(task)
-        self._transition(task, RobotTaskState.R_EXECUTING, event, "Deferred task dispatched to GH.")
+        self._transition(task, RobotTaskState.R_EXECUTING, event, "Deferred task dispatched.")
 
     def _handle_execute_pending(self, event: Event) -> None:
-        """Start a requested pending task if no active task exists."""
         if self.active_task is not None:
-            self._log_invalid(event, "Cannot execute pending task while another task is active.")
+            self._log_invalid(event, "Cannot execute pending task while active task exists.")
             return
         if event.task_instance_id is None or not self.pending_pool.contains(event.task_instance_id):
-            self._log_invalid(event, "Requested pending task was not found.")
+            self._log_invalid(event, "Pending task id not found.")
             return
 
         task = self.pending_pool.remove(event.task_instance_id)
         self.active_task = task
         self.gh_dispatcher.dispatch_task(task)
-        self._transition(task, RobotTaskState.R_EXECUTING, event, "Pending task dispatched to GH.")
+        self._transition(task, RobotTaskState.R_EXECUTING, event, "Pending task dispatched.")
 
     def _handle_pause(self, event: Event) -> None:
-        """Pause the currently executing task."""
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
             return
@@ -168,7 +163,6 @@ class TaskManager:
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_resume(self, event: Event) -> None:
-        """Resume a paused task."""
         task = self._require_active(event, RobotTaskState.R_PAUSED)
         if task is None:
             return
@@ -179,7 +173,6 @@ class TaskManager:
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_restart(self, event: Event) -> None:
-        """Restart an executing or paused task."""
         task = self._require_active_in(event, {RobotTaskState.R_EXECUTING, RobotTaskState.R_PAUSED})
         if task is None:
             return
@@ -190,7 +183,6 @@ class TaskManager:
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_cancel(self, event: Event) -> None:
-        """Cancel an executing, paused, or deferred active task."""
         task = self._require_active_in(
             event,
             {RobotTaskState.R_EXECUTING, RobotTaskState.R_PAUSED, RobotTaskState.R_DEFER},
@@ -208,7 +200,6 @@ class TaskManager:
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_speedup(self, event: Event) -> None:
-        """Increase speed while executing."""
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
             return
@@ -218,7 +209,6 @@ class TaskManager:
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed increased.")
 
     def _handle_slowdown(self, event: Event) -> None:
-        """Decrease speed while executing."""
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
             return
@@ -228,7 +218,6 @@ class TaskManager:
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed decreased.")
 
     def _handle_human_done(self, event: Event) -> None:
-        """Publish human-done while robot execution continues."""
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
             return
@@ -238,7 +227,6 @@ class TaskManager:
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_robot_success(self, event: Event) -> None:
-        """Complete the active task after final robot success feedback."""
         task = self._require_active_in(event, {RobotTaskState.R_EXECUTING, RobotTaskState.R_PAUSED})
         if task is None:
             return
@@ -254,39 +242,19 @@ class TaskManager:
         event: Event,
         message: str | None = None,
     ) -> None:
-        """Apply and log every task-state transition in one place."""
+        """Apply every state change through one logging path."""
         old_state = task.state
         task.state = new_state
         task.updated_at = time.time()
-        self.logger.log_transition(
-            task=task,
-            event=event,
-            old_state=old_state,
-            new_state=new_state,
-            message=message,
-        )
+        self.logger.log_transition(task, event, old_state, new_state, message)
 
-    def _build_task_instance_id(
-        self,
-        round_id: int,
-        task_id: int,
-        piece_id: int,
-    ) -> str:
-        """Create a stable human-readable task instance ID."""
+    def _build_task_instance_id(self, round_id: int, task_id: int, piece_id: int) -> str:
         return f"round_{round_id}_task_{task_id}_piece_{piece_id}"
 
-    def _require_active(
-        self,
-        event: Event,
-        state: RobotTaskState,
-    ) -> RobotTask | None:
+    def _require_active(self, event: Event, state: RobotTaskState) -> RobotTask | None:
         return self._require_active_in(event, {state})
 
-    def _require_active_in(
-        self,
-        event: Event,
-        states: set[RobotTaskState],
-    ) -> RobotTask | None:
+    def _require_active_in(self, event: Event, states: set[RobotTaskState]) -> RobotTask | None:
         task = self.active_task
         if task is None:
             self._log_invalid(event, "No active task.")
@@ -295,11 +263,17 @@ class TaskManager:
             self._log_invalid(event, "Event task id does not match active task.")
             return None
         if task.state not in states:
-            self._log_invalid(event, "Event is invalid for current active task state.")
+            self._log_invalid(event, "Invalid event for current task state.")
             return None
         return task
 
     def _log_invalid(self, event: Event, message: str) -> None:
         state = self.active_task.state if self.active_task is not None else None
-        self.logger.log_message(message, {"event_type": event.event_type.name, "state": state.name if state else None})
+        self.logger.log_message(
+            message,
+            {
+                "event_type": event.event_type.name,
+                "state": state.name if state is not None else None,
+            },
+        )
         self.cli.show_message(self.message_manager.get_invalid_event_message(state, event.event_type))
