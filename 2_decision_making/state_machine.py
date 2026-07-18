@@ -1,0 +1,41 @@
+"""Robot task transition validity table."""
+
+from events import EventType, RobotTaskState
+
+
+class StateMachine:
+    """Answers whether an event is valid and what state follows."""
+
+    _TRANSITIONS = {
+        (RobotTaskState.R_WAITING_RESPONSE, EventType.H_ACCEPT): RobotTaskState.R_ACCEPTED,
+        (RobotTaskState.R_WAITING_RESPONSE, EventType.H_REFUSE): RobotTaskState.R_REFUSED,
+        (RobotTaskState.R_WAITING_RESPONSE, EventType.H_DEFER): RobotTaskState.R_DEFER,
+        (RobotTaskState.R_WAITING_RESPONSE, EventType.RESPONSE_TIMEOUT): RobotTaskState.R_PENDING,
+        (RobotTaskState.R_DEFER, EventType.DEFER_TIMEOUT): RobotTaskState.R_EXECUTING,
+        (RobotTaskState.R_DEFER, EventType.H_CANCEL): RobotTaskState.R_CANCELED,
+        (RobotTaskState.R_EXECUTING, EventType.H_PAUSE): RobotTaskState.R_PAUSED,
+        (RobotTaskState.R_PAUSED, EventType.H_RESUME): RobotTaskState.R_RESUME,
+        (RobotTaskState.R_EXECUTING, EventType.H_RESTART): RobotTaskState.R_REDO,
+        (RobotTaskState.R_PAUSED, EventType.H_RESTART): RobotTaskState.R_REDO,
+        (RobotTaskState.R_EXECUTING, EventType.H_CANCEL): RobotTaskState.R_CANCELED,
+        (RobotTaskState.R_PAUSED, EventType.H_CANCEL): RobotTaskState.R_CANCELED,
+        (RobotTaskState.R_EXECUTING, EventType.H_SPEEDUP): RobotTaskState.R_EXECUTING,
+        (RobotTaskState.R_EXECUTING, EventType.H_SLOWDOWN): RobotTaskState.R_EXECUTING,
+        (RobotTaskState.R_EXECUTING, EventType.H_DONE): RobotTaskState.R_EXECUTING,
+        (RobotTaskState.R_EXECUTING, EventType.ROBOT_SUCCESS): RobotTaskState.R_DONE,
+        (RobotTaskState.R_PAUSED, EventType.ROBOT_SUCCESS): RobotTaskState.R_DONE,
+    }
+
+    def is_valid_transition(
+        self,
+        current_state: RobotTaskState,
+        event_type: EventType,
+    ) -> bool:
+        return (current_state, event_type) in self._TRANSITIONS
+
+    def get_next_state(
+        self,
+        current_state: RobotTaskState,
+        event_type: EventType,
+    ) -> RobotTaskState | None:
+        return self._TRANSITIONS.get((current_state, event_type))

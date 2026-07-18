@@ -1,0 +1,64 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python build and packaging outputs
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and coverage outputs
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Type checker and tooling caches
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Logs and runtime output
+*.log
+hrc_communication_events.log
+logs/
+
+# Local databases or generated data artifacts
+*.sqlite
+*.sqlite3
+*.db
+data/
+
+# Environment and local config secrets
+.env
+.env.*
+*.local
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
