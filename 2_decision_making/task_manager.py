@@ -67,24 +67,25 @@ class TaskManager:
             self.logger.log_message("Ignored trigger because an active task exists.", event.payload)
             return
 
-        task_id = event.payload["task_id"]
+        step_id = event.payload["step_id"]
         piece_id = event.payload["piece_id"]
         round_id = event.payload["round_id"]
         now = time.time()
 
         task = RobotTask(
-            task_instance_id=self._build_task_instance_id(round_id, task_id, piece_id),
-            task_id=task_id,
+            task_instance_id=self._build_task_instance_id(round_id, step_id, piece_id),
+            step_id=step_id,
             piece_id=piece_id,
             round_id=round_id,
             state=RobotTaskState.R_WAITING_RESPONSE,
             speed=config.DEFAULT_SPEED,
+            progress=event.payload.get("progress", 0.0),
             created_at=now,
             updated_at=now,
         )
         self.active_task = task
 
-        message = self.message_manager.get_permission_message(task.task_id)
+        message = self.message_manager.get_permission_message(task.step_id)
         self.cli.show_permission_request(message)
         self.timer.start_response_timer(task.task_instance_id, config.RESPONSE_TIMEOUT_SECONDS)
         self.logger.log_message("Task entered R_WAITING_RESPONSE.", {"task_instance_id": task.task_instance_id})
@@ -248,8 +249,8 @@ class TaskManager:
         task.updated_at = time.time()
         self.logger.log_transition(task, event, old_state, new_state, message)
 
-    def _build_task_instance_id(self, round_id: int, task_id: int, piece_id: int) -> str:
-        return f"round_{round_id}_task_{task_id}_piece_{piece_id}"
+    def _build_task_instance_id(self, round_id: int, step_id: int, piece_id: int) -> str:
+        return f"round_{round_id}_step_{step_id}_piece_{piece_id}"
 
     def _require_active(self, event: Event, state: RobotTaskState) -> RobotTask | None:
         return self._require_active_in(event, {state})

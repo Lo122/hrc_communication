@@ -1,6 +1,8 @@
-"""UDP sender placeholder for Grasshopper communication."""
+"""UDP sender for Grasshopper communication."""
 
+import json
 import socket
+from typing import Any
 
 from config import UDP_HOST, UDP_PORT
 
@@ -10,12 +12,21 @@ class UDPSender:
 
     def __init__(self, host: str = UDP_HOST, port: int = UDP_PORT):
         self.host = host
-        self.port = port
-        # TODO: Reuse/import the existing UDP sender implementation if available.
+        self.port = int(port)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def send(self, message: str) -> None:
-        """Send a message to Grasshopper."""
-        # TODO: Add error handling and lifecycle management for production use.
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.sendto(message.encode("utf-8"), (self.host, self.port))
-        print(f"[udp] {self.host}:{self.port} {message}")
+    def send(self, message: dict[str, Any] | str) -> None:
+        """Send a JSON-compatible message or raw string to Grasshopper."""
+        payload = self._encode_message(message)
+        self.socket.sendto(payload, (self.host, self.port))
+        print(f"[udp] {self.host}:{self.port} {payload.decode('utf-8')}")
+
+    def close(self) -> None:
+        """Close the UDP socket."""
+        self.socket.close()
+
+    @staticmethod
+    def _encode_message(message: dict[str, Any] | str) -> bytes:
+        if isinstance(message, str):
+            return message.encode("utf-8")
+        return json.dumps(message).encode("utf-8")

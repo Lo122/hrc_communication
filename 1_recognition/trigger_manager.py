@@ -1,4 +1,4 @@
-"""Recognition trigger manager skeleton."""
+"""Recognition trigger manager."""
 
 from config import TRIGGER_RULES
 from events import Event, EventType
@@ -16,8 +16,8 @@ class TriggerManager:
         """Evaluate trigger rules against the latest recognition result."""
         events = []
 
-        for task_id, rule in TRIGGER_RULES.items():
-            event = self._check_rule(recognition_result, task_id, rule)
+        for step_id, rule in TRIGGER_RULES.items():
+            event = self._check_rule(recognition_result, step_id, rule)
             if event is not None:
                 events.append(event)
 
@@ -27,15 +27,15 @@ class TriggerManager:
     def _check_rule(
         self,
         recognition_result: RecognitionResult,
-        task_id: int,
+        step_id: int,
         rule: dict,
     ) -> Event | None:
         """Return RECOGNITION_TRIGGER when a configured threshold is crossed."""
-        trigger_key = (recognition_result.round_id, task_id, recognition_result.piece_id)
+        trigger_key = (recognition_result.round_id, step_id, recognition_result.piece_id)
         if trigger_key in self.triggered_keys:
             return None
 
-        if recognition_result.step_id != rule["step_id"]:
+        if recognition_result.step_id != step_id:
             return None
         if recognition_result.confidence < rule["min_confidence"]:
             return None
@@ -55,10 +55,9 @@ class TriggerManager:
                 event_type=EventType.RECOGNITION_TRIGGER,
                 source="recognition",
                 payload={
-                    "task_id": task_id,
+                    "step_id": step_id,
                     "piece_id": recognition_result.piece_id,
                     "round_id": recognition_result.round_id,
-                    "step_id": recognition_result.step_id,
                     "progress": recognition_result.progress,
                 },
             )

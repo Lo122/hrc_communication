@@ -22,11 +22,12 @@ class RobotTask:
     """One concrete occurrence of a robot-assistance task."""
 
     task_instance_id: str
-    task_id: int
+    step_id: int
     piece_id: int
     round_id: int
     state: RobotTaskState
     speed: float
+    progress: float = 0.0
     pending_reason: str | None = None
     created_at: float | None = None
     updated_at: float | None = None

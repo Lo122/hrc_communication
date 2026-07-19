@@ -7,8 +7,8 @@ from events import EventType, RobotTaskState
 class MessageManager:
     """Centralizes CLI text without printing or changing state."""
 
-    def get_permission_message(self, task_id: int) -> str:
-        return PERMISSION_MESSAGES.get(task_id, f"Would you like me to execute task {task_id}?")
+    def get_permission_message(self, step_id: int) -> str:
+        return PERMISSION_MESSAGES.get(step_id, f"Would you like me to execute step {step_id}?")
 
     def get_acknowledgement(self, event_type: EventType) -> str:
         messages = {

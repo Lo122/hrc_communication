@@ -1,0 +1,21 @@
+{
+    "feature_keys": [
+        "pol_angles",
+        "joint_angles",
+        "ratios"
+    ],
+    "normalize": true,
+    "window_size": 160,
+    "stride": 30,
+    "predict_offset": 0,
+    "mode": "seq2one",
+    "model": "LSTM",
+    "input_dim": 22,
+    "hidden_dim": 64,
+    "num_steps": 7,
+    "epochs": 60,
+    "batch_size": 32,
+    "learning_rate": 0.001,
+    "lambda_step": 1.0,
+    "lambda_progress": 1.0
+}

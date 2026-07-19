@@ -1,4 +1,6 @@
-"""Event and transition logging skeleton."""
+﻿"""Event and transition logging skeleton."""
+
+import json
 
 from events import Event
 from models import RobotTask
@@ -9,16 +11,21 @@ class EventLogger:
 
     def __init__(self, file_path: str):
         self.file_path = file_path
-        # TODO: Replace print-based logging with structured file logging.
+        self._file = open(file_path, "a", encoding="utf-8", buffering=1)
+
+    def _write(self, record: dict) -> None:
+        self._file.write(json.dumps(record, default=str, separators=(",", ":")) + "\n")
 
     def log_event(self, event: Event) -> None:
         """Record every incoming event before it is handled."""
-        print(
-            "[event]",
-            event.event_type.name,
-            event.source,
-            event.task_instance_id,
-            event.payload,
+        self._write(
+            {
+                "type": "event",
+                "event_type": event.event_type.name,
+                "source": event.source,
+                "task_instance_id": event.task_instance_id,
+                "payload": event.payload,
+            }
         )
 
     def log_transition(
@@ -30,16 +37,17 @@ class EventLogger:
         message: str | None = None,
     ) -> None:
         """Record a state transition performed by TaskManager."""
-        print(
-            "[transition]",
-            task.task_instance_id,
-            old_state.name,
-            "->",
-            new_state.name,
-            event.event_type.name,
-            message or "",
+        self._write(
+            {
+                "type": "transition",
+                "task_instance_id": task.task_instance_id,
+                "old_state": old_state.name,
+                "new_state": new_state.name,
+                "event_type": event.event_type.name,
+                "message": message,
+            }
         )
 
     def log_message(self, message: str, context: dict | None = None) -> None:
         """Record non-transition integration messages such as ignored events."""
-        print("[log]", message, context or {})
+        self._write({"type": "log", "message": message, "context": context or {}})
