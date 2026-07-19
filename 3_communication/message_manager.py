@@ -10,6 +10,14 @@ class MessageManager:
     def get_permission_message(self, step_id: int) -> str:
         return PERMISSION_MESSAGES.get(step_id, f"Would you like me to execute step {step_id}?")
 
+    def get_execution_message(self, task) -> str:
+        actions = ["pause", "cancel", "restart", "faster", "slower"]
+        message = "Robot task is executing. You can type: " + ", ".join(actions) + "."
+        return message
+
+    def get_free_drive_alignment_message(self) -> str:
+        return "Now you can move the robot to align the piece, let me know when you are done."
+
     def get_acknowledgement(self, event_type: EventType) -> str:
         messages = {
             EventType.H_ACCEPT: "Robot task accepted.",

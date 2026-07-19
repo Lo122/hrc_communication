@@ -40,6 +40,7 @@ ROS_TOPICS = {
     "speed": "/Robot/localSpeed", #float64
     "human_done": "/Human/taskSuccess", #success
     "robot_success": "/Robot/status/physical", #success
+    "free_drive": "/Robot/teachMode",
 }
 
 GH_STEP_MESSAGES = {
@@ -56,6 +57,9 @@ GH_STEP_MESSAGES = {
 
 UDP_HOST = "127.0.0.1"
 UDP_PORT = 5006
+
+EVENT_TRANSPORT_HOST = "127.0.0.1"
+EVENT_TRANSPORT_PORT = 5010
 
 LOG_FILE_PATH = "hrc_communication_events.log"
 

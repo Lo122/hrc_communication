@@ -43,6 +43,8 @@ class RecognitionManager:
         feature_keys: list[str] | None = None,
         device: str | None = None,
         lstm_hrc_root: str | Path | None = None,
+        show_video: bool = False,
+        display_window_name: str = "HRC Recognition",
     ):
         self.step_stabilizer = step_stabilizer
         self.model_dir = Path(model_dir)
@@ -54,6 +56,8 @@ class RecognitionManager:
         self.feature_keys = feature_keys or list(self.model_config["feature_keys"])
         self.device_name = device
         self.lstm_hrc_root = Path(lstm_hrc_root) if lstm_hrc_root is not None else self._find_lstm_hrc_root()
+        self.show_video = show_video
+        self.display_window_name = display_window_name
 
         self.window_size: int | None = None
         self.num_steps: int | None = None
@@ -125,6 +129,7 @@ class RecognitionManager:
 
         self.buffer.append(feature_vector)
         if len(self.buffer) < self.window_size:
+            self._show_frame(frame, result)
             return None
 
         x = np.stack(self.buffer).astype(np.float32)
@@ -142,6 +147,7 @@ class RecognitionManager:
         self.last_raw_step_id = raw_step_id
 
         if stable_step_id is None:
+            self._show_frame(frame, result, raw_step_id=raw_step_id, progress=progress, confidence=confidence)
             return None
 
         result = RecognitionResult(
@@ -152,6 +158,9 @@ class RecognitionManager:
             confidence=confidence,
             timestamp=time.time() if timestamp is None else float(timestamp),
         )
+        print(f"Raw Step: {raw_step_id} | Stable Step: {stable_step_id} | Progress: {progress}")
+        self._show_frame(frame, result, raw_step_id=raw_step_id, stable_step_id=stable_step_id, progress=progress, confidence=confidence)
+
         self._record_step_and_advance_round(stable_step_id)
         return result
 
@@ -165,6 +174,47 @@ class RecognitionManager:
         if self._capture is not None:
             self._capture.release()
             self._capture = None
+        if self.show_video and self._cv2 is not None:
+            self._cv2.destroyWindow(self.display_window_name)
+
+    def _show_frame(
+        self,
+        frame,
+        yolo_result=None,
+        *,
+        raw_step_id: int | None = None,
+        stable_step_id: int | None = None,
+        progress: float | None = None,
+        confidence: float | None = None,
+    ) -> None:
+        if not self.show_video:
+            return
+
+        display_frame = yolo_result.plot() if yolo_result is not None else frame
+        label_parts = []
+        if raw_step_id is not None:
+            label_parts.append(f"raw={raw_step_id}")
+        if stable_step_id is not None:
+            label_parts.append(f"stable={stable_step_id}")
+        if progress is not None:
+            label_parts.append(f"progress={progress:.3f}")
+        if confidence is not None:
+            label_parts.append(f"conf={confidence:.3f}")
+        if label_parts:
+            self._cv2.putText(
+                display_frame,
+                " | ".join(label_parts),
+                (20, 40),
+                self._cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 0),
+                2,
+                self._cv2.LINE_AA,
+            )
+
+        self._cv2.imshow(self.display_window_name, display_frame)
+        if self._cv2.waitKey(1) & 0xFF == ord("q"):
+            raise KeyboardInterrupt
 
     def _result_from_passthrough(self, input_data: dict) -> RecognitionResult:
         step_id = input_data.get("step_id", 0)
@@ -209,7 +259,6 @@ class RecognitionManager:
 
         try:
             import torch
-            import torch.nn as nn
             from ultralytics import YOLO
         except ImportError as exc:
             raise RuntimeError(
@@ -226,19 +275,11 @@ class RecognitionManager:
         self.num_steps = int(self.model_config["num_steps"])
         self.buffer = deque(maxlen=self.window_size)
 
-        class AssistLSTM(nn.Module):
-            def __init__(self, input_dim, hidden_dim, num_steps):
-                super().__init__()
-                self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, batch_first=True)
-                self.shared = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU())
-                self.step_head = nn.Linear(hidden_dim, num_steps)
-                self.progress_head = nn.Linear(hidden_dim, 1)
-
-            def forward(self, x):
-                _, (h_n, _) = self.lstm(x)
-                feat = self.shared(h_n[-1])
-                return self.step_head(feat), self.progress_head(feat).squeeze(-1)
-
+        #region: HERE WE INSTANTIATE THE TRAINED MODEL
+        model_dir = str(self.model_dir)
+        if model_dir not in sys.path:
+            sys.path.insert(0, model_dir)
+        from LSTM_model_train import AssistLSTM
         self._model = AssistLSTM(
             input_dim=int(self.model_config["input_dim"]),
             hidden_dim=int(self.model_config["hidden_dim"]),
@@ -246,6 +287,7 @@ class RecognitionManager:
         ).to(self.device)
         self._model.load_state_dict(torch.load(self.model_path, map_location=self.device))
         self._model.eval()
+        #endregion
 
         self._yolo_model = YOLO(self.yolo_model_path)
         self._norm_real_time = NormRealTime(str(self.norm_path), self.feature_keys)
@@ -296,16 +338,9 @@ class RecognitionManager:
 
     def _find_model_path(self) -> Path:
         model_path = self.model_dir / "best_model.pth"
-        if model_path.exists():
-            return model_path
-
-        candidates = sorted(self.model_dir.glob("*.pth"))
-        if len(candidates) == 1:
-            return candidates[0]
-
-        raise FileNotFoundError(
-            f"Expected best_model.pth or exactly one .pth file in {self.model_dir}."
-        )
+        if not model_path.exists():
+            raise FileNotFoundError(f"Expected trained model at {model_path}.")
+        return model_path
 
     def _find_norm_path(self) -> Path:
         candidates = sorted(self.model_dir.glob("*.npz"))

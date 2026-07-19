@@ -97,11 +97,15 @@ class ROSCommunication:
     def publish_human_done(self) -> None:
         self._publish("human_done", {"data": "success"})
 
+    def publish_free_drive(self, enabled: bool) -> None:
+        self._publish("free_drive", {"data": bool(enabled)})
+
     def _init_publishers(self) -> None:
         self._publishers = {
             "control": self._advertise(config.ROS_TOPICS["pause"], "std_msgs/String"),
             "speed": self._advertise(config.ROS_TOPICS["speed"], "std_msgs/Float64"),
             "human_done": self._advertise(config.ROS_TOPICS["human_done"], "std_msgs/String"),
+            "free_drive": self._advertise(config.ROS_TOPICS["free_drive"], "std_msgs/Bool"),
         }
 
     def _init_subscribers(self) -> None:

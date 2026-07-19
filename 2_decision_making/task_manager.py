@@ -100,6 +100,7 @@ class TaskManager:
         self.gh_dispatcher.dispatch_task(task)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Task dispatched to Grasshopper.")
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self._show_execution_dialogue(task)
 
     def _handle_refuse(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
@@ -140,6 +141,7 @@ class TaskManager:
 
         self.gh_dispatcher.dispatch_task(task)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Deferred task dispatched.")
+        self._show_execution_dialogue(task)
 
     def _handle_execute_pending(self, event: Event) -> None:
         if self.active_task is not None:
@@ -153,6 +155,7 @@ class TaskManager:
         self.active_task = task
         self.gh_dispatcher.dispatch_task(task)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Pending task dispatched.")
+        self._show_execution_dialogue(task)
 
     def _handle_pause(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
@@ -172,6 +175,7 @@ class TaskManager:
         self._transition(task, RobotTaskState.R_RESUME, event, "ROS resume published.")
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Task executing after resume.")
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self._show_execution_dialogue(task)
 
     def _handle_restart(self, event: Event) -> None:
         task = self._require_active_in(event, {RobotTaskState.R_EXECUTING, RobotTaskState.R_PAUSED})
@@ -182,6 +186,7 @@ class TaskManager:
         self._transition(task, RobotTaskState.R_REDO, event, "ROS restart published.")
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Task executing after restart.")
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self._show_execution_dialogue(task)
 
     def _handle_cancel(self, event: Event) -> None:
         task = self._require_active_in(
@@ -190,6 +195,10 @@ class TaskManager:
         )
         if task is None:
             return
+
+        if task.free_drive_active:
+            self.ros.publish_free_drive(False)
+            task.free_drive_active = False
 
         if task.state == RobotTaskState.R_DEFER:
             self.timer.cancel_defer_timer()
@@ -223,6 +232,14 @@ class TaskManager:
         if task is None:
             return
 
+        if task.free_drive_active:
+            self.ros.publish_free_drive(False)
+            task.free_drive_active = False
+            self._transition(task, RobotTaskState.R_DONE, event, "Human alignment completed; free-drive disabled.")
+            self.active_task = None
+            self.cli.show_message(self.message_manager.get_acknowledgement(EventType.ROBOT_SUCCESS))
+            return
+
         self.ros.publish_human_done()
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Human-done published.")
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
@@ -232,9 +249,22 @@ class TaskManager:
         if task is None:
             return
 
+        if task.step_id == config.STEP_LIFT_PANEL:
+            self.ros.publish_free_drive(True)
+            task.free_drive_active = True
+            self.logger.log_message(
+                "Robot success received; free-drive enabled for human alignment.",
+                {"task_instance_id": task.task_instance_id},
+            )
+            self.cli.show_message(self.message_manager.get_free_drive_alignment_message())
+            return
+
         self._transition(task, RobotTaskState.R_DONE, event, "Robot success received.")
         self.active_task = None
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+
+    def _show_execution_dialogue(self, task: RobotTask) -> None:
+        self.cli.show_message(self.message_manager.get_execution_message(task))
 
     def _transition(
         self,

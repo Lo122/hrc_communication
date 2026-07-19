@@ -29,5 +29,6 @@ class RobotTask:
     speed: float
     progress: float = 0.0
     pending_reason: str | None = None
+    free_drive_active: bool = False
     created_at: float | None = None
     updated_at: float | None = None

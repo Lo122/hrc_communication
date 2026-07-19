@@ -93,5 +93,5 @@ class StepIdStabilizer:
             self.pending_count = 1
 
 
-# Backward-compatible name used by main.py and older tests.
+# Backward-compatible name used by older runtime code and tests.
 StepStabilizer = StepIdStabilizer
