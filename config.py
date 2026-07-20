@@ -1,16 +1,19 @@
-"""Configuration values and mappings for the HRC communication system."""
+﻿"""Configuration values and mappings for the HRC communication system."""
 
-RESPONSE_TIMEOUT_SECONDS = 5.0
+RESPONSE_TIMEOUT_SECONDS = 20.0
 DEFER_SECONDS = 5.0
 
 DEFAULT_SPEED = 0.5
 SPEED_STEP = 0.1
+SPEED_SCALE = 1.5
 MIN_SPEED = 0.1
 MAX_SPEED = 1.0
 
 STEP_LIFT_PANEL = 0
 STEP_BRING_JOINT = 2
 STEP_BRING_NEXT_PANEL = 6
+
+
 
 TRIGGER_RULES = {
     STEP_LIFT_PANEL: {

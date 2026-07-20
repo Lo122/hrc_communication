@@ -53,6 +53,7 @@ class EventType(Enum):
     RESPONSE_TIMEOUT = auto()
     DEFER_TIMEOUT = auto()
 
+    ROBOT_RUNNING = auto()
     ROBOT_SUCCESS = auto()
 
 

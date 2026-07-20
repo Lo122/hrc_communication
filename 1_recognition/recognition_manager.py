@@ -1,4 +1,4 @@
-"""Recognition pipeline integration."""
+﻿"""Recognition pipeline integration."""
 
 from __future__ import annotations
 
@@ -111,6 +111,9 @@ class RecognitionManager:
         timestamp: float | None = None,
     ) -> RecognitionResult | None:
         """Run YOLO pose + LSTM inference for one frame."""
+        #reduce the resolution of the frame to make recognition faster.
+        frame = cv2.resize(frame, (640, 480))
+        
         self._ensure_realtime_pipeline()
 
         torch = self._torch

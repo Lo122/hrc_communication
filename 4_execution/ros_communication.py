@@ -137,15 +137,16 @@ class ROSCommunication:
         return self.client is not None and self.client.is_connected and bool(self._publishers)
 
     def _on_robot_status_message(self, message: dict) -> None:
-        """Create ROBOT_SUCCESS event when /Robot/status/physical reports success."""
+        """Create robot status events from /Robot/status/physical."""
         status = message.get("data") if isinstance(message, dict) else message
-        if status == "success":
-            self._on_robot_success_message(message)
+        if status == "running":
+            self._emit_robot_status_event(EventType.ROBOT_RUNNING, message)
+        elif status == "success":
+            self._emit_robot_status_event(EventType.ROBOT_SUCCESS, message)
 
-    def _on_robot_success_message(self, message) -> None:
-        """Create ROBOT_SUCCESS event from ROS callback output."""
+    def _emit_robot_status_event(self, event_type: EventType, message) -> None:
         event = Event(
-            event_type=EventType.ROBOT_SUCCESS,
+            event_type=event_type,
             source="ros",
             payload={"message": message},
         )

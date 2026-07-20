@@ -36,6 +36,7 @@ class TaskManager:
         """Route an event to the corresponding handler."""
         self.logger.log_event(event)
 
+
         handlers = {
             EventType.RECOGNITION_TRIGGER: self._handle_recognition_trigger,
             EventType.H_ACCEPT: self._handle_accept,
@@ -51,6 +52,7 @@ class TaskManager:
             EventType.H_SPEEDUP: self._handle_speedup,
             EventType.H_SLOWDOWN: self._handle_slowdown,
             EventType.H_DONE: self._handle_human_done,
+            EventType.ROBOT_RUNNING: self._handle_robot_running,
             EventType.ROBOT_SUCCESS: self._handle_robot_success,
         }
 
@@ -98,9 +100,7 @@ class TaskManager:
         self.timer.cancel_response_timer()
         self._transition(task, RobotTaskState.R_ACCEPTED, event, "Human accepted task.")
         self.gh_dispatcher.dispatch_task(task)
-        self._transition(task, RobotTaskState.R_EXECUTING, event, "Task dispatched to Grasshopper.")
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
-        self._show_execution_dialogue(task)
 
     def _handle_refuse(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
@@ -140,8 +140,7 @@ class TaskManager:
             return
 
         self.gh_dispatcher.dispatch_task(task)
-        self._transition(task, RobotTaskState.R_EXECUTING, event, "Deferred task dispatched.")
-        self._show_execution_dialogue(task)
+        self._transition(task, RobotTaskState.R_ACCEPTED, event, "Deferred task dispatched; waiting for robot running status.")
 
     def _handle_execute_pending(self, event: Event) -> None:
         if self.active_task is not None:
@@ -154,8 +153,7 @@ class TaskManager:
         task = self.pending_pool.remove(event.task_instance_id)
         self.active_task = task
         self.gh_dispatcher.dispatch_task(task)
-        self._transition(task, RobotTaskState.R_EXECUTING, event, "Pending task dispatched.")
-        self._show_execution_dialogue(task)
+        self._transition(task, RobotTaskState.R_ACCEPTED, event, "Pending task dispatched; waiting for robot running status.")
 
     def _handle_pause(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
@@ -172,10 +170,9 @@ class TaskManager:
             return
 
         self.ros.publish_resume()
-        self._transition(task, RobotTaskState.R_RESUME, event, "ROS resume published.")
-        self._transition(task, RobotTaskState.R_EXECUTING, event, "Task executing after resume.")
+        task.robot_running_received = False
+        self._transition(task, RobotTaskState.R_RESUME, event, "ROS resume published; waiting for robot running status.")
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
-        self._show_execution_dialogue(task)
 
     def _handle_restart(self, event: Event) -> None:
         task = self._require_active_in(event, {RobotTaskState.R_EXECUTING, RobotTaskState.R_PAUSED})
@@ -183,15 +180,15 @@ class TaskManager:
             return
 
         self.ros.publish_restart()
-        self._transition(task, RobotTaskState.R_REDO, event, "ROS restart published.")
-        self._transition(task, RobotTaskState.R_EXECUTING, event, "Task executing after restart.")
+        task.robot_running_received = False
+        task.robot_success_received = False
+        self._transition(task, RobotTaskState.R_REDO, event, "ROS restart published; waiting for robot running status.")
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
-        self._show_execution_dialogue(task)
 
     def _handle_cancel(self, event: Event) -> None:
         task = self._require_active_in(
             event,
-            {RobotTaskState.R_EXECUTING, RobotTaskState.R_PAUSED, RobotTaskState.R_DEFER},
+            {RobotTaskState.R_ACCEPTED, RobotTaskState.R_EXECUTING, RobotTaskState.R_PAUSED, RobotTaskState.R_DEFER, RobotTaskState.R_RESUME, RobotTaskState.R_REDO},
         )
         if task is None:
             return
@@ -213,7 +210,7 @@ class TaskManager:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
             return
-
+#CHANGE SPEED WITH SCALE
         task.speed = min(task.speed + config.SPEED_STEP, config.MAX_SPEED)
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed increased.")
@@ -244,10 +241,38 @@ class TaskManager:
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Human-done published.")
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
+    def _handle_robot_running(self, event: Event) -> None:
+        task = self._require_active_in(
+            event,
+            {RobotTaskState.R_ACCEPTED, RobotTaskState.R_RESUME, RobotTaskState.R_REDO, RobotTaskState.R_EXECUTING},
+        )
+        if task is None:
+            return
+
+        if task.robot_running_received:
+            self.logger.log_message(
+                "Ignored repeated robot running status.",
+                {"task_instance_id": task.task_instance_id},
+            )
+            return
+
+        task.robot_running_received = True
+        if task.state != RobotTaskState.R_EXECUTING:
+            self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot physical status running.")
+        self._show_execution_dialogue(task)
+
     def _handle_robot_success(self, event: Event) -> None:
         task = self._require_active_in(event, {RobotTaskState.R_EXECUTING, RobotTaskState.R_PAUSED})
         if task is None:
             return
+
+        if task.robot_success_received:
+            self.logger.log_message(
+                "Ignored repeated robot success.",
+                {"task_instance_id": task.task_instance_id},
+            )
+            return
+        task.robot_success_received = True
 
         if task.step_id == config.STEP_LIFT_PANEL:
             self.ros.publish_free_drive(True)

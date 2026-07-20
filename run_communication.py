@@ -13,6 +13,7 @@ for layer in ["0_core", "1_recognition", "2_decision_making", "3_communication",
 
 import config
 from event_transport import UDPEventReceiver
+from events import Event, EventType
 from communication_runtime import build_system
 
 
@@ -20,9 +21,14 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run communication and receive recognition events.")
     parser.add_argument("--host", default=config.EVENT_TRANSPORT_HOST, help="Host to bind for recognition events.")
     parser.add_argument("--port", type=int, default=config.EVENT_TRANSPORT_PORT, help="Port to bind for recognition events.")
+    parser.add_argument("--debug-trigger", action="store_true", help="Inject one fake recognition trigger for communication debugging.")
+    parser.add_argument("--debug-step-id", type=int, default=config.STEP_LIFT_PANEL, help="Step id for --debug-trigger.")
+    parser.add_argument("--debug-progress", type=float, default=1.0, help="Progress value for --debug-trigger.")
+    parser.add_argument("--debug-round-id", type=int, default=0, help="Round id for --debug-trigger.")
+    parser.add_argument("--debug-piece-id", type=int, default=0, help="Piece id for --debug-trigger.")
     return parser.parse_args()
 
-
+#python run_communication.py --debug-trigger
 if __name__ == "__main__":
     args = _parse_args()
     receiver = UDPEventReceiver(args.host, args.port)
@@ -31,6 +37,22 @@ if __name__ == "__main__":
     system.start_cli_thread()
 
     print(f"Communication running. Listening for recognition events on {args.host}:{args.port}")
+    print("HRC communication started. Waiting for recognition trigger...")
+
+    if args.debug_trigger:
+        system.event_queue.put(
+            Event(
+                event_type=EventType.RECOGNITION_TRIGGER,
+                source="debug_recognition",
+                payload={
+                    "step_id": args.debug_step_id,
+                    "piece_id": args.debug_piece_id,
+                    "round_id": args.debug_round_id,
+                    "progress": args.debug_progress,
+                },
+            )
+        )
+        print(f"Injected debug recognition trigger for step {args.debug_step_id}.")
 
     try:
         while system.system_running:

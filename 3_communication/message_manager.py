@@ -16,7 +16,7 @@ class MessageManager:
         return message
 
     def get_free_drive_alignment_message(self) -> str:
-        return "Now you can move the robot to align the piece, let me know when you are done."
+        return "Robot task finished. Now free drive mode is on, and you can move the robot to align the piece, let me know when you are done."
 
     def get_acknowledgement(self, event_type: EventType) -> str:
         messages = {
