@@ -1,4 +1,4 @@
-﻿"""Recognition pipeline integration."""
+"""Recognition pipeline integration."""
 
 from __future__ import annotations
 
@@ -112,7 +112,13 @@ class RecognitionManager:
     ) -> RecognitionResult | None:
         """Run YOLO pose + LSTM inference for one frame."""
         #reduce the resolution of the frame to make recognition faster.
-        frame = cv2.resize(frame, (640, 480))
+        if self._cv2 is None:
+            try:
+                import cv2
+            except ImportError as exc:
+                raise RuntimeError("Realtime recognition requires opencv-python.") from exc
+            self._cv2 = cv2
+        frame = self._cv2.resize(frame, (640, 480))
         
         self._ensure_realtime_pipeline()
 
@@ -178,7 +184,10 @@ class RecognitionManager:
             self._capture.release()
             self._capture = None
         if self.show_video and self._cv2 is not None:
-            self._cv2.destroyWindow(self.display_window_name)
+            try:
+                self._cv2.destroyWindow(self.display_window_name)
+            except self._cv2.error:
+                pass
 
     def _show_frame(
         self,
@@ -193,29 +202,7 @@ class RecognitionManager:
         if not self.show_video:
             return
 
-        display_frame = yolo_result.plot() if yolo_result is not None else frame
-        label_parts = []
-        if raw_step_id is not None:
-            label_parts.append(f"raw={raw_step_id}")
-        if stable_step_id is not None:
-            label_parts.append(f"stable={stable_step_id}")
-        if progress is not None:
-            label_parts.append(f"progress={progress:.3f}")
-        if confidence is not None:
-            label_parts.append(f"conf={confidence:.3f}")
-        if label_parts:
-            self._cv2.putText(
-                display_frame,
-                " | ".join(label_parts),
-                (20, 40),
-                self._cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (0, 255, 0),
-                2,
-                self._cv2.LINE_AA,
-            )
-
-        self._cv2.imshow(self.display_window_name, display_frame)
+        self._cv2.imshow(self.display_window_name, frame)
         if self._cv2.waitKey(1) & 0xFF == ord("q"):
             raise KeyboardInterrupt
 
