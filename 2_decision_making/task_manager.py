@@ -210,8 +210,10 @@ class TaskManager:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
             return
-#CHANGE SPEED WITH SCALE
+
+        # Speed Control Formula: increase speed by SPEED_STEP, but do not exceed MAX_SPEED
         task.speed = min(task.speed + config.SPEED_STEP, config.MAX_SPEED)
+        
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed increased.")
 
@@ -219,8 +221,10 @@ class TaskManager:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
             return
-
+        
+        # Speed Control Formula: decrease speed by SPEED_STEP, but do not go below MIN_SPEED
         task.speed = max(task.speed - config.SPEED_STEP, config.MIN_SPEED)
+        
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed decreased.")
 
