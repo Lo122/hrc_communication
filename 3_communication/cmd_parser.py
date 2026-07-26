@@ -25,6 +25,8 @@ class CommandParser:
         "speed up": EventType.H_SPEEDUP,
         "slower": EventType.H_SLOWDOWN,
         "slow down": EventType.H_SLOWDOWN,
+        "free drive": EventType.H_FREE_GO,
+        "free go": EventType.H_FREE_GO,
         "done": EventType.H_DONE,
         "finished": EventType.H_DONE,
     }

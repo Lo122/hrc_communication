@@ -79,11 +79,44 @@ class ROSCommunication:
         """Connect ROS feedback to the shared event queue."""
         self.event_callback = callback
 
-    def publish_pause(self) -> None:
-        self._publish_control("pause")
+    # def publish_pause(self) -> None:
+    #     self._publish_control("pause")
+    def publish_pause(self)->None:
+        task = self._require_active(event, RobotTaskState.R_EXECUTING)
+        if task is None:
+            return
+        # self._publish("global_speed",{"data":config.MIN_SPEED})
+        self.ros.publish_speed(config.MIN_SPEED)
+        self._transition(
+            task,
+            RobotTaskState.R_PAUSED,
+            event,
+            f"Robot paused; previous speed preserved: {task.speed}.",
+        )
+        self.cli.show_message(
+            self.message_manager.get_acknowledgement(event.event_type)
+        )
 
-    def publish_resume(self) -> None:
-        self._publish_control("resume")
+
+    # def publish_resume(self) -> None:
+    #     self._publish_control("resume")
+    def publish_resume(self)->None:
+        task = self._require_active(event, RobotTaskState.R_PAUSED)
+        if task is None:
+            return
+
+        self.ros.publish_speed(task.speed)
+
+        task.robot_running_received = False
+        self._transition(
+            task,
+            RobotTaskState.R_RESUME,
+            event,
+            f"Robot resumed at previous speed: {task.speed}.",
+        )
+        self.cli.show_message(
+            self.message_manager.get_acknowledgement(event.event_type)
+        )
 
     def publish_restart(self) -> None:
         print("[ros] restart not implemented yet")
@@ -92,7 +125,7 @@ class ROSCommunication:
         self._publish_control("stop")
 
     def publish_speed(self, speed: float) -> None:
-        self._publish("speed", {"data": float(speed)})
+        self._publish("global_speed", {"data": float(speed)})
 
     def publish_human_done(self) -> None:
         self._publish("human_done", {"data": "success"})

@@ -3,11 +3,13 @@
 RESPONSE_TIMEOUT_SECONDS = 20.0
 DEFER_SECONDS = 5.0
 
-DEFAULT_SPEED = 1
-SPEED_STEP = 0.5
-SPEED_SCALE = 1.5
-MIN_SPEED = 0.00
+DEFAULT_SPEED = 0.2
+SPEED_STEP = 0.1
+
+MIN_SPEED = 0.0000001
 MAX_SPEED = 0.75
+
+LAST_SPEED = DEFAULT_SPEED
 
 STEP_LIFT_PANEL = 0
 STEP_BRING_JOINT = 2
@@ -40,7 +42,8 @@ ROS_TOPICS = {
     "resume": "/Robot/control", #resume
     "restart": "/Robot/control", #not yet
     "cancel": "/Robot/control",#stop
-    "speed": "/Robot/globalSpeed", #float64
+    "global_speed": "/Robot/globalSpeed", #float64
+    "local_speed":"/Robot/localSpeed",
     "human_done": "/Human/taskSuccess", #success
     "robot_success": "/Robot/status/physical", #success
     "free_drive": "/Robot/teachMode",

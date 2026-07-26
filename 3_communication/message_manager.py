@@ -15,8 +15,9 @@ class MessageManager:
         message = "Robot task is executing. You can type: " + ", ".join(actions) + "."
         return message
 
-    def get_free_drive_alignment_message(self) -> str:
-        return "Robot task finished. Now free drive mode is on, and you can move the robot to align the piece, let me know when you are done."
+    def ask_permission_for_free_drive(self) -> str:
+        return 'Robot task finished. Enter free drive mode for manual adjustment? Type "free drive" to confirm or "no" to finish.'
+
 
     def get_acknowledgement(self, event_type: EventType) -> str:
         messages = {
@@ -29,6 +30,7 @@ class MessageManager:
             EventType.H_CANCEL: "The robot task has been canceled.",
             EventType.H_DONE: "Human-done signal sent.",
             EventType.ROBOT_SUCCESS: "Robot task completed.",
+            EventType.H_FREE_GO: "Now free drive mode is on, and you can move the robot to align the piece; let me know when you are done.",
         }
         return messages.get(event_type, "Command processed.")
 

@@ -25,7 +25,8 @@ class RobotTaskState(Enum):
     R_PAUSED = auto()
     R_RESUME = auto()
     R_REDO = auto()
-
+    R_WAITING_FREE_DRIVE = auto()
+    R_FREE_DRIVE = auto()
     R_CANCELED = auto()
     R_DONE = auto()
 
@@ -39,6 +40,8 @@ class EventType(Enum):
     H_REFUSE = auto()
     H_DEFER = auto()
     H_EXECUTE_PENDING_TASK = auto()
+
+    H_FREE_GO = auto()
 
     H_CANCEL = auto()
     H_PAUSE = auto()

@@ -31,6 +31,11 @@ class StateMachine:
         (RobotTaskState.R_EXECUTING, EventType.H_DONE): RobotTaskState.R_EXECUTING,
         (RobotTaskState.R_EXECUTING, EventType.ROBOT_SUCCESS): RobotTaskState.R_DONE,
         (RobotTaskState.R_PAUSED, EventType.ROBOT_SUCCESS): RobotTaskState.R_DONE,
+        (RobotTaskState.R_WAITING_FREE_DRIVE, EventType.H_FREE_GO): RobotTaskState.R_FREE_DRIVE,
+        (RobotTaskState.R_WAITING_FREE_DRIVE, EventType.H_REFUSE): RobotTaskState.R_DONE,
+        (RobotTaskState.R_WAITING_FREE_DRIVE, EventType.H_CANCEL): RobotTaskState.R_CANCELED,
+        (RobotTaskState.R_FREE_DRIVE, EventType.H_DONE): RobotTaskState.R_DONE,
+        (RobotTaskState.R_FREE_DRIVE, EventType.H_CANCEL): RobotTaskState.R_CANCELED,
     }
 
     def is_valid_transition(

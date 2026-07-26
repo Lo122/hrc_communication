@@ -32,6 +32,10 @@ class TaskManager:
 
         self.active_task: RobotTask | None = None
 
+        self.ros.publish_speed(config.DEFAULT_SPEED)
+        print({"Initialize the speed to:": config.DEFAULT_SPEED})
+
+
     def handle_event(self, event: Event) -> None:
         """Route an event to the corresponding handler."""
         self.logger.log_event(event)
@@ -51,6 +55,7 @@ class TaskManager:
             EventType.H_CANCEL: self._handle_cancel,
             EventType.H_SPEEDUP: self._handle_speedup,
             EventType.H_SLOWDOWN: self._handle_slowdown,
+            EventType.H_FREE_GO: self._handle_free_go,
             EventType.H_DONE: self._handle_human_done,
             EventType.ROBOT_RUNNING: self._handle_robot_running,
             EventType.ROBOT_SUCCESS: self._handle_robot_success,
@@ -103,8 +108,25 @@ class TaskManager:
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_refuse(self, event: Event) -> None:
-        task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
+        task = self._require_active_in(
+            event,
+            {
+                RobotTaskState.R_WAITING_RESPONSE,
+                RobotTaskState.R_WAITING_FREE_DRIVE,
+            },
+        )
         if task is None:
+            return
+
+        if task.state == RobotTaskState.R_WAITING_FREE_DRIVE:
+            self._transition(
+                task,
+                RobotTaskState.R_DONE,
+                event,
+                "Human declined free-drive mode; task completed.",
+            )
+            self.active_task = None
+            self.cli.show_message(self.message_manager.get_acknowledgement(EventType.ROBOT_SUCCESS))
             return
 
         self.timer.cancel_response_timer()
@@ -193,7 +215,7 @@ class TaskManager:
         if task is None:
             return
 
-        if task.free_drive_active:
+        if task.state == RobotTaskState.R_FREE_DRIVE:
             self.ros.publish_free_drive(False)
             task.free_drive_active = False
 
@@ -228,12 +250,30 @@ class TaskManager:
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed decreased.")
 
-    def _handle_human_done(self, event: Event) -> None:
-        task = self._require_active(event, RobotTaskState.R_EXECUTING)
+    def _handle_free_go(self, event: Event) -> None:
+        task = self._require_active(event, RobotTaskState.R_WAITING_FREE_DRIVE)
         if task is None:
             return
 
-        if task.free_drive_active:
+        self.ros.publish_free_drive(True)
+        task.free_drive_active = True
+        self._transition(
+            task,
+            RobotTaskState.R_FREE_DRIVE,
+            event,
+            "Human approved free-drive mode; free-drive enabled.",
+        )
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+
+    def _handle_human_done(self, event: Event) -> None:
+        task = self._require_active_in(
+            event,
+            {RobotTaskState.R_EXECUTING, RobotTaskState.R_FREE_DRIVE},
+        )
+        if task is None:
+            return
+
+        if task.state == RobotTaskState.R_FREE_DRIVE:
             self.ros.publish_free_drive(False)
             task.free_drive_active = False
             self._transition(task, RobotTaskState.R_DONE, event, "Human alignment completed; free-drive disabled.")
@@ -254,6 +294,9 @@ class TaskManager:
             return
 
         if task.robot_running_received:
+            #send default speed from config.py
+            # self.ros.publish_speed(config.DEFAULT_SPEED)
+            # print({"Initialize the speed to:": config.DEFAULT_SPEED})
             self.logger.log_message(
                 "Ignored repeated robot running status.",
                 {"task_instance_id": task.task_instance_id},
@@ -279,13 +322,17 @@ class TaskManager:
         task.robot_success_received = True
 
         if task.step_id == config.STEP_LIFT_PANEL:
-            self.ros.publish_free_drive(True)
-            task.free_drive_active = True
+            self._transition(
+                task,
+                RobotTaskState.R_WAITING_FREE_DRIVE,
+                event,
+                "Robot success received; waiting for free-drive permission.",
+            )
             self.logger.log_message(
-                "Robot success received; free-drive enabled for human alignment.",
+                "Asked human for permission to enable free-drive mode.",
                 {"task_instance_id": task.task_instance_id},
             )
-            self.cli.show_message(self.message_manager.get_free_drive_alignment_message())
+            self.cli.show_message(self.message_manager.ask_permission_for_free_drive())
             return
 
         self._transition(task, RobotTaskState.R_DONE, event, "Robot success received.")
