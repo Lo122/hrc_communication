@@ -10,7 +10,6 @@ try:
 except ImportError:  # pragma: no cover - depends on deployment environment
     roslibpy = None
 
-
 class ROSCommunication:
     """Publishes runtime robot commands and converts robot feedback into events."""
 
@@ -27,6 +26,8 @@ class ROSCommunication:
         self.client = None
         self._publishers = {}
         self._subscriptions = []
+        self.latest_joint_positions = None
+        self.latest_gripper_open = None
 
         if auto_connect:
             self.connect()
@@ -129,6 +130,22 @@ class ROSCommunication:
         topic.subscribe(self._on_robot_status_message)
         self._subscriptions.append(topic)
 
+        position_topic = roslibpy.Topic(
+            self.client,
+            config.ROS_TOPICS["robot_position"],
+            "trajectory_msgs/JointTrajectoryPoint",
+        )
+        position_topic.subscribe(self._on_robot_position_message)
+        self._subscriptions.append(position_topic)
+
+        gripper_topic = roslibpy.Topic(
+            self.client,
+            config.ROS_TOPICS["gripper"],
+            "std_msgs/Bool",
+        )
+        gripper_topic.subscribe(self._on_gripper_message)
+        self._subscriptions.append(gripper_topic)
+
     def _advertise(self, topic_name: str, message_type: str):
         topic = roslibpy.Topic(self.client, topic_name, message_type)
         topic.advertise()
@@ -148,6 +165,29 @@ class ROSCommunication:
     def _is_ready(self) -> bool:
         return self.client is not None and self.client.is_connected and bool(self._publishers)
 
+    def _on_robot_position_message(self, message: dict) -> None:
+        """Cache the latest six robot joint positions."""
+        positions = message.get("positions") if isinstance(message, dict) else None
+        if isinstance(positions, (list, tuple)):
+            self.latest_joint_positions = [float(position) for position in positions]
+
+    def get_latest_joint_positions(self) -> list[float] | None:
+        """Return a copy of the latest joint positions received from ROS."""
+        if self.latest_joint_positions is None:
+            return None
+        return list(self.latest_joint_positions)
+
+    def _on_gripper_message(self, message: dict) -> None:
+        """Cache whether the gripper is open; False means closed/holding."""
+        value = message.get("data") if isinstance(message, dict) else None
+        if isinstance(value, bool):
+            self.latest_gripper_open = value
+
+    def get_latest_gripper_has_object(self) -> bool | None:
+        """Return whether the gripper is holding an object, or None if unknown."""
+        if self.latest_gripper_open is None:
+            return None
+        return not self.latest_gripper_open
     def _on_robot_status_message(self, message: dict) -> None:
         """Create robot status events from /Robot/status/physical."""
         status = message.get("data") if isinstance(message, dict) else message

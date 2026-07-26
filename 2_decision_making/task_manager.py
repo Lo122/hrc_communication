@@ -6,7 +6,6 @@ import config
 from events import Event, EventType, RobotTaskState
 from models import RobotTask
 
-
 class TaskManager:
     """Owns active task state, pending tasks, and all valid transitions."""
 
@@ -35,11 +34,9 @@ class TaskManager:
         self.ros.publish_speed(config.DEFAULT_SPEED)
         print({"Initialize the speed to:": config.DEFAULT_SPEED})
 
-
     def handle_event(self, event: Event) -> None:
         """Route an event to the corresponding handler."""
         self.logger.log_event(event)
-
 
         handlers = {
             EventType.RECOGNITION_TRIGGER: self._handle_recognition_trigger,
@@ -200,8 +197,12 @@ class TaskManager:
             return
 
         self.ros.publish_resume(task.speed)
-        task.robot_running_received = False
-        self._transition(task, RobotTaskState.R_RESUME, event, "ROS resume published; waiting for robot running status.")
+        self._transition(
+            task,
+            RobotTaskState.R_EXECUTING,
+            event,
+            f"Robot resumed at saved speed {task.speed}.",
+        )
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_restart(self, event: Event) -> None:
@@ -219,6 +220,9 @@ class TaskManager:
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_cancel(self, event: Event) -> None:
+
+        # self.ros.publish_pause()
+        self.ros.publish_cancel()
         task = self._require_active_in(
             event,
             {
@@ -226,7 +230,6 @@ class TaskManager:
                 RobotTaskState.R_EXECUTING,
                 RobotTaskState.R_PAUSED,
                 RobotTaskState.R_DEFER,
-                RobotTaskState.R_RESUME,
                 RobotTaskState.R_REDO,
                 RobotTaskState.R_WAITING_FREE_DRIVE,
                 RobotTaskState.R_FREE_DRIVE,
@@ -251,16 +254,21 @@ class TaskManager:
             self._finish_canceled_task(task, event, "Task canceled before free-drive started.")
             return
 
-        self.ros.publish_cancel()
         self._transition(
             task,
             RobotTaskState.R_RECOVERY_EVALUATING,
             event,
             "Stop published; evaluating recovery strategy.",
         )
-        self._update_recovery_context(task, event)
+        time.sleep(config.RECOVERY_STOP_DELAY_SECONDS)
+        joint_positions = self.ros.get_latest_joint_positions()
+        #region CHANGE HERE IN ROBOLAB!!!!
+        # gripper_has_object = self.ros.get_latest_gripper_has_object()
+        gripper_has_object = False
 
-        if self._can_return_home(task):
+        return_check = self._can_return_home(joint_positions, gripper_has_object)
+
+        if return_check:
             decision_event = Event(
                 event_type=EventType.RECOVERY_HOME_AVAILABLE,
                 source="task_manager",
@@ -289,7 +297,7 @@ class TaskManager:
 
         # Speed Control Formula: increase speed by SPEED_STEP, but do not exceed MAX_SPEED
         task.speed = min(task.speed + config.SPEED_STEP, config.MAX_SPEED)
-        
+
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed increased.")
 
@@ -297,10 +305,10 @@ class TaskManager:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
             return
-        
+
         # Speed Control Formula: decrease speed by SPEED_STEP, but do not go below MIN_SPEED
         task.speed = max(task.speed - config.SPEED_STEP, config.MIN_SPEED)
-        
+
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed decreased.")
 
@@ -351,28 +359,28 @@ class TaskManager:
         )
         self.cli.show_message(self.message_manager.get_manual_recovery_message())
 
-    def _update_recovery_context(self, task: RobotTask, event: Event) -> None:
-        if "gripper_has_object" in event.payload:
-            task.gripper_has_object = bool(event.payload["gripper_has_object"])
-        if "joint_positions" in event.payload:
-            task.joint_positions = event.payload["joint_positions"]
-
-    def _can_return_home(self, task: RobotTask) -> bool:
+    def _can_return_home(
+        self,
+        joint_positions: list[float] | None,
+        gripper_has_object: bool | None,
+    ) -> bool:
         return (
             config.RETURN_HOME_RECOVERY_ENABLED
-            and not task.gripper_has_object
-            and self._is_in_safe_return_zone(task)
+            and gripper_has_object is False
+            and self._is_in_safe_return_zone(joint_positions)
         )
 
-    def _is_in_safe_return_zone(self, task: RobotTask) -> bool:
-        joints = task.joint_positions
+    def _is_in_safe_return_zone(
+        self,
+        joint_positions: list[float] | None,
+    ) -> bool:
         ranges = config.SAFE_RETURN_JOINT_RANGES
-        if joints is None or ranges is None or len(joints) != len(ranges):
+        if joint_positions is None or ranges is None or len(joint_positions) != len(ranges):
             return False
 
         return all(
             lower <= position <= upper
-            for position, (lower, upper) in zip(joints, ranges)
+            for position, (lower, upper) in zip(joint_positions, ranges)
         )
 
     def _finish_canceled_task(self, task: RobotTask, event: Event, message: str) -> None:
@@ -415,7 +423,7 @@ class TaskManager:
     def _handle_robot_running(self, event: Event) -> None:
         task = self._require_active_in(
             event,
-            {RobotTaskState.R_ACCEPTED, RobotTaskState.R_RESUME, RobotTaskState.R_REDO, RobotTaskState.R_EXECUTING},
+            {RobotTaskState.R_ACCEPTED, RobotTaskState.R_REDO, RobotTaskState.R_EXECUTING},
         )
         if task is None:
             return

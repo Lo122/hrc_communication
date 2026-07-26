@@ -23,7 +23,6 @@ class RobotTaskState(Enum):
 
     R_EXECUTING = auto()
     R_PAUSED = auto()
-    R_RESUME = auto()
     R_REDO = auto()
     R_WAITING_FREE_DRIVE = auto()
     R_FREE_DRIVE = auto()

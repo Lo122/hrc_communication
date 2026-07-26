@@ -1,7 +1,8 @@
-﻿"""Configuration values and mappings for the HRC communication system."""
+"""Configuration values and mappings for the HRC communication system."""
 
 RESPONSE_TIMEOUT_SECONDS = 20.0
 DEFER_SECONDS = 5.0
+RECOVERY_STOP_DELAY_SECONDS = 0.5
 
 DEFAULT_SPEED = 0.2
 SPEED_STEP = 0.1
@@ -12,17 +13,17 @@ MAX_SPEED = 0.75
 LAST_SPEED = DEFAULT_SPEED
 
 # Keep return-home recovery disabled until the joint ranges are validated on the real robot.
-RETURN_HOME_RECOVERY_ENABLED = False
+RETURN_HOME_RECOVERY_ENABLED = True
 
 # TEST PLACEHOLDER for a 6-joint robot, centered at 0 rad.
 # Replace with ranges validated on the real robot before enabling recovery.
 SAFE_RETURN_JOINT_RANGES = [
-    (-0.15, 0.15),  # joint 1
-    (-0.15, 0.15),  # joint 2
-    (-0.15, 0.15),  # joint 3
-    (-0.15, 0.15),  # joint 4
-    (-0.15, 0.15),  # joint 5
-    (-0.15, 0.15),  # joint 6
+    (-3, 3),  # joint 1
+    (-3, 3),  # joint 2
+    (-3, 3),  # joint 3
+    (-3, 3),  # joint 4
+    (-3, 3),  # joint 5
+    (-3, 3),  # joint 6
 ]
 
 STEP_LIFT_PANEL = 0
@@ -57,6 +58,8 @@ ROS_TOPICS = {
     "local_speed": "/Robot/localSpeed",  # std_msgs/Float64
     "human_done": "/Human/taskSuccess",  # success
     "robot_success": "/Robot/status/physical",  # running, success, homed
+    "robot_position": "/UR10/position/live",  # trajectory_msgs/JointTrajectoryPoint
+    "gripper": "/Robot/gripper",  # std_msgs/Bool: False=closed, True=open
     "free_drive": "/Robot/teachMode",
 }
 
