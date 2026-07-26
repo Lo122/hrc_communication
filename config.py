@@ -11,6 +11,20 @@ MAX_SPEED = 0.75
 
 LAST_SPEED = DEFAULT_SPEED
 
+# Keep return-home recovery disabled until the joint ranges are validated on the real robot.
+RETURN_HOME_RECOVERY_ENABLED = False
+
+# TEST PLACEHOLDER for a 6-joint robot, centered at 0 rad.
+# Replace with ranges validated on the real robot before enabling recovery.
+SAFE_RETURN_JOINT_RANGES = [
+    (-0.15, 0.15),  # joint 1
+    (-0.15, 0.15),  # joint 2
+    (-0.15, 0.15),  # joint 3
+    (-0.15, 0.15),  # joint 4
+    (-0.15, 0.15),  # joint 5
+    (-0.15, 0.15),  # joint 6
+]
+
 STEP_LIFT_PANEL = 0
 STEP_BRING_JOINT = 2
 STEP_BRING_NEXT_PANEL = 6
@@ -38,14 +52,11 @@ ROS_BRIDGE_HOST = "127.0.0.1"
 ROS_BRIDGE_PORT = 9090
 
 ROS_TOPICS = {
-    "pause": "/Robot/control", #pause
-    "resume": "/Robot/control", #resume
-    "restart": "/Robot/control", #not yet
-    "cancel": "/Robot/control",#stop
-    "global_speed": "/Robot/globalSpeed", #float64
-    "local_speed":"/Robot/localSpeed",
-    "human_done": "/Human/taskSuccess", #success
-    "robot_success": "/Robot/status/physical", #success
+    "control": "/Robot/control",  # stop, home, and other robot control commands
+    "global_speed": "/Robot/globalSpeed",  # std_msgs/Float64
+    "local_speed": "/Robot/localSpeed",  # std_msgs/Float64
+    "human_done": "/Human/taskSuccess",  # success
+    "robot_success": "/Robot/status/physical",  # running, success, homed
     "free_drive": "/Robot/teachMode",
 }
 

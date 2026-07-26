@@ -79,44 +79,13 @@ class ROSCommunication:
         """Connect ROS feedback to the shared event queue."""
         self.event_callback = callback
 
-    # def publish_pause(self) -> None:
-    #     self._publish_control("pause")
-    def publish_pause(self)->None:
-        task = self._require_active(event, RobotTaskState.R_EXECUTING)
-        if task is None:
-            return
-        # self._publish("global_speed",{"data":config.MIN_SPEED})
-        self.ros.publish_speed(config.MIN_SPEED)
-        self._transition(
-            task,
-            RobotTaskState.R_PAUSED,
-            event,
-            f"Robot paused; previous speed preserved: {task.speed}.",
-        )
-        self.cli.show_message(
-            self.message_manager.get_acknowledgement(event.event_type)
-        )
+    def publish_pause(self) -> None:
+        """Temporarily stop motion without overwriting the task's saved speed."""
+        self.publish_global_speed(config.MIN_SPEED)
 
-
-    # def publish_resume(self) -> None:
-    #     self._publish_control("resume")
-    def publish_resume(self)->None:
-        task = self._require_active(event, RobotTaskState.R_PAUSED)
-        if task is None:
-            return
-
-        self.ros.publish_speed(task.speed)
-
-        task.robot_running_received = False
-        self._transition(
-            task,
-            RobotTaskState.R_RESUME,
-            event,
-            f"Robot resumed at previous speed: {task.speed}.",
-        )
-        self.cli.show_message(
-            self.message_manager.get_acknowledgement(event.event_type)
-        )
+    def publish_resume(self, speed: float) -> None:
+        """Restore the task speed saved by TaskManager."""
+        self.publish_global_speed(speed)
 
     def publish_restart(self) -> None:
         print("[ros] restart not implemented yet")
@@ -124,8 +93,17 @@ class ROSCommunication:
     def publish_cancel(self) -> None:
         self._publish_control("stop")
 
+    def publish_return_home(self) -> None:
+        self._publish_control("home")
+
     def publish_speed(self, speed: float) -> None:
+        self.publish_global_speed(speed)
+
+    def publish_global_speed(self, speed: float) -> None:
         self._publish("global_speed", {"data": float(speed)})
+
+    def publish_local_speed(self, speed: float) -> None:
+        self._publish("local_speed", {"data": float(speed)})
 
     def publish_human_done(self) -> None:
         self._publish("human_done", {"data": "success"})
@@ -135,8 +113,9 @@ class ROSCommunication:
 
     def _init_publishers(self) -> None:
         self._publishers = {
-            "control": self._advertise(config.ROS_TOPICS["pause"], "std_msgs/String"),
-            "speed": self._advertise(config.ROS_TOPICS["speed"], "std_msgs/Float64"),
+            "control": self._advertise(config.ROS_TOPICS["control"], "std_msgs/String"),
+            "global_speed": self._advertise(config.ROS_TOPICS["global_speed"], "std_msgs/Float64"),
+            "local_speed": self._advertise(config.ROS_TOPICS["local_speed"], "std_msgs/Float64"),
             "human_done": self._advertise(config.ROS_TOPICS["human_done"], "std_msgs/String"),
             "free_drive": self._advertise(config.ROS_TOPICS["free_drive"], "std_msgs/Bool"),
         }
@@ -176,6 +155,8 @@ class ROSCommunication:
             self._emit_robot_status_event(EventType.ROBOT_RUNNING, message)
         elif status == "success":
             self._emit_robot_status_event(EventType.ROBOT_SUCCESS, message)
+        elif status == "homed":
+            self._emit_robot_status_event(EventType.ROBOT_HOMED, message)
 
     def _emit_robot_status_event(self, event_type: EventType, message) -> None:
         event = Event(

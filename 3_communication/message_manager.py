@@ -18,6 +18,11 @@ class MessageManager:
     def ask_permission_for_free_drive(self) -> str:
         return 'Robot task finished. Enter free drive mode for manual adjustment? Type "free drive" to confirm or "no" to finish.'
 
+    def get_return_home_permission_message(self) -> str:
+        return 'Robot stopped in a validated recovery zone. Type "home" to return home or "no" for manual recovery.'
+
+    def get_manual_recovery_message(self) -> str:
+        return 'Free-drive mode is enabled. Complete the manual adjustment and type "done" when finished.'
 
     def get_acknowledgement(self, event_type: EventType) -> str:
         messages = {
@@ -30,7 +35,10 @@ class MessageManager:
             EventType.H_CANCEL: "The robot task has been canceled.",
             EventType.H_DONE: "Human-done signal sent.",
             EventType.ROBOT_SUCCESS: "Robot task completed.",
+            EventType.ROBOT_HOMED: "Robot returned to its home position.",
             EventType.H_FREE_GO: "Now free drive mode is on, and you can move the robot to align the piece; let me know when you are done.",
+            EventType.H_RETURN_HOME: "The robot is returning to its home position.",
+            EventType.H_MANUAL_RECOVERY: "Manual recovery started.",
         }
         return messages.get(event_type, "Command processed.")
 

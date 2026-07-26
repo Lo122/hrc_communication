@@ -27,6 +27,12 @@ class RobotTaskState(Enum):
     R_REDO = auto()
     R_WAITING_FREE_DRIVE = auto()
     R_FREE_DRIVE = auto()
+
+    R_RECOVERY_EVALUATING = auto()
+    R_WAITING_HOME_PERMISSION = auto()
+    R_RETURNING_HOME = auto()
+    R_MANUAL_RECOVERY = auto()
+
     R_CANCELED = auto()
     R_DONE = auto()
 
@@ -42,6 +48,11 @@ class EventType(Enum):
     H_EXECUTE_PENDING_TASK = auto()
 
     H_FREE_GO = auto()
+    H_RETURN_HOME = auto()
+    H_MANUAL_RECOVERY = auto()
+
+    RECOVERY_HOME_AVAILABLE = auto()
+    RECOVERY_MANUAL_REQUIRED = auto()
 
     H_CANCEL = auto()
     H_PAUSE = auto()
@@ -58,6 +69,7 @@ class EventType(Enum):
 
     ROBOT_RUNNING = auto()
     ROBOT_SUCCESS = auto()
+    ROBOT_HOMED = auto()
 
 
 @dataclass

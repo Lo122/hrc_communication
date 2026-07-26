@@ -30,6 +30,8 @@ class RobotTask:
     progress: float = 0.0
     pending_reason: str | None = None
     free_drive_active: bool = False
+    gripper_has_object: bool = True
+    joint_positions: list[float] | None = None
     robot_running_received: bool = False
     robot_success_received: bool = False
     created_at: float | None = None

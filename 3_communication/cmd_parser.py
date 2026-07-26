@@ -27,6 +27,9 @@ class CommandParser:
         "slow down": EventType.H_SLOWDOWN,
         "free drive": EventType.H_FREE_GO,
         "free go": EventType.H_FREE_GO,
+        "home": EventType.H_RETURN_HOME,
+        "return home": EventType.H_RETURN_HOME,
+        "manual recovery": EventType.H_MANUAL_RECOVERY,
         "done": EventType.H_DONE,
         "finished": EventType.H_DONE,
     }
