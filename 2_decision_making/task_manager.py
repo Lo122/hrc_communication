@@ -221,7 +221,7 @@ class TaskManager:
 
     def _handle_cancel(self, event: Event) -> None:
 
-        # self.ros.publish_pause()
+        # self.ros.publish_real_pause()
         self.ros.publish_cancel()
         task = self._require_active_in(
             event,
@@ -422,6 +422,7 @@ class TaskManager:
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_robot_running(self, event: Event) -> None:
+        # time.sleep(config.RECOVERY_STOP_DELAY_SECONDS)
         task = self._require_active_in(
             event,
             {RobotTaskState.R_ACCEPTED, RobotTaskState.R_REDO, RobotTaskState.R_EXECUTING},

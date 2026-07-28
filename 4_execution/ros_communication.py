@@ -94,6 +94,9 @@ class ROSCommunication:
 
     def publish_cancel(self) -> None:
         self._publish_control("stop")
+    
+    def publish_real_pause(self) ->None:
+        self._publish_control("pause")
 
     def publish_return_home(self) -> None:
         self._publish_control("home")

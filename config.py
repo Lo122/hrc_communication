@@ -18,12 +18,12 @@ RETURN_HOME_RECOVERY_ENABLED = True
 # TEST PLACEHOLDER for a 6-joint robot, centered at 0 rad.
 # Replace with ranges validated on the real robot before enabling recovery.
 SAFE_RETURN_JOINT_RANGES = [
-    (-1, 1),  # joint 1
-    (-1, 1), # joint 2
-    (-1, 1),  # joint 3
-    (-1, 1),  # joint 4
-    (-1, 1),  # joint 5
-    (-1, 1),  # joint 6
+    (-3, 3),  # joint 1
+    (-3, 3),  # joint 2
+    (-3, 3),  # joint 3
+    (-3, 3),  # joint 4
+    (-3, 3),   # joint 5
+    (-3, 3),  # joint 6
 ]
 
 STEP_LIFT_PANEL = 0
