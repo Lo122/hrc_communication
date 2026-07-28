@@ -268,6 +268,7 @@ class TaskManager:
 
         return_check = self._can_return_home(joint_positions, gripper_has_object)
 
+        #can return home directly with permission
         if return_check:
             decision_event = Event(
                 event_type=EventType.RECOVERY_HOME_AVAILABLE,

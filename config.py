@@ -18,12 +18,12 @@ RETURN_HOME_RECOVERY_ENABLED = True
 # TEST PLACEHOLDER for a 6-joint robot, centered at 0 rad.
 # Replace with ranges validated on the real robot before enabling recovery.
 SAFE_RETURN_JOINT_RANGES = [
-    (-3, 3),  # joint 1
-    (-3, 3),  # joint 2
-    (-3, 3),  # joint 3
-    (-3, 3),  # joint 4
-    (-3, 3),  # joint 5
-    (-3, 3),  # joint 6
+    (-1, 1),  # joint 1
+    (-1, 1), # joint 2
+    (-1, 1),  # joint 3
+    (-1, 1),  # joint 4
+    (-1, 1),  # joint 5
+    (-1, 1),  # joint 6
 ]
 
 STEP_LIFT_PANEL = 0
@@ -34,12 +34,12 @@ STEP_BRING_NEXT_PANEL = 6
 
 TRIGGER_RULES = {
     STEP_LIFT_PANEL: {
-        "progress_threshold": 0.5,
-        "min_confidence": 0.8,
+        "progress_threshold": 0.1,
+        "min_confidence": 0.1,
     },
     STEP_BRING_JOINT: {
-        "progress_threshold": 0.8,
-        "min_confidence": 0.8,
+        "progress_threshold": 0.1,
+        "min_confidence": 0.1,
     },
 }
 
@@ -61,6 +61,7 @@ ROS_TOPICS = {
     "robot_position": "/UR10/position/live",  # trajectory_msgs/JointTrajectoryPoint
     "gripper": "/Robot/gripper",  # std_msgs/Bool: False=closed, True=open
     "free_drive": "/Robot/teachMode",
+    "r_task_done": "/Task/signal",
 }
 
 GH_STEP_MESSAGES = {

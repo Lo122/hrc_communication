@@ -57,6 +57,13 @@ if __name__ == "__main__":
     try:
         while system.system_running:
             for event in receiver.poll():
+                
+                if (
+                    event.event_type == EventType.RECOGNITION_TRIGGER
+                    and system.task_manager.active_task is not None
+                ):
+                    continue
+
                 system.event_queue.put(event)
             system.process_events()
             time.sleep(0.05)

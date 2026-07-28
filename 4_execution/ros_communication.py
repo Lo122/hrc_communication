@@ -28,6 +28,7 @@ class ROSCommunication:
         self._subscriptions = []
         self.latest_joint_positions = None
         self.latest_gripper_open = None
+        self.r_task_done = None
 
         if auto_connect:
             self.connect()
@@ -124,6 +125,14 @@ class ROSCommunication:
     def _init_subscribers(self) -> None:
         topic = roslibpy.Topic(
             self.client,
+            config.ROS_TOPICS["r_task_done"],
+            "std_msgs/String",
+        )
+        topic.subscribe(self._on_robot_task_done_signal)
+        self._subscriptions.append(topic)
+
+        topic = roslibpy.Topic(
+            self.client,
             config.ROS_TOPICS["robot_success"],
             "std_msgs/String",
         )
@@ -197,6 +206,10 @@ class ROSCommunication:
             self._emit_robot_status_event(EventType.ROBOT_SUCCESS, message)
         elif status == "homed":
             self._emit_robot_status_event(EventType.ROBOT_HOMED, message)
+
+    def _on_robot_task_done_signal(self, message:dict)->None:
+        status = message.get("data") if isinstance(message, dict) else message
+
 
     def _emit_robot_status_event(self, event_type: EventType, message) -> None:
         event = Event(
