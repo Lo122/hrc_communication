@@ -198,17 +198,18 @@ class ROSCommunication:
             return None
         return not self.latest_gripper_open
     def _on_robot_status_message(self, message: dict) -> None:
-        """Create robot status events from /Robot/status/physical."""
+        """Create return-home events from /Robot/status/physical."""
         status = message.get("data") if isinstance(message, dict) else message
-        if status == "running":
-            self._emit_robot_status_event(EventType.ROBOT_RUNNING, message)
-        elif status == "success":
-            self._emit_robot_status_event(EventType.ROBOT_SUCCESS, message)
-        elif status == "homed":
+        if status == "homed":
             self._emit_robot_status_event(EventType.ROBOT_HOMED, message)
 
-    def _on_robot_task_done_signal(self, message:dict)->None:
+    def _on_robot_task_done_signal(self, message: dict) -> None:
+        """Create task lifecycle events from /Task/signal."""
         status = message.get("data") if isinstance(message, dict) else message
+        if status == "start_job":
+            self._emit_robot_status_event(EventType.ROBOT_RUNNING, message)
+        elif status == "end_job":
+            self._emit_robot_status_event(EventType.ROBOT_SUCCESS, message)
 
 
     def _emit_robot_status_event(self, event_type: EventType, message) -> None:
