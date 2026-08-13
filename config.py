@@ -61,6 +61,10 @@ ROS_TOPICS = {
     "robot_position": "/UR10/position/live",  # trajectory_msgs/JointTrajectoryPoint
     "gripper": "/Robot/gripper",  # std_msgs/Bool: False=closed, True=open
     "free_drive": "/Robot/teachMode",
+    "joint_state": "/UR10/joint_states",  # sensor_msgs/JointState
+    "tcp_pose": "/UR10/tcp_pose",  # geometry_msgs/PoseStamped
+    "ft_wrench": "/UR10/ftsensor/wrench",  # geometry_msgs/WrenchStamped
+    "ft_zero": "/UR10/ftsensor/zero",  # std_msgs/Empty: publish to tare the FT sensor
 }
 
 GH_STEP_MESSAGES = {
@@ -84,3 +88,7 @@ EVENT_TRANSPORT_PORT = 5010
 LOG_FILE_PATH = "hrc_communication_events.log"
 
 test_vid_path = r"G:\.shortcut-targets-by-id\1nZZWQUKOdxeC-oo-NKucbuUj38ir4mZC\ITECH_Thesis\Videos\raw\cam-04\video__cam-04_uid-01_take-01.mp4"
+
+
+# ROBOT_IP = "169.254.130.206" 
+ROBOT_IP = "127.0.0.1"
