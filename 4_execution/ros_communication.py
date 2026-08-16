@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import time
+
 import config
 from events import Event, EventType
 
@@ -9,6 +12,17 @@ try:
     import roslibpy
 except ImportError:  # pragma: no cover - depends on deployment environment
     roslibpy = None
+
+_logger = logging.getLogger(__name__)
+
+
+def _to_ros_time(timestamp: float) -> dict:
+    """Convert a float Unix timestamp to a ROS1 time dict ({secs, nsecs}),
+    as used in std_msgs/Header.stamp."""
+    secs = int(timestamp)
+    nsecs = int(round((timestamp - secs) * 1e9))
+    return {"secs": secs, "nsecs": nsecs}
+
 
 class ROSCommunication:
     """Publishes runtime robot commands and converts robot feedback into events."""
@@ -112,6 +126,21 @@ class ROSCommunication:
     def publish_free_drive(self, enabled: bool) -> None:
         self._publish("free_drive", {"data": bool(enabled)})
 
+    def publish_human_location(self, xyz: tuple[float, float, float], timestamp: float | None = None) -> None:
+        """Publish the human's world-frame position (see
+        1_recognition/skeleton3d_pipeline.py's world_root_xyz -- same
+        world frame as /UR10/position/live, defined by the calibrated
+        extrinsics) for downstream consumers like path planning."""
+        payload = {
+            "header": {
+                "seq": 0,
+                "stamp": _to_ros_time(timestamp if timestamp is not None else time.time()),
+                "frame_id": "world",
+            },
+            "point": {"x": float(xyz[0]), "y": float(xyz[1]), "z": float(xyz[2])},
+        }
+        self._publish("human_position", payload)
+
     def _init_publishers(self) -> None:
         self._publishers = {
             "control": self._advertise(config.ROS_TOPICS["control"], "std_msgs/String"),
@@ -119,6 +148,7 @@ class ROSCommunication:
             "local_speed": self._advertise(config.ROS_TOPICS["local_speed"], "std_msgs/Float64"),
             "human_done": self._advertise(config.ROS_TOPICS["human_done"], "std_msgs/String"),
             "free_drive": self._advertise(config.ROS_TOPICS["free_drive"], "std_msgs/Bool"),
+            "human_position": self._advertise(config.ROS_TOPICS["human_position"], "geometry_msgs/PointStamped"),
         }
 
     def _init_subscribers(self) -> None:
@@ -156,7 +186,9 @@ class ROSCommunication:
 
     def _publish(self, publisher_name: str, payload: dict) -> None:
         if not self._is_ready():
-            print(f"[ros] {publisher_name} {payload['data']}")
+            # Most payloads here are {"data": ...} (std_msgs/*), but not all --
+            # e.g. publish_human_location's PointStamped has no top-level "data".
+            _logger.warning("[ros] %s %s", publisher_name, payload.get("data", payload))
             return
 
         topic = self._publishers[publisher_name]

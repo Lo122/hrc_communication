@@ -40,6 +40,7 @@ class TaskManager:
 
         handlers = {
             EventType.RECOGNITION_TRIGGER: self._handle_recognition_trigger,
+            EventType.HUMAN_LOCATION_UPDATE: self._handle_human_location_update,
             EventType.H_ACCEPT: self._handle_accept,
             EventType.H_REFUSE: self._handle_refuse,
             EventType.H_DEFER: self._handle_defer,
@@ -96,6 +97,15 @@ class TaskManager:
         self.cli.show_permission_request(message)
         self.timer.start_response_timer(task.task_instance_id, config.RESPONSE_TIMEOUT_SECONDS)
         self.logger.log_message("Task entered R_WAITING_RESPONSE.", {"task_instance_id": task.task_instance_id})
+
+    def _handle_human_location_update(self, event: Event) -> None:
+        """Forward the human's world-frame position to both consumers --
+        Grasshopper (visualization) and ROS (path planning). Stateless:
+        doesn't touch active_task/the state machine, just relays."""
+        xyz = (event.payload["x"], event.payload["y"], event.payload["z"])
+        timestamp = event.payload.get("timestamp")
+        self.gh_dispatcher.dispatch_human_location(xyz, timestamp)
+        self.ros.publish_human_location(xyz, timestamp)
 
     def _handle_accept(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)

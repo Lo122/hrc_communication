@@ -61,7 +61,13 @@ ROS_TOPICS = {
     "robot_position": "/UR10/position/live",  # trajectory_msgs/JointTrajectoryPoint
     "gripper": "/Robot/gripper",  # std_msgs/Bool: False=closed, True=open
     "free_drive": "/Robot/teachMode",
+    "human_position": "/Human/position/live",  # geometry_msgs/PointStamped, world frame
 }
+
+# How often recognition publishes HUMAN_LOCATION_UPDATE events, in frames -- see
+# run_recognition.py's main loop. 5 -> ~5-6Hz at a 30fps camera, well above what the
+# discrete task-state events on this bus were designed for at full frame rate.
+HUMAN_LOCATION_PUBLISH_EVERY_N_FRAMES = 5
 
 GH_STEP_MESSAGES = {
     STEP_LIFT_PANEL: {

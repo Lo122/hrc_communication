@@ -13,6 +13,7 @@ for layer in ["0_core", "1_recognition"]:
 
 import config
 from event_transport import UDPEventSender
+from events import Event, EventType
 from recognition_manager import DEFAULT_MODEL_DIR, RecognitionManager
 from trigger_manager import TriggerManager
 
@@ -46,6 +47,7 @@ if __name__ == "__main__":
     print(f"Recognition running with source: {source}")
     print(f"Publishing recognition events to {args.host}:{args.port}")
 
+    frame_count = 0
     try:
         while True:
             result = recognition_manager.update()
@@ -54,7 +56,24 @@ if __name__ == "__main__":
                     print(f"[recognition event] sending {event.event_type.name} {event.payload}", flush=True)
                     sender.send(event)
                     print(f"[recognition event] sent {event.event_type.name} {event.payload}", flush=True)
-                    
+
+            # Human location is a continuous, much-higher-frequency stream than the
+            # discrete task events above -- throttled to config.HUMAN_LOCATION_
+            # PUBLISH_EVERY_N_FRAMES (see recognition_manager.py's last_world_xyz,
+            # updated every frame regardless of step-recognition state).
+            frame_count += 1
+            if frame_count % config.HUMAN_LOCATION_PUBLISH_EVERY_N_FRAMES == 0:
+                world_xyz = recognition_manager.last_world_xyz
+                if world_xyz is not None:
+                    sender.send(Event(
+                        event_type=EventType.HUMAN_LOCATION_UPDATE,
+                        source="recognition",
+                        payload={
+                            "x": world_xyz[0], "y": world_xyz[1], "z": world_xyz[2],
+                            "timestamp": recognition_manager.last_location_timestamp,
+                        },
+                    ))
+
             time.sleep(0.05)
     except KeyboardInterrupt:
         print("Recognition stopped.")
