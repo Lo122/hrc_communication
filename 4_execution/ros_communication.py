@@ -143,13 +143,7 @@ class ROSCommunication:
         it) for consumers that need body shape, not just root position.
         keypoints is None when no valid 3D lift has been seen yet.
 
-        Published as std_msgs/String, JSON-encoded -- NOT a stock
-        geometry_msgs/PointStamped: that type has no field for the
-        keypoints dict, and sending one anyway (as this used to) meant
-        rosbridge either silently dropped it or, depending on the
-        rosbridge/message-conversion version, rejected the whole message,
-        which is why /Human/position/live could go quiet on `rostopic
-        echo`. A single JSON string keeps position+keypoints as one
+        Published as std_msgs/String, JSON-encoded: A single JSON string keeps position+keypoints as one
         message on one topic without needing a custom .msg package."""
         body = {
             "header": {

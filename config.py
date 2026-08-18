@@ -66,6 +66,12 @@ ROS_TOPICS = {
                                                 # publish_human_location() docstring for why this
                                                 # isn't a stock geometry_msgs/PointStamped (that
                                                 # type has no room for the keypoints dict).
+
+    # Published by 4_execution/read_ur_live_data.py, read directly off RTDE -- separate from
+    # "robot_position" above (which comes from the ur_robot_driver ROS node, not this script).
+    "ur_joint_position": "/UR10e/position/live",     # sensor_msgs/JointState
+    "ur_tcp_position": "/UR10e/TCPPosition/live",    # geometry_msgs/PoseStamped
+    "ur_tcp_force": "/UR10e/TCPForce/live",          # geometry_msgs/WrenchStamped
 }
 
 # How often recognition publishes HUMAN_LOCATION_UPDATE events, in frames -- see
