@@ -77,7 +77,11 @@ class VisionConfig:
 
     # StreamingH36MFeatureExtractor's smoothing window -- see that class's
     # docstring / skeleton_pipeline/features/h36m_features.py's "Why
-    # Savitzky-Golay" note.
+    # Savitzky-Golay" note. fps is informational only (e.g. saved into
+    # pose_detection_live.py's output .npz) -- StreamingH36MFeatureExtractor
+    # fits velocity/acceleration against each frame's REAL timestamp, not
+    # an assumed constant fps, since live capture spacing isn't uniform
+    # (see that class's docstring).
     fps: float = 30.0
     feature_window_length: int = 9
     feature_polyorder: int = 3

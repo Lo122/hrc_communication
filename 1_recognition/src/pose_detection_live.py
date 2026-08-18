@@ -412,7 +412,7 @@ def main():
             # skeleton_for_render -- same input RecognitionManager feeds its LSTM with (world-frame
             # fusion if available this frame, else camera-frame root_relative, else None/hold-last;
             # see skeleton3d_pipeline.py's StreamingH36MFeatureExtractor docstring).
-            features = feature_extractor.update(skeleton_for_render)
+            features = feature_extractor.update(skeleton_for_render, timestamp)
             if skeleton_for_render is not None:
                 label_lines.append(
                     f"elbow L/R={features['joint_angles'][JOINT_ANGLE_KEYS.index('left_elbow_angle_deg')]:.0f}/"
@@ -446,7 +446,8 @@ def main():
                 all_world_root.append(world_root_xyz)
                 all_world_skeleton.append(world_skeleton)
                 all_timestamps.append(timestamp)
-                all_pol_angles.append(features["pol_angles"])
+                all_pol_angles.append(np.concatenate(
+                    [features["polar_azimuth"], features["polar_elevation"]]))
                 all_joint_angles.append(features["joint_angles"])
                 all_ratios.append(features["ratios"])
 

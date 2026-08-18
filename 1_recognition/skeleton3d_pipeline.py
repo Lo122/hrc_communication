@@ -3,8 +3,11 @@
 YOLO 2D pose -> KeypointOutlierHoldFilter -> MotionBERT streaming 2D->3D
 lift -> (optional) world-frame fusion via MetricDepthEstimator + calibrated
 extrinsics, plus a streaming version of skeleton_pipeline/features/
-h36m_features.py's pol_angles/joint_angles/ratios panels (one frame at a
-time instead of a whole clip).
+h36m_features.py's compute_all_features panels (one frame at a time instead
+of a whole clip) -- the feature names/shapes must match that module's
+panel/column naming exactly, since the trained model's norm stats (the
+*_mean.npy/*_std.npy pairs in best_model/3d_skeleton/*.npz) were computed
+offline with h36m_features.py against those exact names.
 
 This mirrors src/pose_detection_live.py's pipeline -- see that module's
 docstring for the full posture ("root-relative body shape") vs location
@@ -21,6 +24,7 @@ reference without extrinsics.
 """
 from __future__ import annotations
 
+import math
 import sys
 from collections import deque
 from pathlib import Path
@@ -40,7 +44,8 @@ from skeleton_pipeline.coco_h36m import coco_to_h36m_xy  # noqa: E402
 from skeleton_pipeline.keypoint_filter import KeypointOutlierHoldFilter  # noqa: E402
 from skeleton_pipeline.metric_depth_estimator import MetricDepthEstimator  # noqa: E402
 from skeleton_pipeline.features.h36m_features import (  # noqa: E402
-    FEATURE_JOINTS, compute_joint_angles, compute_polar, compute_ratios,
+    FEATURE_JOINTS, compute_distance_from_center_ratio, compute_joint_angles,
+    compute_polar, compute_ratios,
 )
 
 CALIB_DATA_DIR = Path(__file__).resolve().parent / "dataset" / "calib_data"
@@ -189,74 +194,134 @@ class RealtimeSkeleton3DPipeline:
 
 
 class StreamingH36MFeatureExtractor:
-    """Turns a stream of (17, 3) H36M skeletons into the same
-    "pol_angles" / "joint_angles" / "ratios" feature panels as
-    skeleton_pipeline/features/h36m_features.py's compute_all_features, one
-    frame at a time -- see that module's docstring for the formulas and why
-    Savitzky-Golay smoothing is used for the position these are derived
-    from.
+    """Turns a stream of (17, 3) H36M skeletons into the same feature
+    panels as skeleton_pipeline/features/h36m_features.py's
+    compute_all_features (joint_speed, joint_acceleration,
+    joint_velocity_x/y/z, joint_acceleration_x/y/z,
+    position_x/y/z_relative_to_pelvis, polar_azimuth, polar_elevation,
+    joint_angles, ratios, distance_from_center -- see that module's
+    docstring for the formulas and why Savitzky-Golay smoothing is used),
+    one frame at a time. The dict keys/value ordering (FEATURE_JOINTS,
+    i.e. all 17 H36M joints except pelvis) must match h36m_features.py's
+    exactly -- NormRealTime.normalize_features looks up mean/std for every
+    key this returns by that exact name (see best_model/3d_skeleton's
+    norm .npz).
 
-    Streaming/causal difference from the offline version: each call
-    smooths over the trailing `window_length` frames seen so far (a causal
-    window, not a centered one), and falls back to the raw last frame while
-    the buffer is still shorter than the smoothing window needs.
+    Streaming/causal difference from the offline version: each call fits
+    over the trailing `window_length` frames seen so far (a causal window,
+    not a centered one), and falls back to the raw last frame (zero
+    velocity/acceleration) while the buffer is still shorter than the fit
+    needs.
+
+    Real (not fixed) frame spacing: h36m_features.py's offline
+    _savgol_derivative assumes uniformly-spaced samples (a single `delta`
+    scalar), which is a fine assumption for a video decoded at a constant
+    fps. It is NOT a fine assumption here: run_recognition.py's live loop
+    is a fixed-TICK scheduler, not a fixed-WORK one, so whenever
+    recognition_manager.update() (YOLO+MotionBERT+depth+features+LSTM)
+    overruns the tick budget, actual wall-clock frame spacing stretches
+    unevenly -- assuming a constant delta would silently mis-scale
+    velocity/acceleration (e.g. a slow frame's real 80ms gap treated as
+    the nominal 33ms). So instead of scipy's savgol_filter (which only
+    takes a fixed delta), this fits a degree-`polyorder` polynomial of
+    POSITION vs. each frame's actual timestamp (see _fit_derivative) --
+    the non-uniform-time generalization of the same "local polynomial fit,
+    don't finite-difference the raw signal" idea.
 
     config: VisionConfig (see vision_model/vision_config.py) -- uses its
-    fps/feature_window_length/feature_polyorder fields.
+    feature_window_length/feature_polyorder fields.
     """
 
     def __init__(self, config: VisionConfig):
-        self.fps = config.fps
         self.window_length = config.feature_window_length
         self.polyorder = config.feature_polyorder
-        self._buffer: deque[np.ndarray] = deque(maxlen=self.window_length)
+        self._buffer: deque[tuple[float, np.ndarray]] = deque(maxlen=self.window_length)
         self._last_valid_skeleton: np.ndarray | None = None
 
     def reset(self) -> None:
         self._buffer.clear()
         self._last_valid_skeleton = None
 
-    def update(self, skeleton_17x3: np.ndarray | None) -> dict[str, np.ndarray]:
+    def update(self, skeleton_17x3: np.ndarray | None, timestamp: float) -> dict[str, np.ndarray]:
         """skeleton_17x3: (17, 3) or None (no detection this frame -- holds
         the last valid skeleton, same "hold" philosophy as
         KeypointOutlierHoldFilter upstream; zeros if there's no valid
-        skeleton yet at all)."""
+        skeleton yet at all). timestamp: this frame's wall-clock/video
+        time in seconds (e.g. RecognitionManager.update_from_frame's
+        frame_timestamp) -- the ACTUAL time this skeleton was observed at,
+        used for velocity/acceleration scaling instead of an assumed fixed
+        frame interval (see class docstring)."""
         if skeleton_17x3 is None:
             skeleton_17x3 = self._last_valid_skeleton
         if skeleton_17x3 is None:
             skeleton_17x3 = np.zeros((17, 3), dtype=np.float64)
         self._last_valid_skeleton = skeleton_17x3
-        self._buffer.append(np.asarray(skeleton_17x3, dtype=np.float64))
+        self._buffer.append((float(timestamp), np.asarray(skeleton_17x3, dtype=np.float64)))
 
-        window = np.stack(self._buffer, axis=0)  # (t<=window_length, 17, 3)
-        smoothed_last = self._smoothed_last_frame(window)[None]  # (1, 17, 3)
+        times = np.array([t for t, _ in self._buffer], dtype=np.float64)
+        window = np.stack([s for _, s in self._buffer], axis=0)  # (t<=window_length, 17, 3)
+        position = self._fit_derivative(times, window, deriv=0)[None]  # (1, 17, 3)
+        velocity = self._fit_derivative(times, window, deriv=1)[None]
+        acceleration = self._fit_derivative(times, window, deriv=2)[None]
 
-        azimuth, elevation = compute_polar(smoothed_last)
-        joint_angles = compute_joint_angles(smoothed_last)
-        ratios = compute_ratios(smoothed_last)
+        azimuth, elevation = compute_polar(position)
+        joint_angles = compute_joint_angles(position)
+        ratios = compute_ratios(position)
+        dist_ratio = compute_distance_from_center_ratio(position)
+        speed = np.linalg.norm(velocity, axis=-1)
+        accel_mag = np.linalg.norm(acceleration, axis=-1)
 
-        pol_angles = np.concatenate([
-            azimuth[0, FEATURE_JOINTS], elevation[0, FEATURE_JOINTS],
-        ]).astype(np.float32)
         joint_angles_vec = np.array(
             [joint_angles[key][0] for key in JOINT_ANGLE_KEYS], dtype=np.float32)
         ratios_vec = np.array(
             [ratios[key][0] for key in RATIO_KEYS], dtype=np.float32)
 
-        return {
-            "pol_angles": pol_angles,
+        features = {
+            "joint_speed": speed[0, FEATURE_JOINTS].astype(np.float32),
+            "joint_acceleration": accel_mag[0, FEATURE_JOINTS].astype(np.float32),
+            "polar_azimuth": azimuth[0, FEATURE_JOINTS].astype(np.float32),
+            "polar_elevation": elevation[0, FEATURE_JOINTS].astype(np.float32),
             "joint_angles": joint_angles_vec,
             "ratios": ratios_vec,
+            "distance_from_center": dist_ratio[0, FEATURE_JOINTS].astype(np.float32),
         }
+        for axis_idx, axis_name in enumerate("xyz"):
+            features[f"joint_velocity_{axis_name}"] = velocity[0, FEATURE_JOINTS, axis_idx].astype(np.float32)
+            features[f"joint_acceleration_{axis_name}"] = acceleration[0, FEATURE_JOINTS, axis_idx].astype(np.float32)
+            features[f"position_{axis_name}_relative_to_pelvis"] = position[0, FEATURE_JOINTS, axis_idx].astype(np.float32)
 
-    def _smoothed_last_frame(self, window: np.ndarray) -> np.ndarray:
-        from scipy.signal import savgol_filter
+        return features
 
-        t = window.shape[0]
-        wl = min(self.window_length, t if t % 2 == 1 else t - 1)
-        if wl < self.polyorder + 2:
-            return window[-1]  # not enough data yet -- raw last frame
-        smoothed = savgol_filter(
-            window, window_length=wl, polyorder=self.polyorder, deriv=0,
-            delta=1.0 / self.fps, axis=0)
-        return smoothed[-1]
+    def _fit_derivative(self, times: np.ndarray, window: np.ndarray, deriv: int) -> np.ndarray:
+        """times: (t<=window_length,) each buffered frame's actual
+        timestamp, seconds -- NOT assumed uniformly spaced (see class
+        docstring). window: (t, 17, 3), same order as times. Returns the
+        deriv-th derivative (0=smoothed position, 1=velocity,
+        2=acceleration) at the LATEST timestamp: fits one degree-
+        `polyorder` least-squares polynomial per joint/axis of position
+        vs. real elapsed time (np.polyfit's x can be arbitrarily spaced,
+        unlike savgol_filter's fixed delta), then differentiates that
+        polynomial analytically and evaluates at the most recent frame --
+        centering time at the latest frame (t_rel = times - times[-1], so
+        it's always 0) means "evaluate the deriv-th derivative at the
+        latest sample" is just deriv! times the x**deriv coefficient, no
+        separate evaluation step needed. Falls back to the raw last frame
+        (deriv=0) / zero (deriv>0) while the buffer is still too short to
+        fit reliably -- same 2-more-than-polyorder margin
+        _savgol_derivative used, so a degenerate/overfit exact-interpolation
+        polynomial (zero residual, unstable derivatives) is never fit."""
+        t = times.shape[0]
+        if t < self.polyorder + 2:
+            return window[-1] if deriv == 0 else np.zeros_like(window[-1])
+        if deriv > self.polyorder:
+            return np.zeros_like(window[-1])
+
+        t_rel = times - times[-1]  # latest frame at x=0
+        flat = window.reshape(t, -1)  # (t, 17*3)
+        coeffs = np.polyfit(t_rel, flat, self.polyorder)  # (polyorder+1, 17*3), highest power first
+
+        # d^deriv/dx^deriv (a_n x^n + ... + a_0) at x=0 == deriv! * a_deriv;
+        # coeffs is ordered highest power first, so a_deriv is row (polyorder - deriv).
+        coeff_row = coeffs[self.polyorder - deriv]
+        derivative_at_latest = math.factorial(deriv) * coeff_row
+        return derivative_at_latest.reshape(window.shape[1:])

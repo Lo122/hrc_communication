@@ -9,6 +9,7 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import Any
+import logging
 
 import numpy as np
 
@@ -19,7 +20,8 @@ from vision_model.vision_config import VisionConfig
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 
-DEFAULT_MODEL_DIR = Path(__file__).resolve().parent / "best_model"
+DEFAULT_MODEL_DIR = Path(__file__).resolve().parent / "best_model" / "3d_skeleton" 
+logger = logging.getLogger(__name__)
 
 STEP_SMOOTHING_WINDOW = 5
 STEP_CONFIRMATION_COUNT = 3
@@ -48,6 +50,7 @@ class RecognitionManager:
         device: str | None = None,
         show_video: bool = False,
         display_window_name: str = "HRC Recognition",
+        display_panel_size: tuple[int, int] = (480, 480),
         vision_config: VisionConfig | None = None,
     ):
         self.step_stabilizer = step_stabilizer
@@ -60,6 +63,7 @@ class RecognitionManager:
         self.device_name = device
         self.show_video = show_video
         self.display_window_name = display_window_name
+        self.display_panel_size = display_panel_size
 
         # 3D posture pipeline (YOLO/calibration/MotionBERT/depth-estimator/feature-window
         # knobs) -- see vision_model/vision_config.py and skeleton3d_pipeline.py. video_source/
@@ -79,6 +83,7 @@ class RecognitionManager:
         self._skeleton_pipeline = None
         self._feature_extractor = None
         self._draw_2d_skeleton = None
+        self._renderer_3d = None
         self._capture = None
         self._camera_K = None
         self._camera_dist = None
@@ -156,8 +161,9 @@ class RecognitionManager:
         if world_xyz is not None and not np.isnan(world_xyz).any():
             self.last_world_xyz = (float(world_xyz[0]), float(world_xyz[1]), float(world_xyz[2]))
             self.last_location_timestamp = frame_timestamp
+        logger.info(f"Frame {frame_timestamp:.3f}: world_root_xyz={self.last_world_xyz}")
 
-        features = self._feature_extractor.update(pipeline_out["skeleton"])
+        features = self._feature_extractor.update(pipeline_out["skeleton"], frame_timestamp)
         features = self._norm_real_time.normalize_features(features)
         feature_vector = self._build_feature_vector(features)
 
@@ -233,11 +239,25 @@ class RecognitionManager:
         if not self.show_video:
             return
 
-        display = frame
-        if pipeline_out is not None and pipeline_out.get("keypoints_2d") is not None:
-            display = self._draw_2d_skeleton(
-                frame, pipeline_out["keypoints_2d"], pipeline_out["keypoints_conf"],
-                conf_threshold=self.vision_config.conf_threshold)
+        overlay = frame
+        skeleton = None
+        if pipeline_out is not None:
+            if pipeline_out.get("keypoints_2d") is not None:
+                overlay = self._draw_2d_skeleton(
+                    frame, pipeline_out["keypoints_2d"], pipeline_out["keypoints_conf"],
+                    conf_threshold=self.vision_config.conf_threshold)
+            skeleton = pipeline_out.get("skeleton")
+
+        panel_w, panel_h = self.display_panel_size
+        display = overlay
+        if self._renderer_3d is not None:
+            # Side-by-side: 2D overlay | 3D posture (oblique/front/side/top),
+            # same layout as src/pose_detection_live.py's preview window.
+            panel_3d = self._renderer_3d.render(skeleton)
+            display = self._cv2.hconcat([
+                self._cv2.resize(overlay, (panel_w, panel_h)),
+                self._cv2.resize(panel_3d, (panel_w, panel_h)),
+            ])
 
         self._cv2.imshow(self.display_window_name, display)
         if self._cv2.waitKey(1) & 0xFF == ord("q"):
@@ -305,7 +325,7 @@ class RecognitionManager:
         self.buffer = deque(maxlen=self.window_size)
 
         #region: HERE WE INSTANTIATE THE TRAINED MODEL
-        model_dir = str(self.model_dir)
+        model_dir = str(self.model_dir.parent) if str(self.model_dir.name) in ["2d_skeleton", "3d_skeleton"] else str(self.model_dir)
         if model_dir not in sys.path:
             sys.path.insert(0, model_dir)
         from LSTM_model_train import AssistLSTM
@@ -323,6 +343,14 @@ class RecognitionManager:
         self._draw_2d_skeleton = draw_2d_skeleton
         self._norm_real_time = NormRealTime(str(self.norm_path), self.feature_keys)
         self._ensure_stabilizer()
+
+        if self.show_video:
+            # Four-view (oblique/front/side/top) orthographic panel of the
+            # world-frame/camera-frame skeleton, shown alongside the 2D
+            # overlay -- see _show_frame() and skeleton_video.py's
+            # FastSkeleton3DRenderer docstring.
+            from skeleton_pipeline.render.skeleton_video import FastSkeleton3DRenderer
+            self._renderer_3d = FastSkeleton3DRenderer(self.display_panel_size)
 
     def _ensure_stabilizer(self) -> None:
         if self.step_stabilizer is not None:
