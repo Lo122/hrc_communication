@@ -65,3 +65,6 @@ temp/
 
 # Model files
 **/*.pt
+**/*.pth
+**/*.npz
+**/*.json

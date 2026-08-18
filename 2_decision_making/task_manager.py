@@ -104,7 +104,9 @@ class TaskManager:
         doesn't touch active_task/the state machine, just relays."""
         xyz = (event.payload["x"], event.payload["y"], event.payload["z"])
         timestamp = event.payload.get("timestamp")
-        self.gh_dispatcher.dispatch_human_location(xyz, timestamp)
+        # UDPEventReceiver is message transfer
+        # self.gh_dispatcher.dispatch_human_location(xyz, timestamp)
+        # ROS message transfer
         self.ros.publish_human_location(xyz, timestamp)
 
     def _handle_accept(self, event: Event) -> None:
