@@ -99,15 +99,18 @@ class TaskManager:
         self.logger.log_message("Task entered R_WAITING_RESPONSE.", {"task_instance_id": task.task_instance_id})
 
     def _handle_human_location_update(self, event: Event) -> None:
-        """Forward the human's world-frame position to both consumers --
-        Grasshopper (visualization) and ROS (path planning). Stateless:
-        doesn't touch active_task/the state machine, just relays."""
+        """Forward the human's world-frame position (plus, if this frame
+        had one, their pelvis-relative posture keypoints) to both
+        consumers -- Grasshopper (visualization) and ROS (path planning).
+        Stateless: doesn't touch active_task/the state machine, just
+        relays."""
         xyz = (event.payload["x"], event.payload["y"], event.payload["z"])
         timestamp = event.payload.get("timestamp")
+        keypoints = event.payload.get("keypoints")
         # UDPEventReceiver is message transfer
         # self.gh_dispatcher.dispatch_human_location(xyz, timestamp)
         # ROS message transfer
-        self.ros.publish_human_location(xyz, timestamp)
+        self.ros.publish_human_location(xyz, timestamp, keypoints)
 
     def _handle_accept(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)

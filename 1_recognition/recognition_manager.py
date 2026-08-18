@@ -99,6 +99,16 @@ class RecognitionManager:
         self.last_world_xyz: tuple[float, float, float] | None = None
         self.last_location_timestamp: float | None = None
 
+        # Pelvis-relative (pelvis forced to (0,0,0)) H36M-17 skeleton from the most recent
+        # frame with a valid 3D lift -- posture only, NOT fused with world position (see
+        # skeleton3d_pipeline.py's RealtimeSkeleton3DPipeline.process() docstring's
+        # root_relative). Same "hold last valid value" policy as last_world_xyz. Joint names
+        # (self._h36m_joint_names) are resolved lazily in _ensure_realtime_pipeline, since
+        # they live in skeleton_pipeline/features/h36m_features.py under src/, which is only
+        # added to sys.path once the realtime pipeline is set up.
+        self.last_root_relative_skeleton: np.ndarray | None = None
+        self._h36m_joint_names: list[str] | None = None
+
         self.round_id = 0
         self.piece_id = 0
         self.required_steps_per_round = self._load_required_steps_per_round()
@@ -163,6 +173,10 @@ class RecognitionManager:
             self.last_location_timestamp = frame_timestamp
         logger.info(f"Frame {frame_timestamp:.3f}: world_root_xyz={self.last_world_xyz}")
 
+        root_relative = pipeline_out.get("root_relative")
+        if root_relative is not None and not np.isnan(root_relative).any():
+            self.last_root_relative_skeleton = root_relative
+
         features = self._feature_extractor.update(pipeline_out["skeleton"], frame_timestamp)
         features = self._norm_real_time.normalize_features(features)
         feature_vector = self._build_feature_vector(features)
@@ -203,6 +217,20 @@ class RecognitionManager:
 
         self._record_step_and_advance_round(stable_step_id)
         return result
+
+    def get_last_keypoints(self) -> dict[str, dict[str, float]] | None:
+        """Pelvis-relative H36M-17 skeleton keypoints from the most recent
+        frame with a valid 3D lift, as {joint_name: {"x", "y", "z"}} --
+        pelvis is included and is always exactly (0,0,0) by construction
+        (see last_root_relative_skeleton). None until the first valid
+        frame, or before the realtime pipeline has been set up (joint
+        names are only resolved in _ensure_realtime_pipeline)."""
+        if self.last_root_relative_skeleton is None or self._h36m_joint_names is None:
+            return None
+        return {
+            name: {"x": float(xyz[0]), "y": float(xyz[1]), "z": float(xyz[2])}
+            for name, xyz in zip(self._h36m_joint_names, self.last_root_relative_skeleton)
+        }
 
     def set_video_source(self, video_source: str | int | None, *, live: bool | None = None) -> None:
         """Set or replace the source used when update(None) is called.
@@ -313,7 +341,10 @@ class RecognitionManager:
 
         from norm_feat_rlt import NormRealTime
         from skeleton3d_pipeline import RealtimeSkeleton3DPipeline, StreamingH36MFeatureExtractor
+        from skeleton_pipeline.features.h36m_features import H36M_JOINT_NAMES
         from skeleton_pipeline.render.skeleton_video import draw_2d_skeleton
+
+        self._h36m_joint_names = H36M_JOINT_NAMES
 
         self._torch = torch
         self.device = self.device_name or ("cuda" if torch.cuda.is_available() else "cpu")

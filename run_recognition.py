@@ -96,6 +96,11 @@ if __name__ == "__main__":
                         payload={
                             "x": world_xyz[0], "y": world_xyz[1], "z": world_xyz[2],
                             "timestamp": recognition_manager.last_location_timestamp,
+                            # Pelvis-relative (pelvis at (0,0,0)) H36M-17 skeleton -- see
+                            # recognition_manager.py's get_last_keypoints()/
+                            # last_root_relative_skeleton. Posture only, separate from the
+                            # world-frame x/y/z location above.
+                            "keypoints": recognition_manager.get_last_keypoints(),
                         },
                     ))
 
@@ -111,7 +116,7 @@ if __name__ == "__main__":
                 if now - overrun_warned_at > 5.0:
                     logger.warning(f"[recognition] loop overran budget by {-sleep_s * 1000:.0f}ms "
                           f"(target {period_s * 1000:.0f}ms/iteration) -- update() is the "
-                          "bottleneck, not the sleep.", flush=True)
+                          "bottleneck, not the sleep.")
                     overrun_warned_at = now
                 next_tick = now
     except KeyboardInterrupt:

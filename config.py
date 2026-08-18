@@ -61,7 +61,11 @@ ROS_TOPICS = {
     "robot_position": "/UR10/position/live",  # trajectory_msgs/JointTrajectoryPoint
     "gripper": "/Robot/gripper",  # std_msgs/Bool: False=closed, True=open
     "free_drive": "/Robot/teachMode",
-    "human_position": "/Human/position/live",  # geometry_msgs/PointStamped, world frame
+    "human_position": "/Human/position/live",  # std_msgs/String: JSON-encoded {header, point,
+                                                # keypoints} -- see ros_communication.py's
+                                                # publish_human_location() docstring for why this
+                                                # isn't a stock geometry_msgs/PointStamped (that
+                                                # type has no room for the keypoints dict).
 }
 
 # How often recognition publishes HUMAN_LOCATION_UPDATE events, in frames -- see
