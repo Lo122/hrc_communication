@@ -315,6 +315,7 @@ class TaskManager:
 
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed increased.")
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_slowdown(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
@@ -326,6 +327,7 @@ class TaskManager:
 
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed decreased.")
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_free_go(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_FREE_DRIVE)

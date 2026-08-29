@@ -17,10 +17,13 @@ for layer in [
 import config
 from cmd_parser import CommandParser
 from cli_interface import CLIInterface
+from communication_manager import CommunicationManager
 from event_queue import EventQueue
 from gh_dispatcher import GHDispatcher
 from logger import EventLogger
 from message_manager import MessageManager
+from tts_manager import NullTTSManager, TTSManager
+from voice_interface import NullVoiceInterface, VoiceInterface
 from pending_task import PendingTaskPool
 from ros_communication import ROSCommunication
 from state_machine import StateMachine
@@ -40,6 +43,29 @@ class HRCSystem:
         self.cli = CLIInterface(self.command_parser)
         self.message_manager = MessageManager()
 
+        if config.VOICE_ENABLED:
+            self.voice = VoiceInterface(
+                model_path=ROOT / config.VOICE_MODEL_PATH,
+                phrases=CommandParser._ALIASES,
+                device_name=config.VOICE_INPUT_DEVICE_NAME,
+                timeout=config.VOICE_LISTEN_TIMEOUT_SECONDS,
+            )
+            self.tts = TTSManager(config.VOICE_TTS_RATE)
+        else:
+            self.voice = NullVoiceInterface()
+            self.tts = NullTTSManager()
+
+        self.communication = CommunicationManager(
+            cli=self.cli,
+            parser=self.command_parser,
+            voice=self.voice,
+            tts=self.tts,
+            event_sink=self.event_queue.put,
+            state_provider=self._current_state,
+            guard_seconds=config.VOICE_POST_TTS_GUARD_SECONDS,
+            max_attempts=config.VOICE_MAX_ATTEMPTS,
+        )
+
         self.udp_sender = UDPSender(config.UDP_HOST, config.UDP_PORT)
         self.gh_dispatcher = GHDispatcher(self.udp_sender)
         self.ros = ROSCommunication()
@@ -53,7 +79,7 @@ class HRCSystem:
             pending_pool=self.pending_pool,
             timer_manager=self.timer_manager,
             message_manager=self.message_manager,
-            cli=self.cli,
+            cli=self.communication,
             gh_dispatcher=self.gh_dispatcher,
             ros_communication=self.ros,
             logger=self.logger,
@@ -73,17 +99,23 @@ class HRCSystem:
             if event is not None:
                 self.event_queue.put(event)
             else:
-                self.cli.show_message("Command not recognized.")
+                self.communication.show_message("Command not recognized.")
+
+    def _current_state(self):
+        task = getattr(self, "task_manager", None)
+        return task.active_task.state if task and task.active_task else None
 
     def process_events(self) -> None:
         """Handle all queued recognition, CLI, timer, and ROS events."""
         while not self.event_queue.empty():
             event = self.event_queue.get()
             self.task_manager.handle_event(event)
+            self.communication.sync_state(self._current_state(), force=True)
 
     def close(self) -> None:
         """Release communication resources."""
         self.system_running = False
+        self.communication.close()
         self.ros.close()
         self.udp_sender.close()
 
