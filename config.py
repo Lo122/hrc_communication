@@ -94,11 +94,14 @@ EVENT_TRANSPORT_PORT = 5010
 LOG_FILE_PATH = "hrc_communication_events.log"
 
 VOICE_ENABLED = True
+
+VOICE_GPT_ENABLED = True
+
 VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-0.15"
 VOICE_INPUT_DEVICE_NAME = None
 VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
 VOICE_TTS_RATE = 175
-VOICE_POST_TTS_GUARD_SECONDS = 0.25
+VOICE_POST_TTS_GUARD_SECONDS = 1.0
 VOICE_MAX_ATTEMPTS = 2
 
 test_vid_path = r"G:\.shortcut-targets-by-id\1nZZWQUKOdxeC-oo-NKucbuUj38ir4mZC\ITECH_Thesis\Videos\raw\cam-04\video__cam-04_uid-01_take-01.mp4"

@@ -46,6 +46,7 @@ class HRCSystem:
         if config.VOICE_ENABLED:
             self.voice = VoiceInterface(
                 model_path=ROOT / config.VOICE_MODEL_PATH,
+                gpt_enabled=config.VOICE_GPT_ENABLED,
                 phrases=CommandParser._ALIASES,
                 device_name=config.VOICE_INPUT_DEVICE_NAME,
                 timeout=config.VOICE_LISTEN_TIMEOUT_SECONDS,
