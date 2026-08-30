@@ -10,7 +10,7 @@ import pyttsx3
 class TTSManager:
     """Keep SAPI5 on one worker thread and prevent overlapping speech."""
 
-    def __init__(self, rate: int = 175):
+    def __init__(self, rate: int = 200):
         self._rate = rate
         self._queue = queue.Queue()
         self._thread = threading.Thread(target=self._run, daemon=True)

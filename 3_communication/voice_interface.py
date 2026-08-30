@@ -6,6 +6,7 @@ import os
 import queue
 import threading
 import time
+import winsound
 from pathlib import Path
 
 import sounddevice as sd
@@ -32,6 +33,11 @@ class VoiceInterface:
         self._thread = None
         self._ws = None
         self._gpt_enabled = gpt_enabled
+        if self._gpt_enabled:
+            try:
+                self._connect_gpt()
+            except Exception:
+                self._ws = None
 
     @staticmethod
     def _find_input_device(name):
@@ -48,42 +54,31 @@ class VoiceInterface:
             )
         return matches[0]
 
-    def start_listening(self, on_text, on_failure) -> None:
-        self.stop_listening()
-        self._stop.clear()
-        if self._gpt_enabled:
-            self._thread = threading.Thread(
-                target=self._listen_once_gpt,
-                args=(on_text, on_failure),
-                daemon=True,
-            )
-        else:
-            self._thread = threading.Thread(
-                target=self._listen_once,
-                args=(on_text, on_failure),
-                daemon=True,
-            )
-        self._thread.start()
+    @staticmethod
+    def _play_ready_beep() -> None:
+        winsound.Beep(1000, 150)
 
-    def _listen_once_gpt(self, on_text, on_failure) -> None:
+    def _connect_gpt(self) -> bool:
+        if self._ws and self._ws.connected:
+            return True
+
         api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            on_failure(RuntimeError("OPENAI_API_KEY is not set"))
-            return
-
         model = os.environ.get("VOICE_MODEL")
+        if not api_key or not model:
+            raise RuntimeError("OPENAI_API_KEY and VOICE_MODEL must be set")
+
         instructions = (
             "Understand the user's spoken intent and output exactly one lowercase "
             f"command from: {', '.join(sorted(self._phrases))}, unknown. "
             "Map natural expressions to their meaning and output unknown if unclear."
         )
-        ws = None
+        ws = websocket.create_connection(
+            f"wss://api.openai.com/v1/realtime?model={model}",
+            header=[f"Authorization: Bearer {api_key}"],
+            timeout=5,
+        )
+        self._ws = ws
         try:
-            ws = websocket.create_connection(
-                f"wss://api.openai.com/v1/realtime?model={model}",
-                header=[f"Authorization: Bearer {api_key}"],
-            )
-            self._ws = ws
             ws.send(json.dumps({
                 "type": "session.update",
                 "session": {
@@ -103,7 +98,50 @@ class VoiceInterface:
                     },
                 },
             }))
-            ws.settimeout(0.01)
+            ws.settimeout(0.2)
+            while not self._stop.is_set():
+                try:
+                    event = json.loads(ws.recv())
+                except websocket.WebSocketTimeoutException:
+                    continue
+                if event.get("type") == "session.updated":
+                    ws.settimeout(0.01)
+                    return True
+                if event.get("type") == "error":
+                    raise RuntimeError(event["error"]["message"])
+            ws.close()
+            self._ws = None
+            return False
+        except Exception:
+            ws.close()
+            self._ws = None
+            raise
+
+    def start_listening(self, on_text, on_failure) -> None:
+        self.stop_listening()
+        self._stop.clear()
+        if self._gpt_enabled:
+            self._thread = threading.Thread(
+                target=self._listen_once_gpt,
+                args=(on_text, on_failure),
+                daemon=True,
+            )
+        else:
+            self._thread = threading.Thread(
+                target=self._listen_once,
+                args=(on_text, on_failure),
+                daemon=True,
+            )
+        self._thread.start()
+
+    def _listen_once_gpt(self, on_text, on_failure) -> None:
+        try:
+            if not self._connect_gpt():
+                return
+
+            ws = self._ws
+            ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
+            self._play_ready_beep()
             started = time.monotonic()
             with sd.RawInputStream(
                 samplerate=24000,
@@ -123,7 +161,7 @@ class VoiceInterface:
                     except websocket.WebSocketTimeoutException:
                         continue
                     #remove print statement in production, it's for debugging
-                    print(f"[gpt] {event}")
+                    # print(f"[gpt] {event}")
                     if event.get("type") == "response.output_text.done":
                         command = event["text"].strip().lower()
                         on_text(command) if command in self._phrases else on_failure()
@@ -133,19 +171,18 @@ class VoiceInterface:
             if not self._stop.is_set():
                 on_failure()
         except Exception as error:
+            if self._ws:
+                self._ws.close()
+                self._ws = None
             if not self._stop.is_set():
                 on_failure(error)
-        finally:
-            if ws:
-                ws.close()
-            if self._ws is ws:
-                self._ws = None
 
     def _listen_once(self, on_text, on_failure) -> None:
         audio = queue.Queue()
         device_info = sd.query_devices(self._device, "input")
         sample_rate = int(device_info["default_samplerate"])
         recognizer = KaldiRecognizer(self._model, sample_rate, self._grammar)
+        self._play_ready_beep()
 
         def callback(data, frames, time_info, status):
             audio.put(bytes(data))
@@ -181,14 +218,15 @@ class VoiceInterface:
 
     def stop_listening(self) -> None:
         self._stop.set()
-        if self._ws:
-            self._ws.close()
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=1.0)
         self._thread = None
 
     def close(self) -> None:
         self.stop_listening()
+        if self._ws:
+            self._ws.close()
+            self._ws = None
 
 
 class NullVoiceInterface:

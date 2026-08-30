@@ -111,7 +111,7 @@ class HRCSystem:
         while not self.event_queue.empty():
             event = self.event_queue.get()
             self.task_manager.handle_event(event)
-            self.communication.sync_state(self._current_state(), force=True)
+            self.communication.sync_state(self._current_state())
 
     def close(self) -> None:
         """Release communication resources."""
