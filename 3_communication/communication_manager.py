@@ -14,8 +14,14 @@ class ListeningMode(Enum):
 
 STATE_MODES = {
     RobotTaskState.R_WAITING_RESPONSE: ListeningMode.SINGLE,
+    # Not optional: this is the veto window for an announced task. With
+    # the microphone shut here the human cannot stop it in time.
+    RobotTaskState.R_ANNOUNCED: ListeningMode.CONTINUOUS,
     RobotTaskState.R_EXECUTING: ListeningMode.CONTINUOUS,
     RobotTaskState.R_PAUSED: ListeningMode.CONTINUOUS,
+    # The robot is under load with the human's hands full. Nothing is more
+    # important than hearing "secured" here.
+    RobotTaskState.R_HOLDING: ListeningMode.CONTINUOUS,
     RobotTaskState.R_WAITING_FREE_DRIVE: ListeningMode.SINGLE,
     RobotTaskState.R_FREE_DRIVE: ListeningMode.CONTINUOUS,
     RobotTaskState.R_WAITING_HOME_PERMISSION: ListeningMode.SINGLE,
@@ -36,6 +42,9 @@ class CommunicationManager:
         self.max_attempts = max_attempts
         self.mode = ListeningMode.OFF
         self._state = None
+        #: The last thing spoken, so the human can ask for it again.
+        #: A worker looking at the ceiling misses prompts constantly.
+        self.last_message = None
         self._attempts = 0
         self._generation = 0
 
@@ -46,6 +55,7 @@ class CommunicationManager:
         self._announce(message, permission=True)
 
     def _announce(self, message: str, permission=False) -> None:
+        self.last_message = message
         self._generation += 1
         self.voice.stop_listening()
         output = self.cli.show_permission_request if permission else self.cli.show_message

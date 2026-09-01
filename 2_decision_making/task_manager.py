@@ -3,6 +3,7 @@
 import time
 
 import config
+import task_catalog
 from events import Event, EventType, RobotTaskState
 from models import RobotTask
 
@@ -57,6 +58,8 @@ class TaskManager:
             EventType.H_RETURN_HOME: self._handle_return_home,
             EventType.H_MANUAL_RECOVERY: self._handle_manual_recovery,
             EventType.H_DONE: self._handle_human_done,
+            EventType.H_SECURED: self._handle_secured,
+            EventType.H_NOT_YET: self._handle_not_yet,
             EventType.ROBOT_RUNNING: self._handle_robot_running,
             EventType.ROBOT_SUCCESS: self._handle_robot_success,
             EventType.ROBOT_HOMED: self._handle_robot_homed,
@@ -78,11 +81,13 @@ class TaskManager:
         step_id = event.payload["step_id"]
         piece_id = event.payload["piece_id"]
         round_id = event.payload["round_id"]
+        task_key = event.payload.get("task_key", "")
         now = time.time()
 
         task = RobotTask(
             task_instance_id=self._build_task_instance_id(round_id, step_id, piece_id),
             step_id=step_id,
+            task_key=task_key,
             piece_id=piece_id,
             round_id=round_id,
             state=RobotTaskState.R_WAITING_RESPONSE,
@@ -93,8 +98,7 @@ class TaskManager:
         )
         self.active_task = task
 
-        message = self.message_manager.get_permission_message(task.step_id)
-        self.cli.show_permission_request(message)
+        self.cli.show_permission_request(self.message_manager.get_task_proposal(task))
         self.timer.start_response_timer(task.task_instance_id, config.RESPONSE_TIMEOUT_SECONDS)
         self.logger.log_message("Task entered R_WAITING_RESPONSE.", {"task_instance_id": task.task_instance_id})
 
@@ -113,20 +117,25 @@ class TaskManager:
         self.ros.publish_human_location(xyz, timestamp, keypoints)
 
     def _handle_accept(self, event: Event) -> None:
-        task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
+        # An announced task can also be confirmed early, so the human
+        # does not have to wait out a window they already agree with.
+        task = self._require_active_in(
+            event, {RobotTaskState.R_WAITING_RESPONSE, RobotTaskState.R_ANNOUNCED}
+        )
         if task is None:
             return
 
         self.timer.cancel_response_timer()
         self._transition(task, RobotTaskState.R_ACCEPTED, event, "Human accepted task.")
         self.gh_dispatcher.dispatch_task(task)
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_refuse(self, event: Event) -> None:
         task = self._require_active_in(
             event,
             {
                 RobotTaskState.R_WAITING_RESPONSE,
+                RobotTaskState.R_ANNOUNCED,
                 RobotTaskState.R_WAITING_FREE_DRIVE,
                 RobotTaskState.R_WAITING_HOME_PERMISSION,
             },
@@ -154,7 +163,7 @@ class TaskManager:
         task.pending_reason = "refused"
         self.pending_pool.add(task)
         self.active_task = None
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_defer(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
@@ -164,7 +173,7 @@ class TaskManager:
         self.timer.cancel_response_timer()
         self._transition(task, RobotTaskState.R_DEFER, event, "Human deferred task.")
         self.timer.start_defer_timer(task.task_instance_id, config.DEFER_SECONDS)
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_response_timeout(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
@@ -177,7 +186,11 @@ class TaskManager:
         self.active_task = None
 
     def _handle_defer_timeout(self, event: Event) -> None:
-        task = self._require_active(event, RobotTaskState.R_DEFER)
+        # Fires for both R_DEFER (human asked to wait) and R_ANNOUNCED (the
+        # veto window closed). Same outcome, different meaning in the log.
+        task = self._require_active_in(
+            event, {RobotTaskState.R_DEFER, RobotTaskState.R_ANNOUNCED}
+        )
         if task is None:
             return
 
@@ -198,13 +211,27 @@ class TaskManager:
         self._transition(task, RobotTaskState.R_ACCEPTED, event, "Pending task dispatched; waiting for robot running status.")
 
     def _handle_pause(self, event: Event) -> None:
+        # Inside a veto window "stop" means refuse, not pause. Rewritten
+        # as a real H_REFUSE so the log records a refusal and the human
+        # hears the refusal wording, not "say resume when you are ready".
+        if self.active_task is not None and self.active_task.state == RobotTaskState.R_ANNOUNCED:
+            self._handle_refuse(
+                Event(
+                    event_type=EventType.H_REFUSE,
+                    source=event.source,
+                    task_instance_id=event.task_instance_id,
+                    payload={"rewritten_from": event.event_type.name},
+                )
+            )
+            return
+
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
             return
 
         self.ros.publish_pause()
         self._transition(task, RobotTaskState.R_PAUSED, event, "ROS pause published.")
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_resume(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_PAUSED)
@@ -218,7 +245,7 @@ class TaskManager:
             event,
             f"Robot resumed at saved speed {task.speed}.",
         )
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_restart(self, event: Event) -> None:
         task = self._require_active_in(
@@ -232,9 +259,15 @@ class TaskManager:
         task.robot_running_received = False
         task.robot_success_received = False
         self._transition(task, RobotTaskState.R_REDO, event, "ROS restart published; waiting for robot running status.")
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_cancel(self, event: Event) -> None:
+        # Confirmation gate first -- before anything is published to ROS.
+        # Only load-bearing tasks are gated (task_catalog.carries_load, plus
+        # anything already in R_HOLDING): cancelling a trip to fetch a tool
+        # is harmless, cancelling a panel hold drops a panel.
+        if not self._cancel_confirmed(event):
+            return
 
         # self.ros.publish_pause()
         self.ros.publish_cancel()
@@ -245,6 +278,7 @@ class TaskManager:
                 RobotTaskState.R_EXECUTING,
                 RobotTaskState.R_PAUSED,
                 RobotTaskState.R_DEFER,
+                RobotTaskState.R_ANNOUNCED,
                 RobotTaskState.R_REDO,
                 RobotTaskState.R_WAITING_FREE_DRIVE,
                 RobotTaskState.R_FREE_DRIVE,
@@ -254,7 +288,7 @@ class TaskManager:
         if task is None:
             return
 
-        if task.state == RobotTaskState.R_DEFER:
+        if task.state in {RobotTaskState.R_DEFER, RobotTaskState.R_ANNOUNCED}:
             self.timer.cancel_defer_timer()
             self._finish_canceled_task(task, event, "Deferred task canceled.")
             return
@@ -305,6 +339,46 @@ class TaskManager:
         )
         self._enter_manual_recovery(task, decision_event)
 
+    def _cancel_needs_confirmation(self, task: RobotTask) -> bool:
+        """True when letting go right now would drop something."""
+        if task.state == RobotTaskState.R_HOLDING:
+            return True
+        spec = task_catalog.task_by_key(task.task_key)
+        return bool(spec is not None and spec.carries_load)
+
+    def _cancel_confirmed(self, event: Event) -> bool:
+        """Gate a cancel behind a second confirmation where it matters.
+
+        Returns True when the cancel should go through. Returns False after
+        asking, having recorded the request -- a second cancel inside
+        CANCEL_CONFIRM_WINDOW_SECONDS passes the gate.
+        """
+        task = self.active_task
+        if task is None or not self._cancel_needs_confirmation(task):
+            return True
+
+        now = time.time()
+        asked_at = task.cancel_requested_at
+        if asked_at is not None and (now - asked_at) <= config.CANCEL_CONFIRM_WINDOW_SECONDS:
+            task.cancel_requested_at = None
+            self.logger.log_message(
+                "Cancel confirmed by a second request.",
+                {"task_instance_id": task.task_instance_id, "task_key": task.task_key},
+            )
+            return True
+
+        task.cancel_requested_at = now
+        self.logger.log_message(
+            "Cancel held for confirmation on a load-bearing task.",
+            {
+                "task_instance_id": task.task_instance_id,
+                "task_key": task.task_key,
+                "state": task.state.name,
+            },
+        )
+        self.cli.show_message(self.message_manager.get_cancel_confirmation(task))
+        return False
+
     def _handle_speedup(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
@@ -315,7 +389,7 @@ class TaskManager:
 
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed increased.")
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_slowdown(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
@@ -327,7 +401,7 @@ class TaskManager:
 
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed decreased.")
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_free_go(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_FREE_DRIVE)
@@ -342,7 +416,7 @@ class TaskManager:
             event,
             "Human approved free-drive mode; free-drive enabled.",
         )
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_return_home(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_HOME_PERMISSION)
@@ -356,7 +430,7 @@ class TaskManager:
             event,
             "Return-home command published.",
         )
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_manual_recovery(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_HOME_PERMISSION)
@@ -428,14 +502,19 @@ class TaskManager:
                 else "Human alignment completed; free-drive disabled."
             )
             self._transition(task, final_state, event, message)
-            self.active_task = None
             acknowledgement = EventType.H_CANCEL if is_manual_recovery else EventType.ROBOT_SUCCESS
-            self.cli.show_message(self.message_manager.get_acknowledgement(acknowledgement))
+            self.cli.show_message(self.message_manager.get_acknowledgement(acknowledgement, task))
+            if is_manual_recovery:
+                self.active_task = None
+                return
+            # Finishing the alignment is not the end of the sequence -- the
+            # panel still has to be held while it is screwed.
+            self._propose_followup(task, event)
             return
 
         self.ros.publish_human_done()
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Human-done published.")
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
 
     def _handle_robot_running(self, event: Event) -> None:
         task = self._require_active_in(
@@ -487,23 +566,122 @@ class TaskManager:
             return
         task.robot_success_received = True
 
-        if task.step_id == config.STEP_LIFT_PANEL:
+        spec = task_catalog.task_by_key(task.task_key)
+        mode = spec.mode if spec is not None else task_catalog.MODE_SIMPLE
+
+        if mode == task_catalog.MODE_FREE_DRIVE:
             self._transition(
                 task,
                 RobotTaskState.R_WAITING_FREE_DRIVE,
                 event,
                 "Robot success received; waiting for free-drive permission.",
             )
-            self.logger.log_message(
-                "Asked human for permission to enable free-drive mode.",
-                {"task_instance_id": task.task_instance_id},
-            )
             self.cli.show_message(self.message_manager.ask_permission_for_free_drive())
             return
 
+        if mode == task_catalog.MODE_HOLD_UNTIL_SECURED:
+            # The robot has the panel against the frame. It does NOT finish
+            # here -- it parks under load until the human says it is fixed.
+            # There is deliberately no timeout that releases: a timer that
+            # dropped a panel would be the worst failure this system has.
+            self._transition(
+                task,
+                RobotTaskState.R_HOLDING,
+                event,
+                "Robot reached hold pose; holding until the human confirms the panel is secured.",
+            )
+            self.cli.show_message(self.message_manager.get_hold_message(task))
+            self.timer.start_response_timer(task.task_instance_id, config.HOLD_REMINDER_SECONDS)
+            return
+
         self._transition(task, RobotTaskState.R_DONE, event, "Robot success received.")
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type, task))
+        self._propose_followup(task, event)
+
+    def _handle_secured(self, event: Event) -> None:
+        """Human confirms the panel is fixed; the robot may let go."""
+        task = self._require_active(event, RobotTaskState.R_HOLDING)
+        if task is None:
+            return
+
+        self.timer.cancel_response_timer()
+        self.ros.publish_human_done()
+        self._transition(task, RobotTaskState.R_DONE, event, "Human confirmed the panel is secured; hold released.")
+        self.cli.show_message(self.message_manager.get_release_message(task))
+        self._propose_followup(task, event)
+
+    def _handle_not_yet(self, event: Event) -> None:
+        """Human asks the robot to keep holding. Restarts the reminder only."""
+        task = self._require_active(event, RobotTaskState.R_HOLDING)
+        if task is None:
+            return
+
+        self.timer.cancel_response_timer()
+        self.timer.start_response_timer(task.task_instance_id, config.HOLD_REMINDER_SECONDS)
+        self.cli.show_message(self.message_manager.get_acknowledgement(EventType.H_NOT_YET, task))
+
+    def _propose_followup(self, task: RobotTask, event: Event) -> None:
+        """Offer the next task in the workflow, if the catalog defines one.
+
+        This is where the system's anticipation actually lives. Recognition
+        says when a sequence STARTS; the workflow model carries it forward,
+        so the robot does not need to re-detect a step it already knows is
+        coming.
+        """
         self.active_task = None
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+
+        spec = task_catalog.task_by_key(task.task_key)
+        if spec is None or spec.next_task is None:
+            return
+
+        following = task_catalog.task_by_key(spec.next_task)
+        if following is None:
+            self.logger.log_message(
+                "Follow-up task key is not in the catalog.",
+                {"task_key": task.task_key, "next_task": spec.next_task},
+            )
+            return
+
+        now = time.time()
+        next_task = RobotTask(
+            task_instance_id=self._build_task_instance_id(
+                task.round_id, task.step_id, task.piece_id
+            ) + f"_{following.key}",
+            step_id=task.step_id,
+            piece_id=task.piece_id,
+            round_id=task.round_id,
+            state=RobotTaskState.R_WAITING_RESPONSE,
+            speed=config.DEFAULT_SPEED,
+            progress=1.0,
+            task_key=following.key,
+            created_at=now,
+            updated_at=now,
+        )
+        self.active_task = next_task
+        self.logger.log_message(
+            "Proposed follow-up task from the workflow catalog.",
+            {
+                "after": task.task_key,
+                "task_key": following.key,
+                "task_instance_id": next_task.task_instance_id,
+                "permission": following.permission,
+                "reason": following.reason,
+            },
+        )
+
+        if following.permission == task_catalog.PERMISSION_ANNOUNCE:
+            # The human already agreed to the situation this task continues,
+            # so a second question is friction, not consent. Say what is
+            # about to happen, leave a window to stop it, then go.
+            next_task.state = RobotTaskState.R_ANNOUNCED
+            self.cli.show_message(self.message_manager.get_announcement(following))
+            self.timer.start_defer_timer(
+                next_task.task_instance_id, config.ANNOUNCE_VETO_SECONDS
+            )
+            return
+
+        self.cli.show_permission_request(self.message_manager.get_followup_proposal(following))
+        self.timer.start_response_timer(next_task.task_instance_id, config.RESPONSE_TIMEOUT_SECONDS)
 
     def _show_execution_dialogue(self, task: RobotTask) -> None:
         self.cli.show_message(self.message_manager.get_execution_message(task))

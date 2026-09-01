@@ -31,11 +31,17 @@ class GHDispatcher:
 
     def build_message(self, task: RobotTask) -> dict:
         """Create the outbound Grasshopper JSON message."""
-        step_message = config.GH_STEP_MESSAGES.get(task.step_id, {})
+        # Prefer the task key: a chained task (bring the joint piece after
+        # a hold) carries the step id of whatever started the sequence, so
+        # a step-id lookup would send Grasshopper the wrong trajectory.
+        message = config.GH_TASK_MESSAGES.get(getattr(task, "task_key", ""), None)
+        if message is None:
+            message = config.GH_STEP_MESSAGES.get(task.step_id, {})
         return {
             "step_id": int(task.step_id),
+            "task_key": getattr(task, "task_key", ""),
             "progress": float(task.progress),
             "piece_id": int(task.piece_id),
             "round_id": int(task.round_id),
-            "suggested_action": step_message.get("suggested_action", "wait"),
+            "suggested_action": message.get("suggested_action", "wait"),
         }

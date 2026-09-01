@@ -17,10 +17,18 @@ class CLIInterface:
         """Display a permission request for a proposed robot task."""
         print(message)
 
+    def read_raw(self) -> str:
+        """Read one line without interpreting it.
+
+        Queries ("what are you doing", "why", "repeat") are answered locally
+        and never become events, so the runtime needs the text before the
+        parser turns it into one -- or fails to.
+        """
+        return input("> ")
+
     def read_input(self) -> Event | None:
         """Read one CLI command and convert it into an event."""
-        raw_text = input("> ")
-        return self.parse_command(raw_text)
+        return self.parse_command(self.read_raw())
 
     def parse_command(self, raw_text: str) -> Event | None:
         """Convert a raw command string into a standardized Event."""

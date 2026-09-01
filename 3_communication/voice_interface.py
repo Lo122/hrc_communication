@@ -68,9 +68,18 @@ class VoiceInterface:
             raise RuntimeError("OPENAI_API_KEY and VOICE_MODEL must be set")
 
         instructions = (
-            "Understand the user's spoken intent and output exactly one lowercase "
-            f"command from: {', '.join(sorted(self._phrases))}, unknown. "
-            "Map natural expressions to their meaning and output unknown if unclear."
+            "You are the ear of a robot assisting a construction worker who is "
+            "installing ceiling panels overhead, with both hands busy and tools running. "
+            "Output exactly one lowercase command from this list and nothing else: "
+            f"{', '.join(sorted(self._phrases))}, unknown. "
+            "Map natural speech onto its meaning: agreement of any kind is yes, "
+            "refusal is no, asking to wait is later. "
+            "Anything meaning the panel is now fixed and you may release it "
+            "-- fixed, secured, let go, I am done screwing -- is secured. "
+            "Anything meaning keep holding is not yet. "
+            "Ignore speech that is clearly not addressed to you, muttering, and "
+            "tool noise; output unknown rather than guessing. "
+            "Never output more than one command."
         )
         ws = websocket.create_connection(
             f"wss://api.openai.com/v1/realtime?model={model}",

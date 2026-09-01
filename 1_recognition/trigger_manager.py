@@ -56,6 +56,10 @@ class TriggerManager:
                 source="recognition",
                 payload={
                     "step_id": step_id,
+                    # Which robot task this trigger proposes. Chained tasks
+                    # share a step id with the trigger that started the
+                    # sequence, so the key is what actually identifies them.
+                    "task_key": rule.get("task_key", ""),
                     "piece_id": recognition_result.piece_id,
                     "round_id": recognition_result.round_id,
                     "progress": recognition_result.progress,

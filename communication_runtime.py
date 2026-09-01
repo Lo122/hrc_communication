@@ -15,6 +15,7 @@ for layer in [
     sys.path.insert(0, str(ROOT / layer))
 
 import config
+from events import Event, EventType
 from cmd_parser import CommandParser
 from cli_interface import CLIInterface
 from communication_manager import CommunicationManager
@@ -96,11 +97,58 @@ class HRCSystem:
     def _cli_loop(self) -> None:
         """Read CLI commands and publish parsed events."""
         while self.system_running:
-            event = self.cli.read_input()
+            raw_text = self.cli.read_raw()
+
+            # Questions are answered here and never reach the event queue --
+            # there is no state to transition to, the human just wants to
+            # know something. Checked first, because the command parser
+            # would otherwise reject them as unrecognized.
+            if self._answer_query(raw_text):
+                continue
+
+            event = self.cli.parse_command(raw_text)
             if event is not None:
                 self.event_queue.put(event)
             else:
                 self.communication.show_message("Command not recognized.")
+
+    def _answer_query(self, raw_text: str) -> bool:
+        """Speak an answer to a question. True if it was one."""
+        query = self.command_parser.parse_query(raw_text)
+        if query is None:
+            return False
+
+        task = self.task_manager.active_task
+
+        if query == "status":
+            self.communication.show_message(
+                self.message_manager.get_status_message(task)
+            )
+        elif query == "why":
+            self.communication.show_message(
+                self.message_manager.get_proposal_reason(task)
+            )
+        elif query == "queue":
+            self.communication.show_message(
+                self.message_manager.get_pending_summary(self.pending_pool.list_all())
+            )
+        elif query == "repeat":
+            self.communication.show_message(
+                self.message_manager.get_repeat_message(self.communication.last_message)
+            )
+        elif query == "run_pending":
+            pending = self.pending_pool.list_all()
+            if not pending:
+                self.communication.show_message("Nothing is queued.")
+            else:
+                self.event_queue.put(
+                    Event(
+                        event_type=EventType.H_EXECUTE_PENDING_TASK,
+                        source="human_cli",
+                        task_instance_id=pending[0].task_instance_id,
+                    )
+                )
+        return True
 
     def _current_state(self):
         task = getattr(self, "task_manager", None)

@@ -19,10 +19,16 @@ class RobotTaskState(Enum):
     R_ACCEPTED = auto()
     R_REFUSED = auto()
     R_DEFER = auto()
+    # Robot said what it is about to do and is running a short veto
+    # window. Deliberately NOT R_DEFER: that means the human asked to
+    # wait, and the fluency analysis has to count the two separately.
+    R_ANNOUNCED = auto()
     R_PENDING = auto()
 
     R_EXECUTING = auto()
     R_PAUSED = auto()
+    # Only MODE_HOLD_UNTIL_SECURED tasks enter this state.
+    R_HOLDING = auto()
     R_REDO = auto()
     R_WAITING_FREE_DRIVE = auto()
     R_FREE_DRIVE = auto()
@@ -63,6 +69,9 @@ class EventType(Enum):
     H_SLOWDOWN = auto()
 
     H_DONE = auto()
+    H_SECURED = auto()
+    # Human explicitly asks the robot to keep holding.
+    H_NOT_YET = auto()
 
     RESPONSE_TIMEOUT = auto()
     DEFER_TIMEOUT = auto()

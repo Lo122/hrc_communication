@@ -26,28 +26,52 @@ SAFE_RETURN_JOINT_RANGES = [
     (-3, 3),  # joint 6
 ]
 
-STEP_LIFT_PANEL = 0
-STEP_BRING_JOINT = 2
-STEP_BRING_NEXT_PANEL = 6
+# ---------------------------------------------------------------------------
+# Workflow
+#
+# The assembly sequence, the proposals, the GH actions and the trigger
+# thresholds all live in 0_core/task_catalog.py now -- one table instead of
+# three parallel dicts that had to be kept in sync by hand. What is left here
+# is the derivation, so existing imports keep working.
+# ---------------------------------------------------------------------------
 
+import sys as _sys
+from pathlib import Path as _Path
 
+_CORE = _Path(__file__).resolve().parent / "0_core"
+if str(_CORE) not in _sys.path:
+    _sys.path.insert(0, str(_CORE))
 
-TRIGGER_RULES = {
-    STEP_LIFT_PANEL: {
-        "progress_threshold": 0.5,
-        "min_confidence": 0.8,
-    },
-    STEP_BRING_JOINT: {
-        "progress_threshold": 0.8,
-        "min_confidence": 0.8,
-    },
-}
+import task_catalog  # noqa: E402
 
-PERMISSION_MESSAGES = {
-    STEP_LIFT_PANEL: "Would you like me to lift the panel?",
-    STEP_BRING_JOINT: "Would you like me to bring the joint piece?",
-    STEP_BRING_NEXT_PANEL: "Would you like me to bring the next panel?",
-}
+TASKS = task_catalog.TASKS
+
+# step id -> {"progress_threshold", "min_confidence", "task_key"}
+TRIGGER_RULES = task_catalog.trigger_rules()
+
+# Kept so nothing that still imports these breaks. Prefer task_catalog.
+STEP_PANEL_CUT = task_catalog.STEP_PANEL_CUT
+STEP_PULL_CABLE = task_catalog.STEP_PULL_CABLE
+STEP_ALIGN = task_catalog.STEP_ALIGN
+STEP_SCREW = task_catalog.STEP_SCREW
+STEP_CUT_PIPE = task_catalog.STEP_CUT_PIPE
+STEP_CONNECT_PIPE = task_catalog.STEP_CONNECT_PIPE
+STEP_CLAMP_JOINT = task_catalog.STEP_CLAMP_JOINT
+
+# How long the robot waits in R_HOLDING before reminding the human it is
+# still under load. It never releases on its own -- a timeout that dropped a
+# panel would be the worst possible failure mode.
+HOLD_REMINDER_SECONDS = 25.0
+
+# A cancel on a load-bearing task (see task_catalog.carries_load) has to be
+# said twice, within this many seconds. The microphone is open while the
+# robot holds a panel, so one overheard word must not make it let go.
+CANCEL_CONFIRM_WINDOW_SECONDS = 8.0
+
+# How long an announced task waits before it goes ahead, giving the human
+# time to say stop. Long enough to react to speech, short enough that the
+# robot does not feel hesitant.
+ANNOUNCE_VETO_SECONDS = 4.0
 
 ROS_BRIDGE_HOST = "127.0.0.1"
 ROS_BRIDGE_PORT = 9090
@@ -73,16 +97,24 @@ ROS_TOPICS = {
 # discrete task-state events on this bus were designed for at full frame rate.
 HUMAN_LOCATION_PUBLISH_EVERY_N_FRAMES = 5
 
+# Grasshopper payload per task, derived from the catalog. The dispatcher
+# looks tasks up by task_key now, not by step id -- chained tasks share a
+# step id with whatever triggered the sequence.
+GH_TASK_MESSAGES = {
+    key: {"suggested_action": spec.gh_action}
+    for key, spec in task_catalog.TASKS.items()
+}
+
+# Legacy shape, still keyed by the step that triggers each task, for anything
+# that has not moved to task_key yet.
 GH_STEP_MESSAGES = {
-    STEP_LIFT_PANEL: {
-        "suggested_action": "assist_lifting",
-    },
-    STEP_BRING_JOINT: {
-        "suggested_action": "bring_joint",
-    },
-    STEP_BRING_NEXT_PANEL: {
-        "suggested_action": "bring_next_panel",
-    },
+    step_id: {"suggested_action": spec.gh_action}
+    for step_id, spec in task_catalog.triggered_tasks().items()
+}
+
+PERMISSION_MESSAGES = {
+    step_id: spec.proposal
+    for step_id, spec in task_catalog.triggered_tasks().items()
 }
 
 UDP_HOST = "127.0.0.1"
@@ -99,7 +131,9 @@ VOICE_GPT_ENABLED = True
 
 VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-0.15"
 VOICE_INPUT_DEVICE_NAME = None
-VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
+# Derived from RESPONSE_TIMEOUT_SECONDS so the microphone stays open for
+# exactly as long as the task is actually waiting for an answer.
+VOICE_LISTEN_TIMEOUT_SECONDS = RESPONSE_TIMEOUT_SECONDS
 VOICE_TTS_RATE = 175
 VOICE_POST_TTS_GUARD_SECONDS = 1.0
 VOICE_MAX_ATTEMPTS = 2
