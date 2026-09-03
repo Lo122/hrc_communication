@@ -29,8 +29,7 @@ SAFE_RETURN_JOINT_RANGES = [
 STEP_LIFT_PANEL = 0
 STEP_BRING_JOINT = 2
 STEP_BRING_NEXT_PANEL = 6
-
-
+STEP_HOLD_WHEN_DISASSEMBLE = 99 #NOT SURE NOW, MIGHT HAPPEN ANYTIME
 
 TRIGGER_RULES = {
     STEP_LIFT_PANEL: {
@@ -82,6 +81,9 @@ GH_STEP_MESSAGES = {
     },
     STEP_BRING_NEXT_PANEL: {
         "suggested_action": "bring_next_panel",
+    },
+    HOLD_WHEN_DISASSEMBLE: {
+        "suggested_action": "hold_when_disassemble",
     },
 }
 

@@ -17,7 +17,7 @@ SAMPLE_RATE = 24_000
 TIMEOUT = 8.0
 COMMANDS = {
     "yes", "no", "later", "pause", "resume", "restart", "cancel",
-    "faster", "slower", "free drive", "return home", "manual recovery", "done",
+    "faster", "slower", "free drive", "return home", "manual recovery", "done", 
 }
 
 
