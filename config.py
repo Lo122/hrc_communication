@@ -82,9 +82,9 @@ GH_STEP_MESSAGES = {
     STEP_BRING_NEXT_PANEL: {
         "suggested_action": "bring_next_panel",
     },
-    HOLD_WHEN_DISASSEMBLE: {
-        "suggested_action": "hold_when_disassemble",
-    },
+    # HOLD_WHEN_DISASSEMBLE: {
+    #     "suggested_action": "hold_when_disassemble",
+    # },
 }
 
 UDP_HOST = "127.0.0.1"
