@@ -60,7 +60,7 @@ class TaskManager:
             EventType.ROBOT_RUNNING: self._handle_robot_running,
             EventType.ROBOT_SUCCESS: self._handle_robot_success,
             EventType.ROBOT_HOMED: self._handle_robot_homed,
-            EventType.HOLD_WHEN_DISASSEMBLE: self._handle_hold_when_disassemble,
+            # EventType.HOLD_WHEN_DISASSEMBLE: self._handle_hold_when_disassemble,
         }
 
         handler = handlers.get(event.event_type)
