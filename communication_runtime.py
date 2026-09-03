@@ -49,6 +49,7 @@ class HRCSystem:
                 gpt_enabled=config.VOICE_GPT_ENABLED,
                 phrases=CommandParser._ALIASES,
                 device_name=config.VOICE_INPUT_DEVICE_NAME,
+                output_device_name=config.VOICE_OUTPUT_DEVICE_NAME,
                 timeout=config.VOICE_LISTEN_TIMEOUT_SECONDS,
             )
             self.tts = TTSManager(config.VOICE_TTS_RATE)

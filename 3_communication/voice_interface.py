@@ -6,9 +6,9 @@ import os
 import queue
 import threading
 import time
-import winsound
 from pathlib import Path
 
+import numpy as np
 import sounddevice as sd
 import websocket
 from dotenv import load_dotenv
@@ -19,7 +19,8 @@ load_dotenv(Path(__file__).parent / "gpt_live" / ".env")
 
 
 class VoiceInterface:
-    def __init__(self, model_path: str | Path, gpt_enabled: bool, phrases, device_name=None, timeout=8.0):
+    def __init__(self, model_path: str | Path, gpt_enabled: bool, phrases,
+                 device_name=None, timeout=8.0, output_device_name=None):
         model_path = Path(model_path)
         if not model_path.is_dir():
             raise RuntimeError(f"Vosk model not found: {model_path}")
@@ -28,6 +29,7 @@ class VoiceInterface:
         self._phrases = set(phrases)
         self._grammar = json.dumps(list(self._phrases))
         self._device = self._find_input_device(device_name)
+        self._output_device_name = output_device_name
         self._timeout = timeout
         self._stop = threading.Event()
         self._thread = None
@@ -55,8 +57,21 @@ class VoiceInterface:
         return matches[0]
 
     @staticmethod
-    def _play_ready_beep() -> None:
-        winsound.Beep(1000, 150)
+    def _find_output_device(name):
+        if not name:
+            return sd.default.device[1]
+        return next(
+            index for index, device in enumerate(sd.query_devices())
+            if device["max_output_channels"] > 0
+            and name.casefold() in device["name"].casefold()
+        )
+
+    def _play_ready_beep(self) -> None:
+        device = self._find_output_device(self._output_device_name)
+        sample_rate = int(sd.query_devices(device, "output")["default_samplerate"])
+        samples = np.arange(int(sample_rate * 0.4))
+        tone = (0.4 * np.sin(2 * np.pi * 1000 * samples / sample_rate)).astype("float32")
+        sd.play(tone, sample_rate, device=device, blocking=True)
 
     def _connect_gpt(self) -> bool:
         if self._ws and self._ws.connected:

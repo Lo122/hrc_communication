@@ -97,8 +97,10 @@ VOICE_ENABLED = True
 
 VOICE_GPT_ENABLED = True
 
+# List audio devices: .venv\Scripts\python.exe -m sounddevice
 VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-0.15"
 VOICE_INPUT_DEVICE_NAME = None
+VOICE_OUTPUT_DEVICE_NAME = None
 VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
 VOICE_TTS_RATE = 175
 VOICE_POST_TTS_GUARD_SECONDS = 1.0
