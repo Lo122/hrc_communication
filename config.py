@@ -44,9 +44,9 @@ TRIGGER_RULES = {
 }
 
 PERMISSION_MESSAGES = {
-    STEP_LIFT_PANEL: "Would you like me to lift the panel?",
-    STEP_BRING_JOINT: "Would you like me to bring the joint piece?",
-    STEP_BRING_NEXT_PANEL: "Would you like me to bring the next panel?",
+    STEP_LIFT_PANEL: "Would you like me to lift the panel? Speak after beep.",
+    STEP_BRING_JOINT: "Would you like me to bring the joint piece? Speak after beep.",
+    STEP_BRING_NEXT_PANEL: "Would you like me to bring the next panel? Speak after beep.",
 }
 
 ROS_BRIDGE_HOST = "127.0.0.1"
