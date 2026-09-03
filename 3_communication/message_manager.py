@@ -33,6 +33,8 @@ class MessageManager:
             EventType.H_RESUME: "The robot task has resumed.",
             EventType.H_RESTART: "The robot task is restarting.",
             EventType.H_CANCEL: "The robot task has been canceled.",
+            EventType.H_SPEEDUP: "The robot speed has been increased.",
+            EventType.H_SLOWDOWN: "The robot speed has been decreased.",
             EventType.H_DONE: "Human-done signal sent.",
             EventType.ROBOT_SUCCESS: "Robot task completed.",
             EventType.ROBOT_HOMED: "Robot returned to its home position.",

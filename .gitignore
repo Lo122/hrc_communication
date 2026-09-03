@@ -62,3 +62,9 @@ tmp/
 temp/
 *.tmp
 *.bak
+
+# Model files
+**/*.pt
+**/*.pth
+**/*.npz
+**/*.json

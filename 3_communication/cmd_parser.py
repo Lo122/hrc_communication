@@ -16,11 +16,13 @@ class CommandParser:
         "later": EventType.H_DEFER,
         "defer": EventType.H_DEFER,
         "pause": EventType.H_PAUSE,
+        "stop": EventType.H_PAUSE,
         "continue": EventType.H_RESUME,
         "resume": EventType.H_RESUME,
         "restart": EventType.H_RESTART,
         "redo": EventType.H_RESTART,
         "cancel": EventType.H_CANCEL,
+        "cancel task": EventType.H_CANCEL,
         "faster": EventType.H_SPEEDUP,
         "speed up": EventType.H_SPEEDUP,
         "slower": EventType.H_SLOWDOWN,
@@ -34,7 +36,7 @@ class CommandParser:
         "finished": EventType.H_DONE,
     }
 
-    def parse(self, raw_text: str) -> Event | None:
+    def parse(self, raw_text: str, source: str = "human_cli") -> Event | None:
         text = raw_text.strip().lower()
         if not text:
             return None
@@ -43,7 +45,7 @@ class CommandParser:
             task_instance_id = text.split(maxsplit=1)[1]
             return Event(
                 event_type=EventType.H_EXECUTE_PENDING_TASK,
-                source="human_cli",
+                source=source,
                 task_instance_id=task_instance_id,
             )
 
@@ -51,4 +53,4 @@ class CommandParser:
         if event_type is None:
             return None
 
-        return Event(event_type=event_type, source="human_cli")
+        return Event(event_type=event_type, source=source)

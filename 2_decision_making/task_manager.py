@@ -40,6 +40,7 @@ class TaskManager:
 
         handlers = {
             EventType.RECOGNITION_TRIGGER: self._handle_recognition_trigger,
+            EventType.HUMAN_LOCATION_UPDATE: self._handle_human_location_update,
             EventType.H_ACCEPT: self._handle_accept,
             EventType.H_REFUSE: self._handle_refuse,
             EventType.H_DEFER: self._handle_defer,
@@ -59,6 +60,7 @@ class TaskManager:
             EventType.ROBOT_RUNNING: self._handle_robot_running,
             EventType.ROBOT_SUCCESS: self._handle_robot_success,
             EventType.ROBOT_HOMED: self._handle_robot_homed,
+            # EventType.HOLD_WHEN_DISASSEMBLE: self._handle_hold_when_disassemble,
         }
 
         handler = handlers.get(event.event_type)
@@ -96,6 +98,20 @@ class TaskManager:
         self.cli.show_permission_request(message)
         self.timer.start_response_timer(task.task_instance_id, config.RESPONSE_TIMEOUT_SECONDS)
         self.logger.log_message("Task entered R_WAITING_RESPONSE.", {"task_instance_id": task.task_instance_id})
+
+    def _handle_human_location_update(self, event: Event) -> None:
+        """Forward the human's world-frame position (plus, if this frame
+        had one, their pelvis-relative posture keypoints) to both
+        consumers -- Grasshopper (visualization) and ROS (path planning).
+        Stateless: doesn't touch active_task/the state machine, just
+        relays."""
+        xyz = (event.payload["x"], event.payload["y"], event.payload["z"])
+        timestamp = event.payload.get("timestamp")
+        keypoints = event.payload.get("keypoints")
+        # UDPEventReceiver is message transfer
+        # self.gh_dispatcher.dispatch_human_location(xyz, timestamp)
+        # ROS message transfer
+        self.ros.publish_human_location(xyz, timestamp, keypoints)
 
     def _handle_accept(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
@@ -301,6 +317,7 @@ class TaskManager:
 
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed increased.")
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_slowdown(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
@@ -312,6 +329,7 @@ class TaskManager:
 
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed decreased.")
+        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _handle_free_go(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_FREE_DRIVE)

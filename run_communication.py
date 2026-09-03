@@ -1,4 +1,11 @@
-"""Run communication, CLI, TaskManager, and ROS without realtime recognition."""
+"""
+    Run communication, CLI, TaskManager, and ROS without realtime recognition.
+    Usage:
+        uv run python run_communication.py [--host HOST] [--port PORT]
+          [--debug-trigger] [--debug-step-id STEP_ID]
+          [--debug-progress PROGRESS] [--debug-round-id ROUND_ID]
+          [--debug-piece-id PIECE_ID]     
+"""
 
 from __future__ import annotations
 

@@ -42,6 +42,8 @@ class StateMachine:
         (RobotTaskState.R_MANUAL_RECOVERY, EventType.H_DONE): RobotTaskState.R_CANCELED,
         (RobotTaskState.R_MANUAL_RECOVERY, EventType.H_CANCEL): RobotTaskState.R_CANCELED,
         (RobotTaskState.R_RETURNING_HOME, EventType.ROBOT_HOMED): RobotTaskState.R_CANCELED,
+        # HOLD WHEN DISASSEMBLE is a special case that can happen at any time, so we allow it from any state.
+        # (RobotTaskState.R_EXECUTING, EventType.H_DISASSEMBLE): RobotTaskState.R_HOLDING_WHEN_DISASSEMBLE,
     }
 
     def is_valid_transition(

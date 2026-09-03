@@ -29,8 +29,7 @@ SAFE_RETURN_JOINT_RANGES = [
 STEP_LIFT_PANEL = 0
 STEP_BRING_JOINT = 2
 STEP_BRING_NEXT_PANEL = 6
-
-
+STEP_HOLD_WHEN_DISASSEMBLE = 99 #NOT SURE NOW, MIGHT HAPPEN ANYTIME
 
 TRIGGER_RULES = {
     STEP_LIFT_PANEL: {
@@ -44,9 +43,9 @@ TRIGGER_RULES = {
 }
 
 PERMISSION_MESSAGES = {
-    STEP_LIFT_PANEL: "Would you like me to lift the panel?",
-    STEP_BRING_JOINT: "Would you like me to bring the joint piece?",
-    STEP_BRING_NEXT_PANEL: "Would you like me to bring the next panel?",
+    STEP_LIFT_PANEL: "Would you like me to lift the panel? Speak after beep.",
+    STEP_BRING_JOINT: "Would you like me to bring the joint piece? Speak after beep.",
+    STEP_BRING_NEXT_PANEL: "Would you like me to bring the next panel? Speak after beep.",
 }
 
 ROS_BRIDGE_HOST = "127.0.0.1"
@@ -62,7 +61,17 @@ ROS_TOPICS = {
     "gripper": "/Robot/gripper",  # std_msgs/Bool: False=closed, True=open
     "free_drive": "/Robot/teachMode",
     "r_task_done": "/Task/signal",
+    "human_position": "/Human/position/live",  # std_msgs/String: JSON-encoded {header, point,
+                                                # keypoints} -- see ros_communication.py's
+                                                # publish_human_location() docstring for why this
+                                                # isn't a stock geometry_msgs/PointStamped (that
+                                                # type has no room for the keypoints dict).
 }
+
+# How often recognition publishes HUMAN_LOCATION_UPDATE events, in frames -- see
+# run_recognition.py's main loop. 5 -> ~5-6Hz at a 30fps camera, well above what the
+# discrete task-state events on this bus were designed for at full frame rate.
+HUMAN_LOCATION_PUBLISH_EVERY_N_FRAMES = 5
 
 GH_STEP_MESSAGES = {
     STEP_LIFT_PANEL: {
@@ -74,6 +83,9 @@ GH_STEP_MESSAGES = {
     STEP_BRING_NEXT_PANEL: {
         "suggested_action": "bring_next_panel",
     },
+    # HOLD_WHEN_DISASSEMBLE: {
+    #     "suggested_action": "hold_when_disassemble",
+    # },
 }
 
 UDP_HOST = "127.0.0.1"
@@ -83,5 +95,18 @@ EVENT_TRANSPORT_HOST = "127.0.0.1"
 EVENT_TRANSPORT_PORT = 5010
 
 LOG_FILE_PATH = "hrc_communication_events.log"
+
+VOICE_ENABLED = True
+
+VOICE_GPT_ENABLED = True
+
+# List audio devices: .venv\Scripts\python.exe -m sounddevice
+VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-0.15"
+VOICE_INPUT_DEVICE_NAME = None
+VOICE_OUTPUT_DEVICE_NAME = None
+VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
+VOICE_TTS_RATE = 175
+VOICE_POST_TTS_GUARD_SECONDS = 1.0
+VOICE_MAX_ATTEMPTS = 2
 
 test_vid_path = r"G:\.shortcut-targets-by-id\1nZZWQUKOdxeC-oo-NKucbuUj38ir4mZC\ITECH_Thesis\Videos\raw\cam-04\video__cam-04_uid-01_take-01.mp4"

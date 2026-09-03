@@ -1,0 +1,32 @@
+{
+  "T_world_from_camera": [
+    [
+      0.0,
+      -0.25881904510252074,
+      0.9659258262890683,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      -0.9659258262890683,
+      -0.25881904510252074,
+      1.4
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "ground_z": 0.0,
+  "T_world_from_robot_base": null,
+  "marker_id": null,
+  "notes": "ESTIMATED, not measured from a real checkerboard/ArUco calibration. Visual guess from video__cam-04_uid-01_take-01.mp4: camera height 1.4m, 15 deg downward tilt, no roll, world origin = floor point directly below the camera. fx=fy=1500px (~65 deg HFOV guess) at 1920x1080. Replace with a real intrinsic_calibration.py + extrinsic_calibration.py run before trusting any world-frame numbers for real robot/precision use."
+}

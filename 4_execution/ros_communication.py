@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import time
+
 import config
 from events import Event, EventType
 
@@ -9,6 +13,17 @@ try:
     import roslibpy
 except ImportError:  # pragma: no cover - depends on deployment environment
     roslibpy = None
+
+_logger = logging.getLogger(__name__)
+
+
+def _to_ros_time(timestamp: float) -> dict:
+    """Convert a float Unix timestamp to a ROS1 time dict ({secs, nsecs}),
+    as used in std_msgs/Header.stamp."""
+    secs = int(timestamp)
+    nsecs = int(round((timestamp - secs) * 1e9))
+    return {"secs": secs, "nsecs": nsecs}
+
 
 class ROSCommunication:
     """Publishes runtime robot commands and converts robot feedback into events."""
@@ -116,6 +131,41 @@ class ROSCommunication:
     def publish_free_drive(self, enabled: bool) -> None:
         self._publish("free_drive", {"data": bool(enabled)})
 
+    def publish_human_location(
+        self,
+        xyz: tuple[float, float, float],
+        timestamp: float | None = None,
+        keypoints: dict[str, dict[str, float]] | None = None,
+    ) -> None:
+        """Publish the human's world-frame position (see
+        1_recognition/skeleton3d_pipeline.py's world_root_xyz -- same
+        world frame as /UR10/position/live, defined by the calibrated
+        extrinsics) for downstream consumers like path planning, plus
+        their pelvis-relative posture as an H36M-17 keypoint dict (see
+        recognition_manager.py's get_last_keypoints() -- pelvis is
+        included and always exactly (0,0,0), everything else relative to
+        it) for consumers that need body shape, not just root position.
+        keypoints is None when no valid 3D lift has been seen yet.
+
+        Published as std_msgs/String, JSON-encoded -- NOT a stock
+        geometry_msgs/PointStamped: that type has no field for the
+        keypoints dict, and sending one anyway (as this used to) meant
+        rosbridge either silently dropped it or, depending on the
+        rosbridge/message-conversion version, rejected the whole message,
+        which is why /Human/position/live could go quiet on `rostopic
+        echo`. A single JSON string keeps position+keypoints as one
+        message on one topic without needing a custom .msg package."""
+        body = {
+            "header": {
+                "seq": 0,
+                "stamp": _to_ros_time(timestamp if timestamp is not None else time.time()),
+                "frame_id": "world",
+            },
+            "point": {"x": float(xyz[0]), "y": float(xyz[1]), "z": float(xyz[2])},
+            "keypoints": keypoints if keypoints is not None else {},
+        }
+        self._publish("human_position", {"data": json.dumps(body)})
+
     def _init_publishers(self) -> None:
         self._publishers = {
             "control": self._advertise(config.ROS_TOPICS["control"], "std_msgs/String"),
@@ -123,6 +173,7 @@ class ROSCommunication:
             "local_speed": self._advertise(config.ROS_TOPICS["local_speed"], "std_msgs/Float64"),
             "human_done": self._advertise(config.ROS_TOPICS["human_done"], "std_msgs/String"),
             "free_drive": self._advertise(config.ROS_TOPICS["free_drive"], "std_msgs/Bool"),
+            "human_position": self._advertise(config.ROS_TOPICS["human_position"], "std_msgs/String"),
         }
 
     def _init_subscribers(self) -> None:
@@ -168,7 +219,9 @@ class ROSCommunication:
 
     def _publish(self, publisher_name: str, payload: dict) -> None:
         if not self._is_ready():
-            print(f"[ros] {publisher_name} {payload['data']}")
+            # Most payloads here are {"data": ...} (std_msgs/*), but not all --
+            # e.g. publish_human_location's PointStamped has no top-level "data".
+            _logger.warning("[ros] %s %s", publisher_name, payload.get("data", payload))
             return
 
         topic = self._publishers[publisher_name]
