@@ -11,9 +11,7 @@ class MessageManager:
         return PERMISSION_MESSAGES.get(step_id, f"Would you like me to execute step {step_id}?")
 
     def get_execution_message(self, task) -> str:
-        actions = ["pause", "cancel", "restart", "faster", "slower"]
-        message = "Robot task is executing. You can type: " + ", ".join(actions) + "."
-        return message
+        return "Robot running. Say pause, cancel, restart, faster, or slower."
 
     def ask_permission_for_free_drive(self) -> str:
         return 'Robot task finished. Enter free drive mode for manual adjustment? Type "free drive" to confirm or "no" to finish.'
@@ -27,7 +25,7 @@ class MessageManager:
     def get_acknowledgement(self, event_type: EventType) -> str:
         messages = {
             EventType.H_ACCEPT: "Robot task accepted.",
-            EventType.H_REFUSE: "Robot task moved to pending.",
+            EventType.H_REFUSE: "Robot task moved to pending.But why?",
             EventType.H_DEFER: "Robot task deferred.",
             EventType.H_PAUSE: "The robot task has been paused.",
             EventType.H_RESUME: "The robot task has resumed.",

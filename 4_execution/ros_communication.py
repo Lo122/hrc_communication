@@ -98,7 +98,7 @@ class ROSCommunication:
 
     def publish_pause(self) -> None:
         """Temporarily stop motion without overwriting the task's saved speed."""
-        self.publish_global_speed(config.MIN_SPEED)
+        self.publish_global_speed(config.MIN_SPEED)  # ROS speed topics are Float64, not zero, to avoid divide-by-zero errors
 
     def publish_resume(self, speed: float) -> None:
         """Restore the task speed saved by TaskManager."""
