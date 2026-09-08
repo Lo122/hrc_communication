@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 STEP_SMOOTHING_WINDOW = 5
 STEP_CONFIRMATION_COUNT = 3
-STEP_MIN_CONFIDENCE = 0.6
-STEP_MIN_MARGIN = 0.15
+STEP_MIN_CONFIDENCE = 0.4
+STEP_MIN_MARGIN = 0.10
 
 # video_source auto-detection (RecognitionManager._classify_video_source) -- recorded-file
 # extensions vs. live-stream URL schemes, see that method's docstring.
@@ -108,6 +108,15 @@ class RecognitionManager:
         # added to sys.path once the realtime pipeline is set up.
         self.last_root_relative_skeleton: np.ndarray | None = None
         self._h36m_joint_names: list[str] | None = None
+
+        # Per-step softmax probabilities and the raw progress-head output from the most
+        # recent frame the LSTM actually ran on (i.e. once self.buffer is full) -- updated
+        # every such frame regardless of whether a stable step transition was confirmed, so
+        # a live plot (see step_probability_plot.py) can show raw model output over time
+        # rather than only the sparse, debounced RecognitionResult stream.
+        self.last_step_probabilities: np.ndarray | None = None
+        self.last_progress: float | None = None
+        self.last_step_probabilities_timestamp: float | None = None
 
         self.round_id = 0
         self.piece_id = 0
@@ -197,9 +206,12 @@ class RecognitionManager:
             progress = float(progress_pred.item())
 
         probabilities = step_probs.squeeze(0).cpu().numpy()
+        self.last_step_probabilities = probabilities
+        self.last_progress = progress
+        self.last_step_probabilities_timestamp = frame_timestamp
         stable_step_id = self._stable_step_id(probabilities)
         self.last_raw_step_id = raw_step_id
-
+        print(f"Probabilities: {probabilities}")
         if stable_step_id is None:
             self._show_frame(frame, pipeline_out, raw_step_id=raw_step_id, progress=progress, confidence=confidence)
             return None

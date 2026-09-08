@@ -48,19 +48,20 @@ class TriggerManager:
         previous = self.previous_progress.get(progress_key, 0.0)
         current = recognition_result.progress
         threshold = rule["progress_threshold"]
-
-        if previous <= threshold and current > threshold:
-            self.triggered_keys.add(trigger_key)
-            return Event(
-                event_type=EventType.RECOGNITION_TRIGGER,
-                source="recognition",
-                payload={
-                    "step_id": step_id,
-                    "piece_id": recognition_result.piece_id,
-                    "round_id": recognition_result.round_id,
-                    "progress": recognition_result.progress,
-                },
-            )
+        
+        
+        # if previous <= threshold and current > threshold:
+        #     self.triggered_keys.add(trigger_key)
+        return Event(
+            event_type=EventType.RECOGNITION_TRIGGER,
+            source="recognition",
+            payload={
+                "step_id": step_id,
+                "piece_id": recognition_result.piece_id,
+                "round_id": recognition_result.round_id,
+                "progress": recognition_result.progress,
+            },
+        )
 
         return None
 

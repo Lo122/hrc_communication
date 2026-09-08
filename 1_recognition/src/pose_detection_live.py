@@ -35,7 +35,7 @@ shows camera-relative depth (Z from the lens), but cannot report a WORLD
 position -- there is no defined origin without extrinsics.
 
 Usage, webcam:
-    uvpython pose_detection_live.py --source 0 --device cuda:0 `
+    uv run python pose_detection_live.py --source 0 --device cuda:0 `
         --user-height-m 1.75 --capture-rotate90 90 --world-view-range 5.0
 
 Usage, iPhone via Record3D (must match the --capture-rotate90 used when
@@ -44,7 +44,8 @@ calibrating iphone_intrinsics.json/iphone_extrinsics.json):
         --capture-rotate90 90 --device cuda:0 --world-view-range 5.0 --user-height-m 1.75
 
 Usage, recorded video (for testing without a live camera):
-    python pose_detection_live.py --source path/to/clip.mp4 --device cuda:0
+    uv run python pose_detection_live.py --source "G:\\My Drive\\University of Stuttgart\\ITECH_Thesis\\Videos\\raw\\cam-04\\video__cam-04_uid-01_take-02.mp4" `
+        --device cuda:0 --world-view-range 5.0 --user-height-m 1.75
 
 Press Q or ESC in the preview window to stop.
 """

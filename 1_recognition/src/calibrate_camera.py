@@ -49,6 +49,8 @@ Examples:
 
     uv run python 1_recognition/src/calibrate_camera.py iphone-full --capture-rotate90 90 `
         --squares-x 7 --squares-y 9 --square-length-mm 25 --marker-length-mm 19
+    uv run python 1_recognition/src/calibrate_camera.py iphone-extrinsic --capture-rotate90 90 `
+    --method marker --marker-id 0 --marker-length-mm 100 --ground-z 0.0
 """
 import argparse
 import sys

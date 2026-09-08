@@ -26,7 +26,7 @@ SAFE_RETURN_JOINT_RANGES = [
     (-3, 3),  # joint 6
 ]
 
-STEP_LIFT_PANEL = 0
+STEP_LIFT_PANEL = 4
 STEP_BRING_JOINT = 2
 STEP_BRING_NEXT_PANEL = 6
 
@@ -34,8 +34,8 @@ STEP_BRING_NEXT_PANEL = 6
 
 TRIGGER_RULES = {
     STEP_LIFT_PANEL: {
-        "progress_threshold": 0.5,
-        "min_confidence": 0.8,
+        "progress_threshold": 0.1,
+        "min_confidence": 0.3,
     },
     STEP_BRING_JOINT: {
         "progress_threshold": 0.8,
