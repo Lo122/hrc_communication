@@ -26,27 +26,45 @@ SAFE_RETURN_JOINT_RANGES = [
     (-3, 3),  # joint 6
 ]
 
-STEP_LIFT_PANEL = 0
-STEP_BRING_JOINT = 2
-STEP_BRING_NEXT_PANEL = 6
-STEP_HOLD_WHEN_DISASSEMBLE = 99 #NOT SURE NOW, MIGHT HAPPEN ANYTIME
+HUMAN_PULL_CABLES = 0
+HUMAN_SCREW_DONE = 3
+HUMAN_CONNECT_PIPES = 4
+HUMAN_CLAMP_TOOL = 5
+
+TASK_LIFT_PANEL = 1
+TASK_LEAVE = 2
+TASK_BRING_CONNECTOR = 3
+TASK_BRING_CLAMPING_TOOL = 4
+TASK_RETURN_CLAMPING_TOOL = 5
 
 TRIGGER_RULES = {
-    STEP_LIFT_PANEL: {
+    HUMAN_PULL_CABLES: {
+        "task_id": TASK_LIFT_PANEL,
         "progress_threshold": 0.1,
         "min_confidence": 0.1,
     },
-    STEP_BRING_JOINT: {
+    HUMAN_CONNECT_PIPES: {
+        "task_id": TASK_BRING_CLAMPING_TOOL,
+        "progress_threshold": 0.1,
+        "min_confidence": 0.1,
+    },
+    HUMAN_CLAMP_TOOL: {
+        "task_id": TASK_RETURN_CLAMPING_TOOL,
         "progress_threshold": 0.1,
         "min_confidence": 0.1,
     },
 }
 
 PERMISSION_MESSAGES = {
-    STEP_LIFT_PANEL: "Would you like me to lift the panel? Speak after beep.",
-    STEP_BRING_JOINT: "Would you like me to bring the joint piece? Speak after beep.",
-    STEP_BRING_NEXT_PANEL: "Would you like me to bring the next panel? Speak after beep.",
+    TASK_LIFT_PANEL: "Would you like me to lift the panel? Say yes, no, or later after the beep, or type your reply.",
+    TASK_LEAVE: "Screwing is finished. Would you like me to release the panel and move away? Say yes, no, or later after the beep, or type your reply.",
+    TASK_BRING_CONNECTOR: "I have moved away from the panel. Would you like me to bring the pipe connector? Say yes, no, or later after the beep, or type your reply.",
+    TASK_BRING_CLAMPING_TOOL: "Would you like me to bring the clamping tool? Say yes, no, or later after the beep, or type your reply.",
+    TASK_RETURN_CLAMPING_TOOL: "Would you like me to take the clamping tool back? Say yes, no, or later after the beep, or type your reply.",
 }
+
+# Per-task overrides; unspecified values use the global durations above.
+TASK_TIMINGS = {}
 
 ROS_BRIDGE_HOST = "127.0.0.1"
 ROS_BRIDGE_PORT = 9090
@@ -74,18 +92,21 @@ ROS_TOPICS = {
 HUMAN_LOCATION_PUBLISH_EVERY_N_FRAMES = 5
 
 GH_STEP_MESSAGES = {
-    STEP_LIFT_PANEL: {
+    TASK_LIFT_PANEL: {
         "suggested_action": "assist_lifting",
     },
-    STEP_BRING_JOINT: {
-        "suggested_action": "bring_joint",
+    TASK_LEAVE: {
+        "suggested_action": "leave",
     },
-    STEP_BRING_NEXT_PANEL: {
-        "suggested_action": "bring_next_panel",
+    TASK_BRING_CONNECTOR: {
+        "suggested_action": "bring_pipe_connector",
     },
-    # HOLD_WHEN_DISASSEMBLE: {
-    #     "suggested_action": "hold_when_disassemble",
-    # },
+    TASK_BRING_CLAMPING_TOOL: {
+        "suggested_action": "bring_clamping_tool",
+    },
+    TASK_RETURN_CLAMPING_TOOL: {
+        "suggested_action": "return_clamping_tool",
+    },
 }
 
 UDP_HOST = "127.0.0.1"

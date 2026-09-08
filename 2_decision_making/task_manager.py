@@ -1,6 +1,7 @@
 """Central HRC task state-management skeleton."""
 
 import time
+from collections import deque
 
 import config
 from events import Event, EventType, RobotTaskState
@@ -30,6 +31,8 @@ class TaskManager:
         self.logger = logger
 
         self.active_task: RobotTask | None = None
+        self.waiting_triggers = deque()
+        self.received_trigger_keys = set()
 
         self.ros.publish_speed(config.DEFAULT_SPEED)
         print({"Initialize the speed to:": config.DEFAULT_SPEED})
@@ -57,6 +60,7 @@ class TaskManager:
             EventType.H_RETURN_HOME: self._handle_return_home,
             EventType.H_MANUAL_RECOVERY: self._handle_manual_recovery,
             EventType.H_DONE: self._handle_human_done,
+            EventType.H_SCREW_DONE: self._handle_screw_done,
             EventType.ROBOT_RUNNING: self._handle_robot_running,
             EventType.ROBOT_SUCCESS: self._handle_robot_success,
             EventType.ROBOT_HOMED: self._handle_robot_homed,
@@ -69,35 +73,68 @@ class TaskManager:
             return
 
         handler(event)
+        if self.active_task is None and self.waiting_triggers:
+            # A pending leave task still owns the held panel.
+            if not any(task.task_id == config.TASK_LEAVE for task in self.pending_pool.list_all()):
+                next_event = self.waiting_triggers.popleft()
+                task_id = config.TRIGGER_RULES[next_event.payload["step_id"]]["task_id"]
+                self._propose_task(next_event.payload, task_id)
 
     def _handle_recognition_trigger(self, event: Event) -> None:
         """Create a task and ask the human for permission."""
-        if self.active_task is not None:
-            self.logger.log_message("Ignored trigger because an active task exists.", event.payload)
+        rule = config.TRIGGER_RULES.get(event.payload["step_id"])
+        if rule is None:
+            self.logger.log_message("No robot task configured for this human step.", event.payload)
             return
+        key = (event.payload["round_id"], rule["task_id"], event.payload["piece_id"])
+        if key in self.received_trigger_keys:
+            return
+        self.received_trigger_keys.add(key)
+        if self.active_task is not None or any(
+            task.task_id == config.TASK_LEAVE for task in self.pending_pool.list_all()
+        ):
+            self.waiting_triggers.append(event)
+            self.logger.log_message("Queued trigger until the current task is released.", event.payload)
+            return
+        self._propose_task(event.payload, rule["task_id"])
 
-        step_id = event.payload["step_id"]
-        piece_id = event.payload["piece_id"]
-        round_id = event.payload["round_id"]
+    def _propose_task(self, context: dict, task_id: int) -> None:
+        """Ask permission for one robot action, retaining its human context."""
+        step_id = context["step_id"]
+        piece_id = context["piece_id"]
+        round_id = context["round_id"]
         now = time.time()
 
         task = RobotTask(
-            task_instance_id=self._build_task_instance_id(round_id, step_id, piece_id),
+            task_instance_id=self._build_task_instance_id(round_id, task_id, piece_id),
             step_id=step_id,
+            task_id=task_id,
             piece_id=piece_id,
             round_id=round_id,
             state=RobotTaskState.R_WAITING_RESPONSE,
             speed=config.DEFAULT_SPEED,
-            progress=event.payload.get("progress", 0.0),
+            progress=context.get("progress", 0.0),
             created_at=now,
             updated_at=now,
         )
         self.active_task = task
 
-        message = self.message_manager.get_permission_message(task.step_id)
+        message = self.message_manager.get_permission_message(task.task_id)
         self.cli.show_permission_request(message)
-        self.timer.start_response_timer(task.task_instance_id, config.RESPONSE_TIMEOUT_SECONDS)
+        duration = self._task_duration(task, "response_timeout_seconds", config.RESPONSE_TIMEOUT_SECONDS)
+        self.timer.start_response_timer(task.task_instance_id, duration)
         self.logger.log_message("Task entered R_WAITING_RESPONSE.", {"task_instance_id": task.task_instance_id})
+
+    def _task_duration(self, task: RobotTask, key: str, default: float) -> float:
+        return config.TASK_TIMINGS.get(task.task_id, {}).get(key, default)
+
+    def _propose_followup(self, task: RobotTask, task_id: int) -> None:
+        self._propose_task({
+            "step_id": config.HUMAN_SCREW_DONE,
+            "piece_id": task.piece_id,
+            "round_id": task.round_id,
+            "progress": 1.0,
+        }, task_id)
 
     def _handle_human_location_update(self, event: Event) -> None:
         """Forward the human's world-frame position (plus, if this frame
@@ -114,6 +151,13 @@ class TaskManager:
         self.ros.publish_human_location(xyz, timestamp, keypoints)
 
     def _handle_accept(self, event: Event) -> None:
+        if self.active_task is not None:
+            if self.active_task.state == RobotTaskState.R_WAITING_FREE_DRIVE:
+                self._handle_free_go(event)
+                return
+            if self.active_task.state == RobotTaskState.R_WAITING_HOME_PERMISSION:
+                self._handle_return_home(event)
+                return
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
         if task is None:
             return
@@ -136,14 +180,7 @@ class TaskManager:
             return
 
         if task.state == RobotTaskState.R_WAITING_FREE_DRIVE:
-            self._transition(
-                task,
-                RobotTaskState.R_DONE,
-                event,
-                "Human declined free-drive mode; task completed.",
-            )
-            self.active_task = None
-            self.cli.show_message(self.message_manager.get_acknowledgement(EventType.ROBOT_SUCCESS))
+            self._enter_holding(task, event)
             return
 
         if task.state == RobotTaskState.R_WAITING_HOME_PERMISSION:
@@ -155,7 +192,7 @@ class TaskManager:
         task.pending_reason = "refused"
         self.pending_pool.add(task)
         self.active_task = None
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_pending_message(task))
 
     def _handle_defer(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
@@ -164,8 +201,9 @@ class TaskManager:
 
         self.timer.cancel_response_timer()
         self._transition(task, RobotTaskState.R_DEFER, event, "Human deferred task.")
-        self.timer.start_defer_timer(task.task_instance_id, config.DEFER_SECONDS)
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        duration = self._task_duration(task, "defer_seconds", config.DEFER_SECONDS)
+        self.cli.show_message(self.message_manager.get_defer_message(task, duration))
+        self.timer.start_defer_timer(task.task_instance_id, duration)
 
     def _handle_response_timeout(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
@@ -176,6 +214,7 @@ class TaskManager:
         task.pending_reason = "timeout"
         self.pending_pool.add(task)
         self.active_task = None
+        self.cli.show_message(self.message_manager.get_pending_message(task))
 
     def _handle_defer_timeout(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_DEFER)
@@ -191,6 +230,13 @@ class TaskManager:
             return
         if event.task_instance_id is None or not self.pending_pool.contains(event.task_instance_id):
             self._log_invalid(event, "Pending task id not found.")
+            return
+
+        if any(
+            task.task_id == config.TASK_LEAVE and task.task_instance_id != event.task_instance_id
+            for task in self.pending_pool.list_all()
+        ):
+            self._log_invalid(event, "Execute the pending leave task before starting another task.")
             return
 
         task = self.pending_pool.remove(event.task_instance_id)
@@ -249,6 +295,7 @@ class TaskManager:
                 RobotTaskState.R_REDO,
                 RobotTaskState.R_WAITING_FREE_DRIVE,
                 RobotTaskState.R_FREE_DRIVE,
+                RobotTaskState.R_HOLDING,
                 RobotTaskState.R_MANUAL_RECOVERY,
             },
         )
@@ -344,7 +391,7 @@ class TaskManager:
             event,
             "Human approved free-drive mode; free-drive enabled.",
         )
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(EventType.H_FREE_GO))
 
     def _handle_return_home(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_HOME_PERMISSION)
@@ -358,7 +405,7 @@ class TaskManager:
             event,
             "Return-home command published.",
         )
-        self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+        self.cli.show_message(self.message_manager.get_acknowledgement(EventType.H_RETURN_HOME))
 
     def _handle_manual_recovery(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_HOME_PERMISSION)
@@ -423,21 +470,26 @@ class TaskManager:
             is_manual_recovery = task.state == RobotTaskState.R_MANUAL_RECOVERY
             self.ros.publish_free_drive(False)
             task.free_drive_active = False
-            final_state = RobotTaskState.R_CANCELED if is_manual_recovery else RobotTaskState.R_DONE
-            message = (
-                "Manual recovery completed; free-drive disabled."
-                if is_manual_recovery
-                else "Human alignment completed; free-drive disabled."
-            )
-            self._transition(task, final_state, event, message)
-            self.active_task = None
-            acknowledgement = EventType.H_CANCEL if is_manual_recovery else EventType.ROBOT_SUCCESS
-            self.cli.show_message(self.message_manager.get_acknowledgement(acknowledgement))
+            if not is_manual_recovery:
+                self._enter_holding(task, event)
+                return
+            self._finish_canceled_task(task, event, "Manual recovery completed; free-drive disabled.")
             return
 
         self.ros.publish_human_done()
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Human-done published.")
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
+
+    def _enter_holding(self, task: RobotTask, event: Event) -> None:
+        self._transition(task, RobotTaskState.R_HOLDING, event, "Panel held; waiting for screw done.")
+        self.cli.show_message(self.message_manager.get_holding_message())
+
+    def _handle_screw_done(self, event: Event) -> None:
+        task = self._require_active(event, RobotTaskState.R_HOLDING)
+        if task is None:
+            return
+        self._transition(task, RobotTaskState.R_DONE, event, "Screwing finished; proposing leave action.")
+        self._propose_followup(task, config.TASK_LEAVE)
 
     def _handle_robot_running(self, event: Event) -> None:
         # time.sleep(config.RECOVERY_STOP_DELAY_SECONDS)
@@ -490,7 +542,7 @@ class TaskManager:
             return
         task.robot_success_received = True
 
-        if task.step_id == config.STEP_LIFT_PANEL:
+        if task.task_id == config.TASK_LIFT_PANEL:
             self._transition(
                 task,
                 RobotTaskState.R_WAITING_FREE_DRIVE,
@@ -506,6 +558,9 @@ class TaskManager:
 
         self._transition(task, RobotTaskState.R_DONE, event, "Robot success received.")
         self.active_task = None
+        if task.task_id == config.TASK_LEAVE:
+            self._propose_followup(task, config.TASK_BRING_CONNECTOR)
+            return
         self.cli.show_message(self.message_manager.get_acknowledgement(event.event_type))
 
     def _show_execution_dialogue(self, task: RobotTask) -> None:
@@ -524,8 +579,8 @@ class TaskManager:
         task.updated_at = time.time()
         self.logger.log_transition(task, event, old_state, new_state, message)
 
-    def _build_task_instance_id(self, round_id: int, step_id: int, piece_id: int) -> str:
-        return f"round_{round_id}_step_{step_id}_piece_{piece_id}"
+    def _build_task_instance_id(self, round_id: int, task_id: int, piece_id: int) -> str:
+        return f"round_{round_id}_task_{task_id}_piece_{piece_id}"
 
     def _require_active(self, event: Event, state: RobotTaskState) -> RobotTask | None:
         return self._require_active_in(event, {state})

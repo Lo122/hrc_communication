@@ -34,6 +34,10 @@ class CommandParser:
         "manual recovery": EventType.H_MANUAL_RECOVERY,
         "done": EventType.H_DONE,
         "finished": EventType.H_DONE,
+        "adjustment done": EventType.H_DONE,
+        "screw done": EventType.H_SCREW_DONE,
+        "screwing done": EventType.H_SCREW_DONE,
+        "finished screwing": EventType.H_SCREW_DONE,
     }
 
     def parse(self, raw_text: str, source: str = "human_cli") -> Event | None:

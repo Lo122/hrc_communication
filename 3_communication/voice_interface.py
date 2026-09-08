@@ -86,6 +86,8 @@ class VoiceInterface:
             "Understand the user's spoken intent and output exactly one lowercase "
             f"command from: {', '.join(sorted(self._phrases))}, unknown. "
             "Map natural expressions to their meaning and output unknown if unclear."
+            " Output screw done for finished screwing; output done for finished "
+            "adjusting. Do not shorten screw done to done."
         )
         ws = websocket.create_connection(
             f"wss://api.openai.com/v1/realtime?model={model}",

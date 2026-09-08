@@ -204,6 +204,7 @@ class RecognitionManager:
             self._show_frame(frame, pipeline_out, raw_step_id=raw_step_id, progress=progress, confidence=confidence)
             return None
 
+        self._record_step_and_advance_round(stable_step_id)
         result = RecognitionResult(
             round_id=self.round_id,
             step_id=int(stable_step_id),
@@ -215,7 +216,6 @@ class RecognitionManager:
         print(f"Raw Step: {raw_step_id} | Stable Step: {stable_step_id} | Progress: {progress}")
         self._show_frame(frame, pipeline_out, raw_step_id=raw_step_id, stable_step_id=stable_step_id, progress=progress, confidence=confidence)
 
-        self._record_step_and_advance_round(stable_step_id)
         return result
 
     def get_last_keypoints(self) -> dict[str, dict[str, float]] | None:
@@ -296,6 +296,7 @@ class RecognitionManager:
         if self.step_stabilizer is not None and "step_probabilities" in input_data:
             step_id = self.step_stabilizer.update(input_data["step_probabilities"])
 
+        self._record_step_and_advance_round(step_id)
         result = RecognitionResult(
             round_id=self.round_id,
             step_id=step_id,
@@ -304,7 +305,6 @@ class RecognitionManager:
             confidence=input_data.get("confidence", 0.0),
             timestamp=input_data.get("timestamp", time.time()),
         )
-        self._record_step_and_advance_round(step_id)
         return result
 
     def _load_required_steps_per_round(self) -> set[int]:
@@ -318,15 +318,15 @@ class RecognitionManager:
         if step_id == self._last_recorded_step_id:
             return
 
-        self._last_recorded_step_id = step_id
-        if step_id not in self.required_steps_per_round:
-            return
-
-        self.seen_trigger_steps_in_round.add(step_id)
-        if self.required_steps_per_round.issubset(self.seen_trigger_steps_in_round):
+        # Keep all frames of the final step in the same round. Advance only
+        # when the next cable-pulling step begins, before building its result.
+        if step_id == config.HUMAN_PULL_CABLES and self.required_steps_per_round.issubset(self.seen_trigger_steps_in_round):
             self.round_id += 1
             self.piece_id = self.round_id
             self.seen_trigger_steps_in_round.clear()
+        self._last_recorded_step_id = step_id
+        if step_id in self.required_steps_per_round:
+            self.seen_trigger_steps_in_round.add(step_id)
 
     def _ensure_realtime_pipeline(self) -> None:
         if self._model is not None:

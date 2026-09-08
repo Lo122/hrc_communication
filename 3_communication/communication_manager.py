@@ -14,10 +14,12 @@ class ListeningMode(Enum):
 
 STATE_MODES = {
     RobotTaskState.R_WAITING_RESPONSE: ListeningMode.SINGLE,
+    RobotTaskState.R_DEFER: ListeningMode.CONTINUOUS,
     RobotTaskState.R_EXECUTING: ListeningMode.CONTINUOUS,
     RobotTaskState.R_PAUSED: ListeningMode.CONTINUOUS,
     RobotTaskState.R_WAITING_FREE_DRIVE: ListeningMode.SINGLE,
     RobotTaskState.R_FREE_DRIVE: ListeningMode.CONTINUOUS,
+    RobotTaskState.R_HOLDING: ListeningMode.CONTINUOUS,
     RobotTaskState.R_WAITING_HOME_PERMISSION: ListeningMode.SINGLE,
     RobotTaskState.R_MANUAL_RECOVERY: ListeningMode.CONTINUOUS,
 }

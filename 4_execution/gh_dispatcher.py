@@ -31,9 +31,10 @@ class GHDispatcher:
 
     def build_message(self, task: RobotTask) -> dict:
         """Create the outbound Grasshopper JSON message."""
-        step_message = config.GH_STEP_MESSAGES.get(task.step_id, {})
+        step_message = config.GH_STEP_MESSAGES[task.task_id]
         return {
-            "step_id": int(task.step_id),
+            "step_id": int(task.task_id),
+            "human_step_id": int(task.step_id),
             "progress": float(task.progress),
             "piece_id": int(task.piece_id),
             "round_id": int(task.round_id),

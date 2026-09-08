@@ -17,7 +17,8 @@ SAMPLE_RATE = 24_000
 TIMEOUT = 8.0
 COMMANDS = {
     "yes", "no", "later", "pause", "resume", "restart", "cancel",
-    "faster", "slower", "free drive", "return home", "manual recovery", "done", 
+    "faster", "slower", "free drive", "return home", "manual recovery", "done",
+    "screw done", "screwing done", "finished screwing", "adjustment done",
 }
 
 
@@ -31,6 +32,8 @@ def main() -> None:
         "Understand the user's spoken intent and output exactly one lowercase "
         f"command from: {', '.join(sorted(COMMANDS))}, unknown. "
         "Map natural expressions to their meaning and output unknown if unclear."
+        " Output screw done for finished screwing; output done for finished "
+        "adjusting. Do not shorten screw done to done."
     )
     ws = websocket.create_connection(
         f"wss://api.openai.com/v1/realtime?model={model}",
