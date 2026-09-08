@@ -62,3 +62,7 @@ tmp/
 temp/
 *.tmp
 *.bak
+
+*/*.pt
+*/*.pth
+*/*.npz
