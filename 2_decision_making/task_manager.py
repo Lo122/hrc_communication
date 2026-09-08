@@ -33,6 +33,7 @@ class TaskManager:
         self.active_task: RobotTask | None = None
         self.waiting_triggers = deque()
         self.received_trigger_keys = set()
+        self._task_instance_counts = {}
 
         self.ros.publish_speed(config.DEFAULT_SPEED)
         print({"Initialize the speed to:": config.DEFAULT_SPEED})
@@ -283,8 +284,6 @@ class TaskManager:
 
     def _handle_cancel(self, event: Event) -> None:
 
-        # self.ros.publish_real_pause()
-        self.ros.publish_cancel()
         task = self._require_active_in(
             event,
             {
@@ -304,9 +303,14 @@ class TaskManager:
 
         if task.state == RobotTaskState.R_DEFER:
             self.timer.cancel_defer_timer()
-            self._finish_canceled_task(task, event, "Deferred task canceled.")
+            if task.task_id == config.TASK_LEAVE:
+                self._enter_holding(task, event)
+            else:
+                self._finish_canceled_task(task, event, "Deferred task canceled.")
             return
 
+        was_holding = task.state == RobotTaskState.R_HOLDING
+        self.ros.publish_cancel()
         if task.free_drive_active:
             self.ros.publish_free_drive(False)
             task.free_drive_active = False
@@ -325,9 +329,11 @@ class TaskManager:
         )
         time.sleep(config.RECOVERY_STOP_DELAY_SECONDS)
         joint_positions = self.ros.get_latest_joint_positions()
-        #region CHANGE HERE IN ROBOLAB!!!!
-        # gripper_has_object = self.ros.get_latest_gripper_has_object()
-        gripper_has_object = False
+        gripper_has_object = self.ros.get_latest_gripper_has_object()
+        if was_holding:
+            # The workflow still owns a held panel; an old open-gripper sample
+            # must not authorize returning home from this state.
+            gripper_has_object = True
 
         return_check = self._can_return_home(joint_positions, gripper_has_object)
 
@@ -482,7 +488,10 @@ class TaskManager:
 
     def _enter_holding(self, task: RobotTask, event: Event) -> None:
         self._transition(task, RobotTaskState.R_HOLDING, event, "Panel held; waiting for screw done.")
-        self.cli.show_message(self.message_manager.get_holding_message())
+        message = self.message_manager.get_holding_message()
+        if event.event_type == EventType.H_CANCEL:
+            message = "The delayed leave action is canceled. " + message
+        self.cli.show_message(message)
 
     def _handle_screw_done(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_HOLDING)
@@ -542,7 +551,8 @@ class TaskManager:
             return
         task.robot_success_received = True
 
-        if task.task_id == config.TASK_LIFT_PANEL:
+        next_state = self.state_machine.get_next_state(task.state, event.event_type, task.task_id)
+        if next_state == RobotTaskState.R_WAITING_FREE_DRIVE:
             self._transition(
                 task,
                 RobotTaskState.R_WAITING_FREE_DRIVE,
@@ -575,12 +585,21 @@ class TaskManager:
     ) -> None:
         """Apply every state change through one logging path."""
         old_state = task.state
+        expected = self.state_machine.get_next_state(old_state, event.event_type, task.task_id)
+        if expected != new_state:
+            raise ValueError(
+                f"Invalid transition for task {task.task_id}: "
+                f"{old_state.name} + {event.event_type.name} -> {new_state.name}"
+            )
         task.state = new_state
         task.updated_at = time.time()
         self.logger.log_transition(task, event, old_state, new_state, message)
 
     def _build_task_instance_id(self, round_id: int, task_id: int, piece_id: int) -> str:
-        return f"round_{round_id}_task_{task_id}_piece_{piece_id}"
+        base = f"round_{round_id}_task_{task_id}_piece_{piece_id}"
+        attempt = self._task_instance_counts.get(base, 0) + 1
+        self._task_instance_counts[base] = attempt
+        return base if attempt == 1 else f"{base}_attempt_{attempt}"
 
     def _require_active(self, event: Event, state: RobotTaskState) -> RobotTask | None:
         return self._require_active_in(event, {state})

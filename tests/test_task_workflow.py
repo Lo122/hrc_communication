@@ -174,9 +174,88 @@ class WorkflowTests(unittest.TestCase):
         self.reply("cancel")
         self.timer.cancel_defer_timer.assert_called_once()
         self.emit(E.DEFER_TIMEOUT, task_instance_id=leave_id)
-        self.assertIsNone(self.manager.active_task)
+        self.assertEqual(self.manager.active_task.state, S.R_HOLDING)
+        self.ros.publish_cancel.assert_not_called()
         self.assertEqual(self.udp.send.call_count, 1)
         self.assertEqual(self.output.show_permission_request.call_count, 2)
+
+    def test_retry_leave_keeps_context_and_rejects_previous_attempt_timers(self):
+        self.hold()
+        self.trigger(4)
+        self.reply("screw done")
+        old_id = self.manager.active_task.task_instance_id
+        self.reply("later")
+        self.reply("cancel")
+        self.assertEqual(len(self.manager.waiting_triggers), 1)
+        self.reply("screw done")
+        retry = self.manager.active_task
+        self.assertNotEqual(retry.task_instance_id, old_id)
+        self.assertEqual((retry.task_id, retry.round_id, retry.piece_id), (2, 7, 12))
+        self.emit(E.RESPONSE_TIMEOUT, task_instance_id=old_id)
+        self.assertEqual(retry.state, S.R_WAITING_RESPONSE)
+        self.reply("later")
+        self.emit(E.DEFER_TIMEOUT, task_instance_id=old_id)
+        self.assertEqual(retry.state, S.R_DEFER)
+        self.assertEqual(self.udp.send.call_count, 1)
+        self.emit(E.DEFER_TIMEOUT, task_instance_id=retry.task_instance_id)
+        self.complete_robot()
+        self.assertEqual(self.manager.active_task.task_id, 3)
+
+    def test_holding_cancel_never_offers_home_even_with_open_gripper_sample(self):
+        for gripper in (True, False, None):
+            with self.subTest(gripper=gripper):
+                self.setUp()
+                self.hold()
+                self.ros.get_latest_joint_positions.return_value = [0.0] * 6
+                self.ros.get_latest_gripper_has_object.return_value = gripper
+                with patch.object(config, "RECOVERY_STOP_DELAY_SECONDS", 0):
+                    self.reply("cancel")
+                self.ros.get_latest_gripper_has_object.assert_called_once()
+                self.assertEqual(self.manager.active_task.state, S.R_MANUAL_RECOVERY)
+                self.ros.publish_return_home.assert_not_called()
+                self.reply("done")
+                self.assertIsNone(self.manager.active_task)
+
+    def test_execution_recovery_uses_gripper_feedback(self):
+        for gripper, expected in ((True, S.R_MANUAL_RECOVERY), (None, S.R_MANUAL_RECOVERY),
+                                  (False, S.R_WAITING_HOME_PERMISSION)):
+            with self.subTest(gripper=gripper):
+                self.setUp()
+                self.trigger(4)
+                self.reply("yes")
+                self.emit(E.ROBOT_RUNNING)
+                self.ros.get_latest_joint_positions.return_value = [0.0] * 6
+                self.ros.get_latest_gripper_has_object.return_value = gripper
+                with patch.object(config, "RECOVERY_STOP_DELAY_SECONDS", 0), patch.object(config, "RETURN_HOME_RECOVERY_ENABLED", True):
+                    self.reply("cancel")
+                self.assertEqual(self.manager.active_task.state, expected)
+                self.ros.publish_return_home.assert_not_called()
+
+    def test_state_table_matches_lift_success_including_paused(self):
+        for paused in (False, True):
+            with self.subTest(paused=paused):
+                self.setUp()
+                self.trigger()
+                self.reply("yes")
+                self.emit(E.ROBOT_RUNNING)
+                if paused:
+                    self.reply("pause")
+                self.assertEqual(self.manager.state_machine.get_next_state(
+                    self.manager.active_task.state, E.ROBOT_SUCCESS, 1), S.R_WAITING_FREE_DRIVE)
+                self.emit(E.ROBOT_SUCCESS)
+                self.assertEqual(self.manager.active_task.state, S.R_WAITING_FREE_DRIVE)
+
+    def test_invalid_cancel_sends_no_robot_command(self):
+        self.reply("cancel")
+        self.trigger()
+        self.reply("cancel")
+        self.ros.publish_cancel.assert_not_called()
+
+    def test_transition_rejects_state_table_mismatch(self):
+        self.trigger()
+        with self.assertRaises(ValueError):
+            self.manager._transition(self.manager.active_task, S.R_DONE, Event(E.H_ACCEPT, "test"))
+        self.assertEqual(self.manager.active_task.state, S.R_WAITING_RESPONSE)
 
     def test_busy_triggers_are_queued_once_and_r3_has_priority(self):
         self.hold()

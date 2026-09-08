@@ -1,5 +1,6 @@
 """Robot task transition validity table."""
 
+import config
 from events import EventType, RobotTaskState
 
 
@@ -11,6 +12,8 @@ class StateMachine:
         (RobotTaskState.R_WAITING_RESPONSE, EventType.H_REFUSE): RobotTaskState.R_REFUSED,
         (RobotTaskState.R_WAITING_RESPONSE, EventType.H_DEFER): RobotTaskState.R_DEFER,
         (RobotTaskState.R_WAITING_RESPONSE, EventType.RESPONSE_TIMEOUT): RobotTaskState.R_PENDING,
+        (RobotTaskState.R_REFUSED, EventType.H_EXECUTE_PENDING_TASK): RobotTaskState.R_ACCEPTED,
+        (RobotTaskState.R_PENDING, EventType.H_EXECUTE_PENDING_TASK): RobotTaskState.R_ACCEPTED,
         (RobotTaskState.R_DEFER, EventType.DEFER_TIMEOUT): RobotTaskState.R_ACCEPTED,
         (RobotTaskState.R_DEFER, EventType.H_CANCEL): RobotTaskState.R_CANCELED,
         (RobotTaskState.R_ACCEPTED, EventType.H_CANCEL): RobotTaskState.R_RECOVERY_EVALUATING,
@@ -54,12 +57,20 @@ class StateMachine:
         self,
         current_state: RobotTaskState,
         event_type: EventType,
+        task_id: int | None = None,
     ) -> bool:
-        return (current_state, event_type) in self._TRANSITIONS
+        return self.get_next_state(current_state, event_type, task_id) is not None
 
     def get_next_state(
         self,
         current_state: RobotTaskState,
         event_type: EventType,
+        task_id: int | None = None,
     ) -> RobotTaskState | None:
+        if task_id == config.TASK_LIFT_PANEL and event_type == EventType.ROBOT_SUCCESS:
+            if current_state in {RobotTaskState.R_EXECUTING, RobotTaskState.R_PAUSED}:
+                return RobotTaskState.R_WAITING_FREE_DRIVE
+        if (task_id == config.TASK_LEAVE and current_state == RobotTaskState.R_DEFER
+                and event_type == EventType.H_CANCEL):
+            return RobotTaskState.R_HOLDING
         return self._TRANSITIONS.get((current_state, event_type))

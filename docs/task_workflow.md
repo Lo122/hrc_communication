@@ -52,12 +52,23 @@ only after R2 completes. Each action waits for robot `running` after dispatch.
 - No reply within 20 seconds: put this action in the pending pool.
 - `later`: start this action automatically after 5 seconds. Voice and CLI
   `cancel` are accepted during the delay.
+- Canceling a delayed R2 returns to `R_HOLDING` without sending a robot stop
+  command or starting queued tasks. Say/type `screw done` again to ask about R2.
+  Each retry receives a distinct instance ID so old timeout events cannot
+  affect the new request.
 - Pending execution retains the existing CLI command:
   `execute round_7_task_2_piece_12`, for example. The prompt prints the actual
   task instance ID. Speaking arbitrary pending IDs is not added by this change.
 - If R2 is refused or times out, the prompt explicitly says the panel remains
   held. Other task starts wait until this pending leave action is handled.
 - Free-drive permission and the hold stage have no automatic release timeout.
+
+State transitions are validated against the task-aware state table. R1 success
+enters `R_WAITING_FREE_DRIVE`; R2–R5 success enters `R_DONE`. Canceling from hold
+uses manual recovery rather than offering return home, even if the latest
+gripper sample says open. Other execution cancellations use gripper feedback;
+unknown or occupied gripper status does not permit return home. Invalid cancel
+events are rejected before sending a robot command.
 
 Defaults remain in `config.py`. Per-task overrides can be added without changing
 handlers, for example:
