@@ -1,4 +1,9 @@
-"""Run realtime recognition in its own process and publish trigger events."""
+"""
+    Run realtime recognition in its own process and publish trigger events.
+    Usage:
+        uv run python run_recognition.py --loop-hz 15 [--camera] [--video-source VIDEO_SOURCE]`
+          --model-dir MODEL_DIR [--host HOST] [--port PORT] [--no-display] [--loop-hz HZ]
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+import logging
 
 ROOT = Path(__file__).resolve().parent
 for layer in ["0_core", "1_recognition"]:
@@ -13,10 +19,15 @@ for layer in ["0_core", "1_recognition"]:
 
 import config
 from event_transport import UDPEventSender
+from events import Event, EventType
 from recognition_manager import DEFAULT_MODEL_DIR, RecognitionManager
 from trigger_manager import TriggerManager
 
+logger = logging.getLogger(__name__)
+
+
 REALTIME_CAMERA_INDEX = 0
+LOOP_HZ = 20.0  # target recognition loop rate -- matches the previous flat 50ms sleep
 
 
 def _parse_args() -> argparse.Namespace:
@@ -27,6 +38,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default=config.EVENT_TRANSPORT_HOST, help="Communication event receiver host.")
     parser.add_argument("--port", type=int, default=config.EVENT_TRANSPORT_PORT, help="Communication event receiver port.")
     parser.add_argument("--no-display", action="store_true", help="Disable the recognition video preview window.")
+    parser.add_argument("--loop-hz", type=float, default=LOOP_HZ,
+                         help="Target recognition loop rate (Hz). Each iteration sleeps only "
+                              "enough to hold this rate -- see the main loop's fixed-tick "
+                              "scheduling -- instead of a flat per-iteration delay, so the "
+                              "actual cadence stays consistent regardless of how long "
+                              "recognition_manager.update() itself takes.")
     return parser.parse_args()
 
 
@@ -46,6 +63,16 @@ if __name__ == "__main__":
     print(f"Recognition running with source: {source}")
     print(f"Publishing recognition events to {args.host}:{args.port}")
 
+    # Fixed-tick loop scheduling (like an embedded millis()-based scheduler: accumulate the
+    # IDEAL next tick time and sleep only the remainder, rather than sleeping a flat amount
+    # after each iteration) -- keeps the loop's actual cadence close to --loop-hz regardless
+    # of how long each recognition_manager.update() call takes, and resyncs instead of firing
+    # a catch-up burst if an iteration overruns its budget.
+    period_s = 1.0 / args.loop_hz
+    next_tick = time.perf_counter()
+    overrun_warned_at = 0.0
+
+    frame_count = 0
     try:
         while True:
             result = recognition_manager.update()
@@ -54,8 +81,44 @@ if __name__ == "__main__":
                     print(f"[recognition event] sending {event.event_type.name} {event.payload}", flush=True)
                     sender.send(event)
                     print(f"[recognition event] sent {event.event_type.name} {event.payload}", flush=True)
-                    
-            time.sleep(0.05)
+
+            # Human location is a continuous, much-higher-frequency stream than the
+            # discrete task events above -- throttled to config.HUMAN_LOCATION_
+            # PUBLISH_EVERY_N_FRAMES (see recognition_manager.py's last_world_xyz,
+            # updated every frame regardless of step-recognition state).
+            frame_count += 1
+            if frame_count % config.HUMAN_LOCATION_PUBLISH_EVERY_N_FRAMES == 0:
+                world_xyz = recognition_manager.last_world_xyz
+                if world_xyz is not None:
+                    sender.send(Event(
+                        event_type=EventType.HUMAN_LOCATION_UPDATE,
+                        source="recognition",
+                        payload={
+                            "x": world_xyz[0], "y": world_xyz[1], "z": world_xyz[2],
+                            "timestamp": recognition_manager.last_location_timestamp,
+                            # Pelvis-relative (pelvis at (0,0,0)) H36M-17 skeleton -- see
+                            # recognition_manager.py's get_last_keypoints()/
+                            # last_root_relative_skeleton. Posture only, separate from the
+                            # world-frame x/y/z location above.
+                            "keypoints": recognition_manager.get_last_keypoints(),
+                        },
+                    ))
+
+            next_tick += period_s
+            now = time.perf_counter()
+            sleep_s = next_tick - now
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            else:
+                # This iteration overran its budget -- resync to now instead of letting the
+                # deficit accumulate (which would otherwise fire a burst of iterations back
+                # to back later to "catch up").
+                if now - overrun_warned_at > 5.0:
+                    logger.warning(f"[recognition] loop overran budget by {-sleep_s * 1000:.0f}ms "
+                          f"(target {period_s * 1000:.0f}ms/iteration) -- update() is the "
+                          "bottleneck, not the sleep.")
+                    overrun_warned_at = now
+                next_tick = now
     except KeyboardInterrupt:
         print("Recognition stopped.")
     finally:

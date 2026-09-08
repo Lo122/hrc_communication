@@ -23,8 +23,15 @@ class RobotTaskState(Enum):
 
     R_EXECUTING = auto()
     R_PAUSED = auto()
-    R_RESUME = auto()
     R_REDO = auto()
+    R_WAITING_FREE_DRIVE = auto()
+    R_FREE_DRIVE = auto()
+    R_HOLDING = auto()
+
+    R_RECOVERY_EVALUATING = auto()
+    R_WAITING_HOME_PERMISSION = auto()
+    R_RETURNING_HOME = auto()
+    R_MANUAL_RECOVERY = auto()
 
     R_CANCELED = auto()
     R_DONE = auto()
@@ -34,11 +41,19 @@ class EventType(Enum):
     """Instantaneous human, system, recognition, and robot feedback events."""
 
     RECOGNITION_TRIGGER = auto()
+    HUMAN_LOCATION_UPDATE = auto()
 
     H_ACCEPT = auto()
     H_REFUSE = auto()
     H_DEFER = auto()
     H_EXECUTE_PENDING_TASK = auto()
+
+    H_FREE_GO = auto()
+    H_RETURN_HOME = auto()
+    H_MANUAL_RECOVERY = auto()
+
+    RECOVERY_HOME_AVAILABLE = auto()
+    RECOVERY_MANUAL_REQUIRED = auto()
 
     H_CANCEL = auto()
     H_PAUSE = auto()
@@ -49,12 +64,14 @@ class EventType(Enum):
     H_SLOWDOWN = auto()
 
     H_DONE = auto()
+    H_SCREW_DONE = auto()
 
     RESPONSE_TIMEOUT = auto()
     DEFER_TIMEOUT = auto()
 
     ROBOT_RUNNING = auto()
     ROBOT_SUCCESS = auto()
+    ROBOT_HOMED = auto()
 
 
 @dataclass

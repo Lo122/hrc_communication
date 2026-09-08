@@ -25,6 +25,7 @@ class RobotTask:
     step_id: int
     piece_id: int
     round_id: int
+    task_id: int
     state: RobotTaskState
     speed: float
     progress: float = 0.0

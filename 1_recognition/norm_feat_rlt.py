@@ -33,7 +33,11 @@ class NormRealTime:
             
             mean = torch.tensor(self.norm_stats[mean_key], dtype=torch.float32)
             std = torch.tensor(self.norm_stats[std_key], dtype=torch.float32)
-            
+            # value may be a plain numpy array (e.g. StreamingH36MFeatureExtractor's
+            # output) or already a torch.Tensor -- numpy.ndarray - torch.Tensor isn't
+            # reliably supported, so normalize to a tensor first either way.
+            value = torch.as_tensor(value, dtype=torch.float32)
+
             normalized_value = (value - mean) / std
             normalized_features[key] = normalized_value
         

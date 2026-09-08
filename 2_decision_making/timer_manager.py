@@ -4,7 +4,6 @@ from threading import Timer
 
 from events import Event, EventType
 
-
 class TimerManager:
     """Creates response and defer timeout events."""
 
