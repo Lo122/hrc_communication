@@ -129,5 +129,6 @@ VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
 VOICE_TTS_RATE = 220
 VOICE_POST_TTS_GUARD_SECONDS = 0.2
 VOICE_MAX_ATTEMPTS = 2
+VOICE_ERROR_RETRY_SECONDS = 5.0
 
 test_vid_path = r"G:\.shortcut-targets-by-id\1nZZWQUKOdxeC-oo-NKucbuUj38ir4mZC\ITECH_Thesis\Videos\raw\cam-04\video__cam-04_uid-01_take-01.mp4"

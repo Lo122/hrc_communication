@@ -28,12 +28,15 @@ def main() -> None:
     if not api_key or not model:
         raise RuntimeError("OPENAI_API_KEY and VOICE_MODEL must be set")
 
+    # Provide task context here for the model to understand the commands.
     instructions = (
         "Understand the user's spoken intent and output exactly one lowercase "
         f"command from: {', '.join(sorted(COMMANDS))}, unknown. "
         "Map natural expressions to their meaning and output unknown if unclear."
         " Output screw done for finished screwing; output done for finished "
         "adjusting. Do not shorten screw done to done."
+        " Output only the English command, without explanations. "
+        "For unclear audio, output unknown."
     )
     ws = websocket.create_connection(
         f"wss://api.openai.com/v1/realtime?model={model}",
@@ -47,12 +50,13 @@ def main() -> None:
                 "instructions": instructions,
                 "output_modalities": ["text"],
                 "max_output_tokens": 4096,
+                "reasoning": {"effort": "low"},
                 "audio": {
                     "input": {
                         "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
                         "turn_detection": {
                             "type": "semantic_vad",
-                            "eagerness": "high",
+                            "eagerness": "medium",
                             "create_response": True,
                         },
                     }

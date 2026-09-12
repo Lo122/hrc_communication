@@ -1,9 +1,11 @@
 """Coordinates CLI output, TTS playback, and state-driven voice input."""
 
 from enum import Enum, auto
+from queue import Empty, SimpleQueue
 import time
 
 from events import RobotTaskState
+from voice_result import VoiceOutcome
 
 
 class ListeningMode(Enum):
@@ -27,7 +29,7 @@ STATE_MODES = {
 
 class CommunicationManager:
     def __init__(self, cli, parser, voice, tts, event_sink, state_provider,
-                 guard_seconds=0.25, max_attempts=2):
+                 guard_seconds=0.25, max_attempts=2, retry_seconds=5.0, logger=None):
         self.cli = cli
         self.parser = parser
         self.voice = voice
@@ -36,27 +38,46 @@ class CommunicationManager:
         self.state_provider = state_provider
         self.guard_seconds = guard_seconds
         self.max_attempts = max_attempts
+        self.retry_seconds = retry_seconds
+        self.logger = logger
         self.mode = ListeningMode.OFF
         self._state = None
         self._attempts = 0
         self._generation = 0
+        self._results = SimpleQueue()
+        self._retry_at = None
+        self._errors = 0
+        self._error_notified = False
+        self._closed = False
+
+    def queue_message(self, message: str) -> None:
+        """Let CLI workers request output without touching the audio worker."""
+        self._results.put((None, "message", message))
 
     def show_message(self, message: str) -> None:
         self._announce(message)
 
     def show_permission_request(self, message: str) -> None:
+        self._attempts = 0
         self._announce(message, permission=True)
 
     def _announce(self, message: str, permission=False) -> None:
+        if self._closed:
+            return
         self._generation += 1
+        self._retry_at = None
         self.voice.stop_listening()
         output = self.cli.show_permission_request if permission else self.cli.show_message
         output(message)
         self.tts.speak(message)
         time.sleep(self.guard_seconds)
-        self.sync_state(self.state_provider(), force=True)
+        state = self.state_provider()
+        beep = permission or (state != self._state and STATE_MODES.get(state) is ListeningMode.SINGLE)
+        self.sync_state(state, force=True, beep=beep)
 
-    def sync_state(self, state, force=False) -> None:
+    def sync_state(self, state, force=False, beep=False) -> None:
+        if self._closed:
+            return
         if state == self._state and not force:
             return
         if state != self._state:
@@ -64,35 +85,84 @@ class CommunicationManager:
         self._state = state
         self.mode = STATE_MODES.get(state, ListeningMode.OFF)
         self._generation += 1
+        self._retry_at = None
         self.voice.stop_listening()
         if self.mode is not ListeningMode.OFF:
-            generation = self._generation
-            self.voice.start_listening(
-                lambda text: self._on_voice_text(text, generation),
-                lambda *args: self._on_voice_failure(generation),
-            )
+            if self._errors:
+                self._retry_at = time.monotonic() + self.retry_seconds
+            else:
+                self._start_listening(beep=beep)
+
+    def _start_listening(self, beep=False) -> None:
+        self._generation += 1
+        generation = self._generation
+        self.voice.start_listening(
+            lambda text: self._on_voice_text(text, generation),
+            lambda outcome, detail="": self._on_voice_failure(generation, outcome, detail),
+            beep=beep,
+        )
 
     def _on_voice_text(self, text: str, generation: int) -> None:
-        if generation != self._generation:
-            return
-        event = self.parser.parse(text, source="human_voice")
-        if event is None:
-            self._on_voice_failure(generation)
-            return
-        self._attempts = 0
-        self.event_sink(event)
+        self._results.put((generation, "text", text))
 
-    def _on_voice_failure(self, generation: int) -> None:
-        if generation != self._generation:
+    def _on_voice_failure(self, generation: int, outcome: VoiceOutcome, detail="") -> None:
+        self._results.put((generation, outcome, detail))
+
+    def poll(self) -> None:
+        """Process worker results and restart listening on the runtime thread."""
+        if self._closed:
             return
-        self._attempts += 1
-        if self._attempts < self.max_attempts:
-            self._announce("Sorry, I did not understand. Please try again.")
-        else:
-            self._attempts = 0
-            if self.mode is ListeningMode.CONTINUOUS:
-                self.sync_state(self._state, force=True)
+        self.sync_state(self.state_provider())
+        while True:
+            try:
+                generation, outcome, detail = self._results.get_nowait()
+            except Empty:
+                break
+            if outcome == "message":
+                self._announce(detail)
+                continue
+            if generation != self._generation:
+                continue
+            self._generation += 1
+            if outcome == "text":
+                event = self.parser.parse(detail, source="human_voice")
+                if event is not None:
+                    self._errors = 0
+                    self._error_notified = False
+                    self.event_sink(event)
+                    # Let TaskManager consume the command before listening again.
+                    return
+                outcome = VoiceOutcome.UNRECOGNIZED
+                detail = "Recognized text did not match a command"
+            if self.logger is not None:
+                self.logger.log_message("Voice input result.", {
+                    "outcome": outcome.name, "detail": detail,
+                    "state": self._state.name if self._state else None,
+                })
+            if outcome is VoiceOutcome.ERROR:
+                self._errors += 1
+                if self._errors >= 2 and not self._error_notified:
+                    self._error_notified = True
+                    self._announce("Voice input is temporarily unavailable. Please type your commands.")
+                self._retry_at = time.monotonic() + self.retry_seconds
+                continue
+            self._errors = 0
+            self._error_notified = False
+            if outcome is VoiceOutcome.UNRECOGNIZED and self.mode is ListeningMode.SINGLE:
+                self._attempts += 1
+                if self._attempts == 1 and self.max_attempts > 1:
+                    choices = "yes, no, or later" if self._state == RobotTaskState.R_WAITING_RESPONSE else "yes or no"
+                    self._announce(f"Please say {choices}, or type your reply.", permission=True)
+                    continue
+            self._retry_at = time.monotonic()
+        if self._retry_at is not None and time.monotonic() >= self._retry_at:
+            self._retry_at = None
+            if self.mode is not ListeningMode.OFF:
+                self._start_listening()
 
     def close(self) -> None:
+        self._closed = True
+        self._generation += 1
+        self._retry_at = None
         self.voice.close()
         self.tts.close()

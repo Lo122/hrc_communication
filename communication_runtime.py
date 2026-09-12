@@ -66,6 +66,8 @@ class HRCSystem:
             state_provider=self._current_state,
             guard_seconds=config.VOICE_POST_TTS_GUARD_SECONDS,
             max_attempts=config.VOICE_MAX_ATTEMPTS,
+            retry_seconds=config.VOICE_ERROR_RETRY_SECONDS,
+            logger=self.logger,
         )
 
         self.udp_sender = UDPSender(config.UDP_HOST, config.UDP_PORT)
@@ -101,7 +103,7 @@ class HRCSystem:
             if event is not None:
                 self.event_queue.put(event)
             else:
-                self.communication.show_message("Command not recognized.")
+                self.communication.queue_message("Command not recognized.")
 
     def _current_state(self):
         task = getattr(self, "task_manager", None)
@@ -113,6 +115,7 @@ class HRCSystem:
             event = self.event_queue.get()
             self.task_manager.handle_event(event)
             self.communication.sync_state(self._current_state())
+        self.communication.poll()
 
     def close(self) -> None:
         """Release communication resources."""
