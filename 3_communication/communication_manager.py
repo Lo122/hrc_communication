@@ -6,6 +6,7 @@ import time
 
 from events import RobotTaskState
 from voice_result import VoiceOutcome
+from voice_context import VoiceContext, build_instructions
 
 
 class ListeningMode(Enum):
@@ -29,13 +30,15 @@ STATE_MODES = {
 
 class CommunicationManager:
     def __init__(self, cli, parser, voice, tts, event_sink, state_provider,
-                 guard_seconds=0.25, max_attempts=2, retry_seconds=5.0, logger=None):
+                 guard_seconds=0.25, max_attempts=2, retry_seconds=5.0, logger=None,
+                 context_provider=None):
         self.cli = cli
         self.parser = parser
         self.voice = voice
         self.tts = tts
         self.event_sink = event_sink
         self.state_provider = state_provider
+        self.context_provider = context_provider
         self.guard_seconds = guard_seconds
         self.max_attempts = max_attempts
         self.retry_seconds = retry_seconds
@@ -49,6 +52,12 @@ class CommunicationManager:
         self._errors = 0
         self._error_notified = False
         self._closed = False
+        self._context = VoiceContext(None)
+        self._question_context = None
+        self._question = None
+
+    def _current_context(self, state) -> VoiceContext:
+        return self.context_provider() if self.context_provider else VoiceContext(state)
 
     def queue_message(self, message: str) -> None:
         """Let CLI workers request output without touching the audio worker."""
@@ -59,6 +68,8 @@ class CommunicationManager:
 
     def show_permission_request(self, message: str) -> None:
         self._attempts = 0
+        self._question_context = self._current_context(self.state_provider())
+        self._question = message
         self._announce(message, permission=True)
 
     def _announce(self, message: str, permission=False) -> None:
@@ -72,16 +83,28 @@ class CommunicationManager:
         self.tts.speak(message)
         time.sleep(self.guard_seconds)
         state = self.state_provider()
-        beep = permission or (state != self._state and STATE_MODES.get(state) is ListeningMode.SINGLE)
+        context = self._current_context(state)
+        new_question = context != self._context and STATE_MODES.get(state) is ListeningMode.SINGLE
+        if new_question:
+            self._question_context, self._question = context, message
+        beep = permission or new_question
         self.sync_state(state, force=True, beep=beep)
 
     def sync_state(self, state, force=False, beep=False) -> None:
         if self._closed:
             return
-        if state == self._state and not force:
+        context = self._current_context(state)
+        if context == self._context and not force:
             return
-        if state != self._state:
+        if context != self._context:
             self._attempts = 0
+            if self.logger is not None:
+                self.logger.log_message("Voice context changed.", {
+                    "task_instance_id": context.task_instance_id,
+                    "task_id": context.task_id,
+                    "state": context.state.name if context.state else None,
+                })
+        self._context = context
         self._state = state
         self.mode = STATE_MODES.get(state, ListeningMode.OFF)
         self._generation += 1
@@ -100,6 +123,9 @@ class CommunicationManager:
             lambda text: self._on_voice_text(text, generation),
             lambda outcome, detail="": self._on_voice_failure(generation, outcome, detail),
             beep=beep,
+            instructions=build_instructions(
+                self._context, self._question if self._question_context == self._context else None,
+            ),
         )
 
     def _on_voice_text(self, text: str, generation: int) -> None:
@@ -127,6 +153,7 @@ class CommunicationManager:
             if outcome == "text":
                 event = self.parser.parse(detail, source="human_voice")
                 if event is not None:
+                    event.task_instance_id = self._context.task_instance_id
                     self._errors = 0
                     self._error_notified = False
                     self.event_sink(event)

@@ -204,7 +204,7 @@ class VoiceBackendTests(unittest.TestCase):
 
     def test_interrupted_gpt_window_discards_socket_without_result(self):
         ws = self.voice._ws
-        def connected():
+        def connected(*_):
             self.voice._stop.set()
             return True
         self.voice._connect_gpt.side_effect = connected
@@ -233,14 +233,14 @@ class VoiceBackendTests(unittest.TestCase):
         self.voice._ws = None
         ws = Mock()
         ws.recv.side_effect = [
-            json.dumps({"type": "session.updated"}),
+            json.dumps({"type": "session.updated", "session": {"instructions": "test context"}}),
             json.dumps({"type": "response.output_text.done", "text": "yes"}),
         ]
         with patch.dict(backend.os.environ, {"OPENAI_API_KEY": "test-only", "VOICE_MODEL": "gpt-realtime-2"}), \
                 patch.object(backend.websocket, "create_connection", return_value=ws), \
                 patch.object(backend.sd, "RawInputStream") as audio:
             audio.return_value.__enter__.return_value.read.return_value = (b"\x00\x00", False)
-            self.voice._listen_once_gpt(self.on_text, self.on_failure, beep=True)
+            self.voice._listen_once_gpt(self.on_text, self.on_failure, beep=True, instructions="test context")
         self.on_failure.assert_not_called()
         self.voice._play_ready_beep.assert_called_once()
         self.on_text.assert_called_once_with("yes")

@@ -14,6 +14,7 @@ import websocket
 from dotenv import load_dotenv
 from vosk import KaldiRecognizer, Model, SetLogLevel
 from voice_result import VoiceOutcome
+from voice_context import VoiceContext, build_instructions
 
 
 load_dotenv(Path(__file__).parent / "gpt_live" / ".env")
@@ -37,6 +38,7 @@ class VoiceInterface:
         self._stop = threading.Event()
         self._thread = None
         self._ws = None
+        self._applied_instructions = None
         self._gpt_enabled = gpt_enabled
 
     @staticmethod
@@ -71,50 +73,46 @@ class VoiceInterface:
         tone = (0.4 * np.sin(2 * np.pi * 1000 * samples / sample_rate)).astype("float32")
         sd.play(tone, sample_rate, device=device, blocking=True)
 
-    def _connect_gpt(self) -> bool:
-        if self._ws and self._ws.connected:
+    def _connect_gpt(self, instructions: str | None = None) -> bool:
+        instructions = instructions if instructions is not None else build_instructions(VoiceContext(None))
+        connected = self._ws is not None and self._ws.connected
+        if connected and self._applied_instructions == instructions:
             return True
 
-        api_key = os.environ.get("OPENAI_API_KEY")
-        model = os.environ.get("VOICE_MODEL")
-        if not api_key or not model:
-            raise RuntimeError("OPENAI_API_KEY and VOICE_MODEL must be set")
-
-        instructions = (
-            "Understand the user's spoken intent and output exactly one lowercase "
-            f"command from: {', '.join(sorted(self._phrases))}, unknown. "
-            "Map natural expressions to their meaning and output unknown if unclear."
-            " Output screw done for finished screwing; output done for finished "
-            "adjusting. Do not shorten screw done to done."
-            " Output only the English command, without explanations. "
-            "For unclear audio, output unknown."
-        )
-        ws = websocket.create_connection(
-            f"wss://api.openai.com/v1/realtime?model={model}",
-            header=[f"Authorization: Bearer {api_key}"],
-            timeout=5,
-        )
-        self._ws = ws
+        session = {"type": "realtime", "instructions": instructions}
+        if not connected:
+            api_key = os.environ.get("OPENAI_API_KEY")
+            model = os.environ.get("VOICE_MODEL")
+            if not api_key or not model:
+                raise RuntimeError("OPENAI_API_KEY and VOICE_MODEL must be set")
+            if self._ws is not None:
+                self._ws.close()
+            self._ws = websocket.create_connection(
+                f"wss://api.openai.com/v1/realtime?model={model}",
+                header=[f"Authorization: Bearer {api_key}"],
+                timeout=5,
+            )
+            self._applied_instructions = None
+            session.update({
+                "output_modalities": ["text"],
+                "max_output_tokens": 4096,
+                "reasoning": {"effort": "low"},
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
+                        "turn_detection": {
+                            "type": "semantic_vad",
+                            "eagerness": "medium",
+                            "create_response": True,
+                        },
+                    }
+                },
+            })
+        ws = self._ws
         try:
             ws.send(json.dumps({
                 "type": "session.update",
-                "session": {
-                    "type": "realtime",
-                    "instructions": instructions,
-                    "output_modalities": ["text"],
-                    "max_output_tokens": 4096,
-                    "reasoning": {"effort": "low"},
-                    "audio": {
-                        "input": {
-                            "format": {"type": "audio/pcm", "rate": SAMPLE_RATE},
-                            "turn_detection": {
-                                "type": "semantic_vad",
-                                "eagerness": "medium",
-                                "create_response": True,
-                            },
-                        }
-                    },
-                },
+                "session": session,
             }))
             ws.settimeout(0.2)
             deadline = time.monotonic() + 5.0
@@ -126,6 +124,9 @@ class VoiceInterface:
                 except websocket.WebSocketTimeoutException:
                     continue
                 if event.get("type") == "session.updated":
+                    if event.get("session", {}).get("instructions") != instructions:
+                        continue
+                    self._applied_instructions = instructions
                     ws.settimeout(0.01)
                     return True
                 if event.get("type") == "error":
@@ -138,7 +139,7 @@ class VoiceInterface:
             self._ws = None
             raise
 
-    def start_listening(self, on_text, on_failure, *, beep=False) -> None:
+    def start_listening(self, on_text, on_failure, *, beep=False, instructions=None) -> None:
         self.stop_listening()
         if self._thread is not None and self._thread.is_alive():
             on_failure(VoiceOutcome.ERROR, "Previous microphone worker is still stopping")
@@ -147,7 +148,7 @@ class VoiceInterface:
         if self._gpt_enabled:
             self._thread = threading.Thread(
                 target=self._listen_once_gpt,
-                args=(on_text, on_failure, beep),
+                args=(on_text, on_failure, beep, instructions),
                 daemon=True,
             )
         else:
@@ -158,10 +159,10 @@ class VoiceInterface:
             )
         self._thread.start()
 
-    def _listen_once_gpt(self, on_text, on_failure, beep=False) -> None:
+    def _listen_once_gpt(self, on_text, on_failure, beep=False, instructions=None) -> None:
         speech_seen = False
         try:
-            if not self._connect_gpt():
+            if not self._connect_gpt(instructions):
                 return
 
             ws = self._ws
@@ -277,7 +278,7 @@ class VoiceInterface:
 
 
 class NullVoiceInterface:
-    def start_listening(self, on_text, on_failure, *, beep=False) -> None:
+    def start_listening(self, on_text, on_failure, *, beep=False, instructions=None) -> None:
         pass
 
     def stop_listening(self) -> None:

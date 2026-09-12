@@ -35,3 +35,48 @@ but does not guarantee perfect noise rejection or command recognition.
 Offline checks: `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`.
 The tests mock audio, network, and robot interfaces; live microphone validation
 is still needed in the actual work environment.
+
+## State-aware GPT instructions
+
+`3_communication/voice_context.py` contains the shared base instructions, task
+descriptions, and per-state templates. Edit these templates to review or refine
+how GPT interprets replies. No state-dependent natural-language parsing is added
+to the CLI or local command parser.
+
+The runtime snapshots `task_instance_id`, `task_id`, and `state` from the active
+task. CommunicationManager selects the template and includes the current
+permission question when available. Retries and error announcements do not
+replace that question. Changing task or instance invalidates the old listener
+even if the robot state name stays the same.
+
+- In `R_FREE_DRIVE`, a generic completion reply means panel adjustment is
+  finished; GPT is instructed to output `done`.
+- In `R_HOLDING`, the same generic reply means screwing is finished; GPT is
+  instructed to output `screw done`.
+- In `R_MANUAL_RECOVERY`, completion means recovery is finished: `done`.
+- Explicit statements and negation override assumptions. Finishing adjustment
+  alone must not be interpreted as finishing screwing.
+
+VoiceInterface sends the generated text through `session.update.instructions`
+and waits for a `session.updated` containing those instructions before beep and
+recording. An already usable socket is reused: unchanged instructions need no
+update, while changed instructions are updated on that socket. New connections
+receive the full configuration and current instructions. Interrupted audio or
+unfinished responses retain the existing close/reconnect protection.
+
+Voice events retain the task instance ID from the listening snapshot. The
+existing parser maps GPT's standard command to an event, and TaskManager still
+checks event validity. The Vosk path accepts the shared listening interface but
+does not use GPT instructions or reinterpret `done` by state.
+
+To compare real speech interpretation in the standalone test (uses microphone
+and the configured API credentials, but sends no robot commands):
+
+```powershell
+.venv/Scripts/python.exe 3_communication/gpt_live/gpt_stt.py --state R_FREE_DRIVE --task-id 1
+.venv/Scripts/python.exe 3_communication/gpt_live/gpt_stt.py --state R_HOLDING --task-id 1
+```
+
+These run separately. Try the same phrase, such as "I'm done", in each stage.
+Offline tests verify template selection, context forwarding, updates and stale
+callback handling; actual model interpretation is not guaranteed by mock tests.

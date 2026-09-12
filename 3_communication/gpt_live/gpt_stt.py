@@ -1,8 +1,10 @@
-"""Standalone test matching VoiceInterface's GPT configuration."""
+"""Standalone microphone test using the runtime's task-context templates."""
 
 import base64
+import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -10,6 +12,12 @@ import sounddevice as sd
 import websocket
 from dotenv import load_dotenv
 
+ROOT = Path(__file__).resolve().parents[2]
+for directory in (ROOT, ROOT / "0_core", ROOT / "3_communication"):
+    sys.path.insert(0, str(directory))
+
+from events import RobotTaskState
+from voice_context import VoiceContext, STATE_CONTEXTS, TASK_DESCRIPTIONS, build_instructions
 
 load_dotenv(Path(__file__).with_name(".env"))
 
@@ -23,24 +31,20 @@ COMMANDS = {
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Test GPT voice interpretation in one task stage.")
+    parser.add_argument("--state", choices=[state.name for state in STATE_CONTEXTS], default="R_WAITING_RESPONSE")
+    parser.add_argument("--task-id", type=int, choices=sorted(TASK_DESCRIPTIONS), default=1)
+    args = parser.parse_args()
     api_key = os.environ.get("OPENAI_API_KEY")
     model = os.environ.get("VOICE_MODEL")
     if not api_key or not model:
         raise RuntimeError("OPENAI_API_KEY and VOICE_MODEL must be set")
 
-    # Provide task context here for the model to understand the commands.
-    instructions = (
-        "Understand the user's spoken intent and output exactly one lowercase "
-        f"command from: {', '.join(sorted(COMMANDS))}, unknown. "
-        "Map natural expressions to their meaning and output unknown if unclear."
-        " Output screw done for finished screwing; output done for finished "
-        "adjusting. Do not shorten screw done to done."
-        " Output only the English command, without explanations. "
-        "For unclear audio, output unknown."
-    )
+    instructions = build_instructions(VoiceContext(RobotTaskState[args.state], args.task_id, "voice_test"))
     ws = websocket.create_connection(
         f"wss://api.openai.com/v1/realtime?model={model}",
         header=[f"Authorization: Bearer {api_key}"],
+        timeout=5,
     )
     try:
         ws.send(json.dumps({
@@ -63,9 +67,23 @@ def main() -> None:
                 },
             },
         }))
+        ws.settimeout(0.2)
+        deadline = time.monotonic() + 5.0
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Voice session setup timed out")
+            try:
+                event = json.loads(ws.recv())
+            except websocket.WebSocketTimeoutException:
+                continue
+            if event.get("type") == "error":
+                raise RuntimeError(event["error"]["message"])
+            if (event.get("type") == "session.updated"
+                    and event.get("session", {}).get("instructions") == instructions):
+                break
         ws.settimeout(0.01)
         started = time.monotonic()
-        print(f"Listening for {TIMEOUT:.0f} seconds...")
+        print(f"Task {args.task_id}, state {args.state}. Listening for {TIMEOUT:.0f} seconds...")
 
         with sd.RawInputStream(
             samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=2400
