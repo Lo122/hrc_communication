@@ -154,7 +154,7 @@ class WorkflowTests(unittest.TestCase):
         self.reply("screw done")
         leave_id = self.manager.active_task.task_instance_id
         with patch.dict(config.TASK_TIMINGS, {2: {"defer_seconds": 9}, 3: {"response_timeout_seconds": 30}}):
-            self.output.show_message.side_effect = lambda message: self.timer.start_defer_timer.assert_not_called()
+            self.output.show_message.side_effect = lambda message, **kwargs: self.timer.start_defer_timer.assert_not_called()
             self.reply("later")
             self.output.show_message.side_effect = None
             self.timer.start_defer_timer.assert_called_with(leave_id, 9)

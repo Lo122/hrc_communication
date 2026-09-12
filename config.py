@@ -119,7 +119,7 @@ LOG_FILE_PATH = "hrc_communication_events.log"
 
 VOICE_ENABLED = True
 
-VOICE_GPT_ENABLED = True
+VOICE_GPT_ENABLED = False
 
 # List audio devices: .venv\Scripts\python.exe -m sounddevice
 VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-0.15"

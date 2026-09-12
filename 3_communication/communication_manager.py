@@ -63,16 +63,16 @@ class CommunicationManager:
         """Let CLI workers request output without touching the audio worker."""
         self._results.put((None, "message", message))
 
-    def show_message(self, message: str) -> None:
-        self._announce(message)
+    def show_message(self, message: str, *, speech: str | None = None) -> None:
+        self._announce(message, speech=speech)
 
-    def show_permission_request(self, message: str) -> None:
+    def show_permission_request(self, message: str, *, speech: str | None = None) -> None:
         self._attempts = 0
         self._question_context = self._current_context(self.state_provider())
         self._question = message
-        self._announce(message, permission=True)
+        self._announce(message, permission=True, speech=speech)
 
-    def _announce(self, message: str, permission=False) -> None:
+    def _announce(self, message: str, permission=False, *, speech: str | None = None) -> None:
         if self._closed:
             return
         self._generation += 1
@@ -80,7 +80,7 @@ class CommunicationManager:
         self.voice.stop_listening()
         output = self.cli.show_permission_request if permission else self.cli.show_message
         output(message)
-        self.tts.speak(message)
+        self.tts.speak(message if speech is None else speech)
         time.sleep(self.guard_seconds)
         state = self.state_provider()
         context = self._current_context(state)
@@ -170,7 +170,10 @@ class CommunicationManager:
                 self._errors += 1
                 if self._errors >= 2 and not self._error_notified:
                     self._error_notified = True
-                    self._announce("Voice input is temporarily unavailable. Please type your commands.")
+                    self._announce(
+                        "Voice input is temporarily unavailable. Please type your commands.",
+                        speech="Voice temporarily unavailable. Please type.",
+                    )
                 self._retry_at = time.monotonic() + self.retry_seconds
                 continue
             self._errors = 0
@@ -179,7 +182,10 @@ class CommunicationManager:
                 self._attempts += 1
                 if self._attempts == 1 and self.max_attempts > 1:
                     choices = "yes, no, or later" if self._state == RobotTaskState.R_WAITING_RESPONSE else "yes or no"
-                    self._announce(f"Please say {choices}, or type your reply.", permission=True)
+                    self._announce(
+                        f"Please say {choices}, or type your reply.", permission=True,
+                        speech=f"Please say {choices}.",
+                    )
                     continue
             self._retry_at = time.monotonic()
         if self._retry_at is not None and time.monotonic() >= self._retry_at:

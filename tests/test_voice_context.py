@@ -34,6 +34,37 @@ class ContextRoutingTests(unittest.TestCase):
     def instructions(self):
         return self.voice.start_listening.call_args.kwargs["instructions"]
 
+    def test_short_speech_preserves_full_question_through_retries(self):
+        from message_manager import MessageManager
+
+        messages = MessageManager()
+        full = messages.get_permission_message(1)
+        short = messages.get_permission_message(1, spoken=True)
+        self.comm.show_permission_request(full, speech=short)
+        self.comm.cli.show_permission_request.assert_called_once_with(full)
+        self.comm.tts.speak.assert_called_once_with(short)
+        self.assertNotEqual(full, short)
+        self.assertIn(full, self.instructions())
+        self.assertTrue(self.voice.start_listening.call_args.kwargs["beep"])
+        original = self.instructions()
+        for outcome in (O.NO_SPEECH, O.UNRECOGNIZED):
+            self.voice.start_listening.call_args.args[1](outcome, "test")
+            self.comm.poll()
+            self.assertEqual(self.instructions(), original)
+
+    def test_short_free_drive_question_preserves_context_and_beep(self):
+        from message_manager import MessageManager
+
+        messages = MessageManager()
+        self.context = VoiceContext(S.R_WAITING_FREE_DRIVE, 1, "lift_1")
+        full = messages.ask_permission_for_free_drive()
+        short = messages.ask_permission_for_free_drive(spoken=True)
+        self.comm.show_message(full, speech=short)
+        self.comm.cli.show_message.assert_called_once_with(full)
+        self.comm.tts.speak.assert_called_once_with(short)
+        self.assertIn(full, self.instructions())
+        self.assertTrue(self.voice.start_listening.call_args.kwargs["beep"])
+
     def test_every_listening_stage_has_supported_command_template(self):
         parser = CommandParser()
         self.assertEqual(set(STATE_CONTEXTS), set(STATE_MODES))

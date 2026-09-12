@@ -1,5 +1,13 @@
 # Voice listening policy
 
+Task prompts have separate detailed CLI text and concise spoken text in
+`3_communication/message_manager.py` (`spoken=True`). CommunicationManager
+accepts the short version via `speech=` and sends only that version to TTS;
+without an override, it speaks the supplied message as before. The CLI and
+GPT question context retain the full text. Beep and listening rules are unchanged.
+Speech keeps the requested action, completion commands (`done` / `screw done`),
+and deferred-start duration; command lists and task instance IDs stay on the CLI.
+
 Voice workers report commands or one of three non-command outcomes:
 
 | Outcome | Handling |
