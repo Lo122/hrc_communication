@@ -1,4 +1,4 @@
-"""Configuration values and mappings for the HRC communication system."""
+﻿"""Configuration values and mappings for the HRC communication system."""
 
 RESPONSE_TIMEOUT_SECONDS = 20.0
 DEFER_SECONDS = 5.0
@@ -84,6 +84,10 @@ ROS_TOPICS = {
                                                 # publish_human_location() docstring for why this
                                                 # isn't a stock geometry_msgs/PointStamped (that
                                                 # type has no room for the keypoints dict).
+    "joint_state": "/UR10/joint_states",  # sensor_msgs/JointState
+    "tcp_pose": "/UR10/tcp_pose",  # geometry_msgs/PoseStamped
+    "ft_wrench": "/UR10/ftsensor/wrench",  # geometry_msgs/WrenchStamped
+    "ft_zero": "/UR10/ftsensor/zero",  # std_msgs/Empty: publish to tare the FT sensor
 }
 
 # How often recognition publishes HUMAN_LOCATION_UPDATE events, in frames -- see
@@ -132,3 +136,7 @@ VOICE_MAX_ATTEMPTS = 2
 VOICE_ERROR_RETRY_SECONDS = 5.0
 
 test_vid_path = r"G:\.shortcut-targets-by-id\1nZZWQUKOdxeC-oo-NKucbuUj38ir4mZC\ITECH_Thesis\Videos\raw\cam-04\video__cam-04_uid-01_take-01.mp4"
+
+
+# ROBOT_IP = "169.254.130.206" 
+ROBOT_IP = "127.0.0.1"
