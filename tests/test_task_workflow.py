@@ -106,10 +106,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(comm.mode, ListeningMode.CONTINUOUS)
         on_text = voice.start_listening.call_args.args[0]
         on_text("screw done")
+        comm.poll()
         self.assertEqual(self.manager.active_task.task_id, 2)
         self.assertEqual(self.manager.active_task.state, S.R_WAITING_RESPONSE)
         comm.sync_state(S.R_WAITING_RESPONSE)
         on_text("screw done")  # Old voice callback is discarded.
+        comm.poll()
         self.assertEqual(self.output.show_permission_request.call_count, 2)
 
     def test_done_does_not_release_and_screw_done_is_only_valid_while_holding(self):
@@ -152,7 +154,7 @@ class WorkflowTests(unittest.TestCase):
         self.reply("screw done")
         leave_id = self.manager.active_task.task_instance_id
         with patch.dict(config.TASK_TIMINGS, {2: {"defer_seconds": 9}, 3: {"response_timeout_seconds": 30}}):
-            self.output.show_message.side_effect = lambda message: self.timer.start_defer_timer.assert_not_called()
+            self.output.show_message.side_effect = lambda message, **kwargs: self.timer.start_defer_timer.assert_not_called()
             self.reply("later")
             self.output.show_message.side_effect = None
             self.timer.start_defer_timer.assert_called_with(leave_id, 9)

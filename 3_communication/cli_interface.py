@@ -9,11 +9,11 @@ class CLIInterface:
     def __init__(self, command_parser=None):
         self.command_parser = command_parser
 
-    def show_message(self, message: str) -> None:
+    def show_message(self, message: str, *, speech: str | None = None) -> None:
         """Display a system message to the human."""
         print(message)
 
-    def show_permission_request(self, message: str) -> None:
+    def show_permission_request(self, message: str, *, speech: str | None = None) -> None:
         """Display a permission request for a proposed robot task."""
         print(message)
 
