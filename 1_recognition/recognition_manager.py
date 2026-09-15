@@ -51,6 +51,9 @@ class RecognitionManager:
         show_video: bool = False,
         display_window_name: str = "HRC Recognition",
         display_panel_size: tuple[int, int] = (480, 480),
+        plot_window_name: str = "HRC Debug Plot",
+        plot_panel_size: tuple[int, int] = (480, 320),
+        plot_history_len: int = 300,
         vision_config: VisionConfig | None = None,
     ):
         self.step_stabilizer = step_stabilizer
@@ -64,6 +67,16 @@ class RecognitionManager:
         self.show_video = show_video
         self.display_window_name = display_window_name
         self.display_panel_size = display_panel_size
+        self.plot_window_name = plot_window_name
+        self.plot_panel_size = plot_panel_size
+
+        # Debug-overlay history for the live plot window (_update_debug_plot) -- progress/
+        # confidence only accumulate once the LSTM window buffer is full (see update_from_frame),
+        # world position accumulates every frame with a valid 3D lift, so these are independent
+        # lengths/timelines by design; each is just plotted against its own sample index.
+        self._progress_history: deque[float] = deque(maxlen=plot_history_len)
+        self._confidence_history: deque[float] = deque(maxlen=plot_history_len)
+        self._world_xyz_history: deque[tuple[float, float, float]] = deque(maxlen=plot_history_len)
 
         # 3D posture pipeline (YOLO/calibration/MotionBERT/depth-estimator/feature-window
         # knobs) -- see vision_model/vision_config.py and skeleton3d_pipeline.py. video_source/
@@ -171,6 +184,7 @@ class RecognitionManager:
         if world_xyz is not None and not np.isnan(world_xyz).any():
             self.last_world_xyz = (float(world_xyz[0]), float(world_xyz[1]), float(world_xyz[2]))
             self.last_location_timestamp = frame_timestamp
+            self._world_xyz_history.append(self.last_world_xyz)
         logger.info(f"Frame {frame_timestamp:.3f}: world_root_xyz={self.last_world_xyz}")
 
         root_relative = pipeline_out.get("root_relative")
@@ -199,6 +213,8 @@ class RecognitionManager:
         probabilities = step_probs.squeeze(0).cpu().numpy()
         stable_step_id = self._stable_step_id(probabilities)
         self.last_raw_step_id = raw_step_id
+        self._progress_history.append(progress)
+        self._confidence_history.append(confidence)
 
         if stable_step_id is None:
             self._show_frame(frame, pipeline_out, raw_step_id=raw_step_id, progress=progress, confidence=confidence)
@@ -249,10 +265,11 @@ class RecognitionManager:
             self._capture.release()
             self._capture = None
         if self.show_video and self._cv2 is not None:
-            try:
-                self._cv2.destroyWindow(self.display_window_name)
-            except self._cv2.error:
-                pass
+            for window_name in (self.display_window_name, self.plot_window_name):
+                try:
+                    self._cv2.destroyWindow(window_name)
+                except self._cv2.error:
+                    pass
 
     def _show_frame(
         self,
@@ -287,9 +304,131 @@ class RecognitionManager:
                 self._cv2.resize(panel_3d, (panel_w, panel_h)),
             ])
 
+        display = self._draw_debug_overlay(
+            display, raw_step_id=raw_step_id, stable_step_id=stable_step_id,
+            progress=progress, confidence=confidence)
+
         self._cv2.imshow(self.display_window_name, display)
+        self._update_debug_plot()
         if self._cv2.waitKey(1) & 0xFF == ord("q"):
             raise KeyboardInterrupt
+
+    def _draw_debug_overlay(
+        self,
+        display,
+        *,
+        raw_step_id: int | None,
+        stable_step_id: int | None,
+        progress: float | None,
+        confidence: float | None,
+    ):
+        """Burn live model output + absolute human position as text onto the
+        top-left corner of the display frame, for debugging without needing
+        to correlate a separate console/log stream against the video."""
+        display = display.copy()
+
+        if self.last_world_xyz is not None:
+            x, y, z = self.last_world_xyz
+            world_line = f"World XYZ: ({x:+.2f}, {y:+.2f}, {z:+.2f}) m"
+        else:
+            world_line = "World XYZ: --"
+
+        if raw_step_id is not None:
+            stable_text = str(stable_step_id) if stable_step_id is not None else "-"
+            step_lines = [
+                f"Raw step: {raw_step_id}  Stable step: {stable_text}",
+                f"Progress: {progress:.2f}  Confidence: {confidence:.2f}",
+            ]
+        else:
+            buffered = len(self.buffer)
+            window = self.window_size or "?"
+            step_lines = [f"Buffering: {buffered}/{window}"]
+
+        lines = [world_line, *step_lines]
+        for i, text in enumerate(lines):
+            origin = (10, 24 + i * 22)
+            # Black outline then colored fill so the text stays legible over
+            # any background (skeleton overlay, bright frame, etc.).
+            self._cv2.putText(display, text, origin, self._cv2.FONT_HERSHEY_SIMPLEX,
+                               0.55, (0, 0, 0), 3, self._cv2.LINE_AA)
+            self._cv2.putText(display, text, origin, self._cv2.FONT_HERSHEY_SIMPLEX,
+                               0.55, (0, 255, 0), 1, self._cv2.LINE_AA)
+        return display
+
+    def _update_debug_plot(self) -> None:
+        """Scrolling time-series window (separate from the skeleton/overlay
+        window) of step progress/confidence and world x/y/z -- the trend
+        over time that a single-frame text overlay can't show."""
+        panel_w, panel_h = self.plot_panel_size
+        canvas = np.full((panel_h, panel_w, 3), 255, dtype=np.uint8)
+        top_h = panel_h // 2
+
+        self._draw_series_plot(
+            canvas, row_range=(0, top_h), y_range=(0.0, 1.0), title="Progress / Confidence",
+            series=[
+                (list(self._progress_history), (0, 150, 0), "progress"),
+                (list(self._confidence_history), (200, 0, 0), "confidence"),
+            ],
+        )
+        world = list(self._world_xyz_history)
+        self._draw_series_plot(
+            canvas, row_range=(top_h, panel_h), y_range=None, title="World position (m)",
+            series=[
+                ([p[0] for p in world], (255, 0, 0), "x"),
+                ([p[1] for p in world], (0, 150, 150), "y"),
+                ([p[2] for p in world], (0, 0, 255), "z"),
+            ],
+        )
+        self._cv2.imshow(self.plot_window_name, canvas)
+
+    def _draw_series_plot(
+        self,
+        canvas: np.ndarray,
+        *,
+        row_range: tuple[int, int],
+        y_range: tuple[float, float] | None,
+        title: str,
+        series: list[tuple[list[float], tuple[int, int, int], str]],
+    ) -> None:
+        """Draw one or more scrolling line series into canvas[row0:row1, :].
+        y_range=None auto-scales to the min/max across all series (with a
+        small margin), falling back to (-1, 1) if nothing has data yet.
+        Newest sample is at the right edge, oldest scrolls off the left, in
+        deque-maxlen-relative x -- so the plot doesn't jump width as history
+        fills up."""
+        row0, row1 = row_range
+        height = row1 - row0
+        width = canvas.shape[1]
+        maxlen = self._progress_history.maxlen or 1
+
+        if y_range is None:
+            values = [v for values, _color, _label in series for v in values]
+            if values:
+                lo, hi = min(values), max(values)
+                margin = max((hi - lo) * 0.1, 0.05)
+                y_range = (lo - margin, hi + margin)
+            else:
+                y_range = (-1.0, 1.0)
+        y_lo, y_hi = y_range
+        y_span = (y_hi - y_lo) or 1.0
+
+        def to_point(index: int, value: float, n: int) -> tuple[int, int]:
+            x = int(round((width - 1) * (maxlen - n + index) / max(maxlen - 1, 1)))
+            y = row0 + int(round((1.0 - (value - y_lo) / y_span) * (height - 1)))
+            return x, y
+
+        for values, color, _label in series:
+            n = len(values)
+            if n < 2:
+                continue
+            points = [to_point(i, v, n) for i, v in enumerate(values)]
+            self._cv2.polylines(canvas, [np.array(points, dtype=np.int32)], False, color, 1, self._cv2.LINE_AA)
+
+        legend = f"{title}  [" + ", ".join(label for _v, _c, label in series) + f"]  y:[{y_lo:.2f},{y_hi:.2f}]"
+        self._cv2.putText(canvas, legend, (6, row0 + 14), self._cv2.FONT_HERSHEY_SIMPLEX,
+                           0.4, (40, 40, 40), 1, self._cv2.LINE_AA)
+        if row0 > 0:
+            self._cv2.line(canvas, (0, row0), (width, row0), (210, 210, 210), 1)
 
     def _result_from_passthrough(self, input_data: dict) -> RecognitionResult:
         step_id = input_data.get("step_id", 0)

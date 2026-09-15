@@ -3,6 +3,11 @@
     Usage:
         uv run python run_recognition.py --loop-hz 15 [--camera] [--video-source VIDEO_SOURCE]`
           --model-dir MODEL_DIR [--host HOST] [--port PORT] [--no-display] [--loop-hz HZ]
+
+        Or, to send RECOGNITION_TRIGGER events by hand (no camera/video/model) and time how
+        the communication layer reacts:
+            uv run python run_recognition.py --manual-trigger [--host HOST] [--port PORT]
+        then at the "> " prompt type: step_id[,piece_id[,round_id[,progress]]]
 """
 
 from __future__ import annotations
@@ -23,6 +28,10 @@ from events import Event, EventType
 from recognition_manager import DEFAULT_MODEL_DIR, RecognitionManager
 from trigger_manager import TriggerManager
 
+DEFAULT_MANUAL_PIECE_ID = 1
+DEFAULT_MANUAL_ROUND_ID = 0
+DEFAULT_MANUAL_PROGRESS = 1.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +47,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default=config.EVENT_TRANSPORT_HOST, help="Communication event receiver host.")
     parser.add_argument("--port", type=int, default=config.EVENT_TRANSPORT_PORT, help="Communication event receiver port.")
     parser.add_argument("--no-display", action="store_true", help="Disable the recognition video preview window.")
+    parser.add_argument("--manual-trigger", action="store_true",
+                         help="Skip the camera/video/model pipeline entirely. Instead, prompt on the "
+                              "terminal for step_id[,piece_id[,round_id[,progress]]] and send that "
+                              "RECOGNITION_TRIGGER event over the real UDP path on Enter -- for timing "
+                              "how fast the communication layer reacts without needing real model output.")
     parser.add_argument("--loop-hz", type=float, default=LOOP_HZ,
                          help="Target recognition loop rate (Hz). Each iteration sleeps only "
                               "enough to hold this rate -- see the main loop's fixed-tick "
@@ -53,10 +67,87 @@ def _recognition_source(args: argparse.Namespace):
     return args.video_source or config.test_vid_path
 
 
+def _parse_manual_trigger_line(line: str) -> tuple[int, int, int, float] | None:
+    """Parse "step_id[,piece_id[,round_id[,progress]]]" typed at the prompt.
+
+    Missing fields fall back to DEFAULT_MANUAL_*. Returns None if the line is
+    blank or not parseable (the caller re-prompts instead of crashing the loop).
+    """
+    parts = [p.strip() for p in line.split(",")]
+    if not parts or not parts[0]:
+        return None
+    try:
+        step_id = int(parts[0])
+        piece_id = int(parts[1]) if len(parts) > 1 and parts[1] else DEFAULT_MANUAL_PIECE_ID
+        round_id = int(parts[2]) if len(parts) > 2 and parts[2] else DEFAULT_MANUAL_ROUND_ID
+        progress = float(parts[3]) if len(parts) > 3 and parts[3] else DEFAULT_MANUAL_PROGRESS
+    except ValueError:
+        print(f"Could not parse '{line}' as step_id[,piece_id[,round_id[,progress]]] -- try again.")
+        return None
+    return step_id, piece_id, round_id, progress
+
+
+def _run_manual_trigger_loop(sender: UDPEventSender, host: str, port: int) -> None:
+    """Interactively send RECOGNITION_TRIGGER events over the real UDP path.
+
+    Bypasses RecognitionManager/TriggerManager entirely (no camera, no video,
+    no model) so you can time how long the communication layer takes to react
+    to a given step, independent of recognition inference time.
+    """
+    configured_steps = ", ".join(str(step) for step in sorted(config.TRIGGER_RULES))
+    print(f"Manual trigger mode -- sending RECOGNITION_TRIGGER events to {host}:{port}")
+    print(f"Configured human steps: {configured_steps}")
+    print(f"Defaults when omitted: piece_id={DEFAULT_MANUAL_PIECE_ID}, "
+          f"round_id={DEFAULT_MANUAL_ROUND_ID}, progress={DEFAULT_MANUAL_PROGRESS}")
+    print("Enter: step_id[,piece_id[,round_id[,progress]]]  (Ctrl+C or 'q' to quit)")
+
+    while True:
+        try:
+            line = input("> ").strip()
+        except EOFError:
+            break
+        if line.lower() in ("q", "quit", "exit"):
+            break
+
+        parsed = _parse_manual_trigger_line(line)
+        if parsed is None:
+            continue
+        step_id, piece_id, round_id, progress = parsed
+        if step_id not in config.TRIGGER_RULES:
+            print(f"Step {step_id} has no recognition trigger configured. "
+                  f"Configured human steps: {configured_steps}.")
+            continue
+
+        event = Event(
+            event_type=EventType.RECOGNITION_TRIGGER,
+            source="manual_recognition",
+            payload={
+                "step_id": step_id,
+                "piece_id": piece_id,
+                "round_id": round_id,
+                "progress": progress,
+            },
+        )
+        send_time = time.time()
+        sender.send(event)
+        print(f"[manual trigger] sent step_id={step_id} piece_id={piece_id} "
+              f"round_id={round_id} progress={progress} at t={send_time:.6f}")
+
+
 if __name__ == "__main__":
     args = _parse_args()
-    source = _recognition_source(args)
     sender = UDPEventSender(args.host, args.port)
+
+    if args.manual_trigger:
+        try:
+            _run_manual_trigger_loop(sender, args.host, args.port)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            sender.close()
+        sys.exit(0)
+
+    source = _recognition_source(args)
     recognition_manager = RecognitionManager(model_dir=args.model_dir, video_source=source, show_video=not args.no_display)
     trigger_manager = TriggerManager()
 

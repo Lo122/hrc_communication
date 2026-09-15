@@ -131,11 +131,11 @@ def ur_reader_node(enable_plot: bool = False) -> None:
             q = rtde_r.getActualQ()               # Joint positions (rad)
             qd = rtde_r.getActualQd()              # Joint velocities (rad/s)
             qdd = rtde_r.getActualQdd()            # Joint accelerations (rad/s^2)
-            joint_torques = rtde_r.getActualJointT()  # Joint force/torque
+            joint_torques = rtde_r.getActualJointT()  # Joint force/torque (Fx, Fy, Fz, Tx, Ty, Tz) Units: Nm
 
             # 2. TCP Data (Lists of 6 floats: [x, y, z, rx, ry, rz])
-            tcp_pose = rtde_r.getActualTCPPose()    # TCP position and orientation
-            tcp_wrench = rtde_r.getActualTCPForce()  # TCP force/torque (Fx, Fy, Fz, Tx, Ty, Tz)
+            tcp_pose = rtde_r.getActualTCPPose()    # TCP position and orientation (x, y, z, rx, ry, rz) Units: m, rad
+            tcp_wrench = rtde_r.getActualTCPForce()  # TCP force/torque (Fx, Fy, Fz, Tx, Ty, Tz) Units: N, Nm
 
             header = _ros_header()
 
