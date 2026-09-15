@@ -21,22 +21,22 @@
             <div class="view-heading">
               <p class="eyebrow">HUMAN STEP 0</p>
               <h1 id="permission-title">Lift the panel?</h1>
-              <p class="supporting-text">Robot task R1 is ready.</p>
+              <p id="permission-detail" class="supporting-text">Waiting for H0…</p>
             </div>
 
             <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
 
             <div class="permission-actions" aria-label="Respond to robot request">
-              <button class="button button-primary" type="button" data-command="H_ACCEPT">
+              <button class="button button-primary" type="button" data-command="H_ACCEPT" disabled>
                 <span class="button-icon" aria-hidden="true">✓</span>
                 <span>Start</span>
               </button>
               <div class="button-row">
-                <button class="button button-secondary" type="button" data-command="H_REFUSE">
+                <button class="button button-secondary" type="button" data-command="H_REFUSE" disabled>
                   <span class="button-icon" aria-hidden="true">×</span>
                   <span>No</span>
                 </button>
-                <button class="button button-secondary" type="button" data-command="H_DEFER">
+                <button class="button button-secondary" type="button" data-command="H_DEFER" disabled>
                   <span class="button-icon clock-icon" aria-hidden="true"></span>
                   <span>In 5 sec</span>
                 </button>
