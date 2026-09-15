@@ -23,6 +23,14 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 DEFAULT_MODEL_DIR = Path(__file__).resolve().parent / "best_model" / "3d_skeleton" 
 logger = logging.getLogger(__name__)
 
+# Feature keys a model config may ask for that StreamingH36MFeatureExtractor doesn't emit
+# under that name, because they are a concatenation of several of its outputs. "pol_angles"
+# is azimuth followed by elevation -- the same order src/pose_detection_live.py builds it in
+# (see its all_pol_angles). Each component is normalized separately (the norm .npz carries
+# per-component stats, e.g. polar_azimuth_mean/polar_elevation_mean) and only then
+# concatenated here, so this stays consistent with training.
+COMPOSITE_FEATURE_KEYS = {"pol_angles": ("polar_azimuth", "polar_elevation")}
+
 STEP_SMOOTHING_WINDOW = 5
 STEP_CONFIRMATION_COUNT = 3
 STEP_MIN_CONFIDENCE = 0.6
@@ -54,15 +62,29 @@ class RecognitionManager:
         plot_window_name: str = "HRC Debug Plot",
         plot_panel_size: tuple[int, int] = (480, 320),
         plot_history_len: int = 300,
+        enable_step_model: bool = True,
         vision_config: VisionConfig | None = None,
     ):
         self.step_stabilizer = step_stabilizer
         self.model_dir = Path(model_dir)
-        self.model_config_path = Path(model_config_path) if model_config_path is not None else self.model_dir / "config.json"
-        self.model_config = self._load_model_config()
-        self.model_path = Path(model_path) if model_path is not None else self._find_model_path()
-        self.norm_path = Path(norm_path) if norm_path is not None else self._find_norm_path()
-        self.feature_keys = feature_keys or list(self.model_config["feature_keys"])
+        self.enable_step_model = enable_step_model
+
+        if enable_step_model:
+            self.model_config_path = Path(model_config_path) if model_config_path is not None else self.model_dir / "config.json"
+            self.model_config = self._load_model_config()
+            self.model_path = Path(model_path) if model_path is not None else self._find_model_path()
+            self.norm_path = Path(norm_path) if norm_path is not None else self._find_norm_path()
+            self.feature_keys = feature_keys or list(self.model_config["feature_keys"])
+        else:
+            # Vision-only mode: YOLO 2D pose + MotionBERT 3D lift still run for real, but the
+            # LSTM step classifier and its normalization stats are never touched -- so a
+            # missing or mismatched norm .npz cannot stop the skeleton pipeline from running.
+            self.model_config_path = None
+            self.model_config = None
+            self.model_path = None
+            self.norm_path = None
+            self.feature_keys = list(feature_keys or [])
+
         self.device_name = device
         self.show_video = show_video
         self.display_window_name = display_window_name
@@ -91,6 +113,7 @@ class RecognitionManager:
 
         self._torch = None
         self._cv2 = None
+        self._pipeline_ready = False
         self._model = None
         self._norm_real_time = None
         self._skeleton_pipeline = None
@@ -190,6 +213,14 @@ class RecognitionManager:
         root_relative = pipeline_out.get("root_relative")
         if root_relative is not None and not np.isnan(root_relative).any():
             self.last_root_relative_skeleton = root_relative
+
+        if not self.enable_step_model:
+            # Vision-only ("fake recognition"): skeleton, 3D lift and world position above are
+            # all real and keep feeding the display/HUMAN_LOCATION_UPDATE stream. Step
+            # classification is simply not run, so there is no RecognitionResult to return --
+            # trigger events come from the manual/keyboard source in run_recognition.py instead.
+            self._show_frame(frame, pipeline_out)
+            return None
 
         features = self._feature_extractor.update(pipeline_out["skeleton"], frame_timestamp)
         features = self._norm_real_time.normalize_features(features)
@@ -339,6 +370,8 @@ class RecognitionManager:
                 f"Raw step: {raw_step_id}  Stable step: {stable_text}",
                 f"Progress: {progress:.2f}  Confidence: {confidence:.2f}",
             ]
+        elif not self.enable_step_model:
+            step_lines = ["Step model: OFF (manual triggers)"]
         else:
             buffered = len(self.buffer)
             window = self.window_size or "?"
@@ -468,7 +501,7 @@ class RecognitionManager:
             self.seen_trigger_steps_in_round.add(step_id)
 
     def _ensure_realtime_pipeline(self) -> None:
-        if self._model is not None:
+        if self._pipeline_ready:
             return
 
         try:
@@ -478,7 +511,6 @@ class RecognitionManager:
 
         from dataclasses import replace
 
-        from norm_feat_rlt import NormRealTime
         from skeleton3d_pipeline import RealtimeSkeleton3DPipeline, StreamingH36MFeatureExtractor
         from skeleton_pipeline.features.h36m_features import H36M_JOINT_NAMES
         from skeleton_pipeline.render.skeleton_video import draw_2d_skeleton
@@ -490,29 +522,37 @@ class RecognitionManager:
         # Resolved device wins over vision_config.device without mutating a config the
         # caller may be reusing elsewhere.
         self.vision_config = replace(self.vision_config, device=self.vision_config.device or self.device)
-        self.window_size = int(self.model_config["window_size"])
-        self.num_steps = int(self.model_config["num_steps"])
-        self.buffer = deque(maxlen=self.window_size)
 
-        #region: HERE WE INSTANTIATE THE TRAINED MODEL
-        model_dir = str(self.model_dir.parent) if str(self.model_dir.name) in ["2d_skeleton", "3d_skeleton"] else str(self.model_dir)
-        if model_dir not in sys.path:
-            sys.path.insert(0, model_dir)
-        from LSTM_model_train import AssistLSTM
-        self._model = AssistLSTM(
-            input_dim=int(self.model_config["input_dim"]),
-            hidden_dim=int(self.model_config["hidden_dim"]),
-            num_steps=self.num_steps,
-        ).to(self.device)
-        self._model.load_state_dict(torch.load(self.model_path, map_location=self.device))
-        self._model.eval()
-        #endregion
+        if self.enable_step_model:
+            from norm_feat_rlt import NormRealTime
+
+            self.window_size = int(self.model_config["window_size"])
+            self.num_steps = int(self.model_config["num_steps"])
+            self.buffer = deque(maxlen=self.window_size)
+
+            #region: HERE WE INSTANTIATE THE TRAINED MODEL
+            model_dir = str(self.model_dir.parent) if str(self.model_dir.name) in ["2d_skeleton", "3d_skeleton"] else str(self.model_dir)
+            if model_dir not in sys.path:
+                sys.path.insert(0, model_dir)
+            from LSTM_model_train import AssistLSTM
+            self._model = AssistLSTM(
+                input_dim=int(self.model_config["input_dim"]),
+                hidden_dim=int(self.model_config["hidden_dim"]),
+                num_steps=self.num_steps,
+            ).to(self.device)
+            self._model.load_state_dict(torch.load(self.model_path, map_location=self.device))
+            self._model.eval()
+            #endregion
+
+            self._feature_extractor = StreamingH36MFeatureExtractor(self.vision_config)
+            self._norm_real_time = NormRealTime(str(self.norm_path), self.feature_keys)
+            self._ensure_stabilizer()
+        else:
+            print("Vision-only mode: YOLO 2D pose + MotionBERT 3D lift are live; "
+                  "LSTM step classification is disabled (no norm stats needed).")
 
         self._skeleton_pipeline = RealtimeSkeleton3DPipeline(self.vision_config)
-        self._feature_extractor = StreamingH36MFeatureExtractor(self.vision_config)
         self._draw_2d_skeleton = draw_2d_skeleton
-        self._norm_real_time = NormRealTime(str(self.norm_path), self.feature_keys)
-        self._ensure_stabilizer()
 
         if self.show_video:
             # Four-view (oblique/front/side/top) orthographic panel of the
@@ -521,6 +561,8 @@ class RecognitionManager:
             # FastSkeleton3DRenderer docstring.
             from skeleton_pipeline.render.skeleton_video import FastSkeleton3DRenderer
             self._renderer_3d = FastSkeleton3DRenderer(self.display_panel_size)
+
+        self._pipeline_ready = True
 
     def _ensure_stabilizer(self) -> None:
         if self.step_stabilizer is not None:
@@ -565,10 +607,18 @@ class RecognitionManager:
     def _build_feature_vector(self, features: dict[str, Any]) -> np.ndarray:
         values = []
         for key in self.feature_keys:
-            value = features[key]
-            if self._torch is not None and isinstance(value, self._torch.Tensor):
-                value = value.detach().cpu().numpy()
-            values.append(np.asarray(value, dtype=np.float32).reshape(-1))
+            for part_key in COMPOSITE_FEATURE_KEYS.get(key, (key,)):
+                try:
+                    value = features[part_key]
+                except KeyError:
+                    raise KeyError(
+                        f"Feature '{part_key}' (for model config feature_key '{key}') is not "
+                        f"produced by the feature extractor. Available features: "
+                        f"{sorted(features)}."
+                    ) from None
+                if self._torch is not None and isinstance(value, self._torch.Tensor):
+                    value = value.detach().cpu().numpy()
+                values.append(np.asarray(value, dtype=np.float32).reshape(-1))
         return np.concatenate(values, axis=0)
 
     def _read_frame(self):
