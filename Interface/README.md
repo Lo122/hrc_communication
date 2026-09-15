@@ -1,6 +1,8 @@
 # HRC watch interface demo
 
-This is a minimal FastAPI-backed browser demo for one Human Step 0 interaction:
+This is a FastAPI interface for one Human Step 0 interaction. FastAPI and the
+existing HRC communication runtime run in the same process and share the same
+event queue.
 
 The R1 permission question supports `H_ACCEPT`, `H_REFUSE`, and `H_DEFER`.
 
@@ -12,15 +14,25 @@ Install the backend dependencies from the repository root:
 uv pip install --python .venv\Scripts\python.exe -r Interface\requirements.txt
 ```
 
-Start the FastAPI backend:
+Start the integrated FastAPI and HRC communication runtime:
 
 ```powershell
 .venv\Scripts\python.exe -B Interface\server.py
 ```
 
-Then open `http://127.0.0.1:8765` and select one response. The selected response
-is sent to `/api/permission`; the demo does not proceed to robot execution or
-other commands.
+Run this command instead of `run_communication.py`, because both programs would
+otherwise try to bind the same recognition-event UDP port. Recognition events
+arrive through the existing configured event transport. For an H0 test without
+the recognition process, start with:
+
+```powershell
+.venv\Scripts\python.exe -B Interface\server.py --debug-trigger
+```
+
+Then open `http://127.0.0.1:8765`. The page polls `GET /api/permission` and only
+enables its buttons while a real Human Step 0 task is in `R_WAITING_RESPONSE`.
+The selected response is sent to `POST /api/permission` with the current
+`task_instance_id`.
 
 After backend acknowledgement, the page emits a browser event named
 `hrc-permission-response`. Its detail uses the same permission event names as
@@ -32,6 +44,8 @@ window.addEventListener("hrc-permission-response", (event) => {
 });
 ```
 
-The FastAPI backend validates and acknowledges the permission response only. It
-does not start the main HRC runtime, send Grasshopper or ROS commands, or control
-a robot.
+The backend converts the response into the project's core `Event`, puts it in
+the shared `HRCSystem.event_queue`, and immediately processes it through
+`TaskManager`. Therefore `H_ACCEPT`, `H_REFUSE`, and `H_DEFER` now have the same
+business behavior as their CLI and voice equivalents. In particular, accepting
+uses the normal Grasshopper task dispatch path.
