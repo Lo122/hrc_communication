@@ -1,0 +1,556 @@
+/* State-driven HRC watch UI. Shared by /watch (watch only) and /sim.
+ *
+ * Two skins, each in a light and a dark mode:
+ *
+ *   clay   the pressed pad is the subject of the screen; the drafting paper
+ *          (grid, stamp, dimension rail) stays quietly underneath
+ *   plate  the pad grows into one instrument: a gauge face with corner
+ *          crosshairs, a tick ring and a segmented scale under the title
+ *
+ * Inside the pad the signal is square and stepped while the robot speaks and
+ * soft concentric rings while it listens to you; while the robot moves the
+ * rim becomes the progress arc and the speed scale sits in the middle.
+ */
+
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", "Segoe UI", sans-serif;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+
+  /* Apple Watch 45 mm logical size; the simulator may override. */
+  --screen-w: 198px;
+  --screen-h: 242px;
+  --scale: 1.6;
+}
+
+* { box-sizing: border-box; }
+button { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+
+/* ---------- Palette ----------------------------------------------------- */
+.watch {
+  --red: #a42016;             /* the one accent                 */
+  --red-deep: #6d1009;
+  --red-soft: #c8544a;
+  --ink: #221a18;
+  --dim: rgba(34, 26, 24, 0.52);
+  --field: #e6ded8;           /* the clay sheet                 */
+  --pad: #f2ece8;             /* the pressed pad                */
+  --line: rgba(34, 26, 24, 0.07);
+  --sh-dark: rgba(140, 116, 106, 0.5);   /* neumorphic shadow   */
+  --sh-light: rgba(255, 255, 255, 0.92);
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.watch[data-mode="dark"] {
+  --red: #e0584a;
+  --red-deep: #8d2418;
+  --red-soft: #ff8c7d;
+  --ink: #f3ece8;
+  --dim: rgba(243, 236, 232, 0.5);
+  --field: #17130f;
+  --pad: #211c19;
+  --line: rgba(255, 255, 255, 0.05);
+  --sh-dark: rgba(0, 0, 0, 0.72);
+  --sh-light: rgba(255, 255, 255, 0.055);
+}
+
+/* ---------- Device frame ------------------------------------------------ */
+.watch {
+  position: relative;
+  width: calc(var(--screen-w) * var(--scale) + 22px);
+  height: calc(var(--screen-h) * var(--scale) + 22px);
+  padding: 11px;
+  border-radius: calc(44px * var(--scale));
+  background: linear-gradient(145deg, #3a3a3c 0%, #121214 45%, #2a2a2c 100%);
+  box-shadow:
+    0 30px 60px rgba(60, 14, 10, 0.24),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    inset 0 0 0 3px rgba(0, 0, 0, 0.6);
+}
+.watch::after {            /* digital crown */
+  content: "";
+  position: absolute;
+  right: -7px;
+  top: 26%;
+  width: 8px;
+  height: 46px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #4a4a4c, #232325);
+}
+.watch[data-shape="round"] { border-radius: 50%; }
+.watch[data-shape="round"]::after { top: 38%; }
+
+.watch.is-buzzing { animation: buzz 0.32s linear 2; }
+@keyframes buzz {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-2px) rotate(-0.4deg); }
+  75% { transform: translateX(2px) rotate(0.4deg); }
+}
+
+.screen-viewport {
+  width: calc(var(--screen-w) * var(--scale));
+  height: calc(var(--screen-h) * var(--scale));
+  overflow: hidden;
+  border-radius: calc(36px * var(--scale));
+}
+.watch[data-shape="round"] .screen-viewport { border-radius: 50%; }
+
+/* ---------- Screen ------------------------------------------------------ */
+.screen {
+  overflow: hidden;
+  position: relative;
+  width: var(--screen-w);
+  height: var(--screen-h);
+  transform: scale(var(--scale));
+  transform-origin: 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 10px 14px 12px;
+  color: var(--ink);
+  background: var(--field);
+  transition: background 0.45s ease, color 0.35s ease;
+}
+.watch[data-shape="round"] .screen { padding: 16px 24px 20px; }
+
+/* the drafting paper: a faint 13 pt grid, and crosshairs in the corners */
+.paper {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 13px 13px;
+}
+.cross { position: absolute; width: 7px; height: 7px; opacity: 0.55; }
+.cross::before, .cross::after {
+  content: ""; position: absolute; background: var(--dim);
+}
+.cross::before { left: 50%; top: 0; width: 1px; height: 100%; }
+.cross::after { top: 50%; left: 0; height: 1px; width: 100%; }
+.cross.tl { left: 9px; top: 26px; }
+.cross.tr { right: 9px; top: 26px; }
+.cross.bl { left: 9px; bottom: 14px; }
+.cross.br { right: 9px; bottom: 14px; }
+.watch[data-skin="clay"] .cross { display: none; }   /* clay keeps only the grid */
+
+/* ---------- Status bar --------------------------------------------------- */
+.status-bar {
+  position: relative; z-index: 2;
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  width: 100%;
+  height: 11px;
+  font: 500 8.5px/1 var(--mono);
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+.link { display: inline-flex; align-items: center; gap: 4px; }
+.link-dot { width: 4px; height: 4px; border-radius: 50%; background: currentColor; opacity: 0.45; }
+.link[data-link="live"] .link-dot { background: var(--red); opacity: 1; }
+.badge { font-size: 8px; color: var(--dim); }
+
+.stamp-row {
+  position: relative; z-index: 2;
+  align-self: flex-start;
+  display: flex; align-items: center; gap: 6px;
+  margin: 6px 0 0; padding: 0;
+  max-width: 100%;
+}
+.status-word {
+  font: 500 7px/1.3 var(--mono);
+  letter-spacing: 0.12em;
+  color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.watch[data-skin="clay"] .status-word,
+.watch[data-skin="plate"] .status-word { display: none; }
+
+/* the stamp: the line the backend already writes, in a drawing-block box */
+.stamp {
+  position: relative; z-index: 2;
+  flex: none;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--red);
+  border-radius: 3px;
+  font: 600 7.5px/1.3 var(--mono);
+  letter-spacing: 0.12em;
+  color: var(--red);
+  max-width: 100%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.screen[data-tone="hand"] .stamp,
+.screen[data-tone="idle"] .stamp { border-color: var(--dim); color: var(--dim); }
+.watch[data-skin="plate"] .stamp { display: none; }   /* the plate speaks for itself */
+
+/* ---------- The pad: pressed clay that holds the signal ------------------ */
+.stage {
+  position: relative; z-index: 2;
+  flex: 1 1 auto;
+  display: flex; align-items: center; justify-content: center;
+  width: 100%;
+  min-height: 0;
+}
+.pad {
+  position: relative;
+  display: grid; place-items: center;
+  width: 84px; height: 84px;
+  border-radius: 25px;
+  background: var(--pad);
+  box-shadow:
+    5px 5px 12px var(--sh-dark),
+    -5px -5px 12px var(--sh-light),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.35);
+  transition: width 0.35s ease, height 0.35s ease, border-radius 0.35s ease;
+}
+.watch[data-mode="dark"] .pad { box-shadow: 5px 5px 12px var(--sh-dark), -4px -4px 10px var(--sh-light); }
+.watch[data-skin="clay"] .pad { width: 80px; height: 80px; }
+.watch[data-skin="plate"] .pad { width: 122px; height: 122px; border-radius: 50%; }
+.watch[data-shape="round"][data-skin="plate"] .pad { width: 112px; height: 112px; }
+
+/* gauge: the tick ring (plate only) and the arc for time / progress */
+.gauge { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.gauge circle { fill: none; stroke-width: 2.2; }
+.gauge-track { stroke: transparent; }
+.gauge-arc {
+  stroke: var(--red);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s linear, opacity 0.3s;
+}
+.gauge-arc.is-hidden { opacity: 0; }
+.ticks { display: none; }
+.watch[data-skin="plate"] .ticks { display: block; }
+.watch[data-skin="plate"] .gauge-track { stroke: var(--line); }
+.ticks line { stroke: var(--dim); stroke-width: 1; opacity: 0.55; }
+.watch[data-skin="clay"] .gauge { transform: rotate(-90deg) scale(0.8); }
+/* clay never draws a ring: the pad carries the voice signal, and time and
+   progress are the line underneath it */
+.watch[data-skin="clay"] .gauge { display: none; }
+
+/* ---------- The signal --------------------------------------------------- */
+.sig { position: relative; display: grid; place-items: center; width: 100%; height: 100%; }
+.sig > * { position: absolute; }
+
+/* robot speaking: square, stepped, machine-like */
+.sig-steps { width: 44px; height: 44px; display: grid; place-items: center; opacity: 0; }
+.sig-steps i {
+  position: absolute;
+  border: 1.6px solid var(--red);
+  border-radius: 5px;
+}
+.sig-steps i:nth-child(1) { width: 44px; height: 44px; opacity: 0.3; }
+.sig-steps i:nth-child(2) { width: 30px; height: 30px; opacity: 0.6; }
+.sig-steps i:nth-child(3) { width: 15px; height: 15px; background: var(--red); border-radius: 3px; }
+.screen[data-sig="steps"] .sig-steps { opacity: 1; }
+/* speaking: the squares step outward, one frame at a time — a machine
+   drawing itself, not a soft pulse. Clearly visible across the room. */
+.screen[data-sig="steps"][data-talk="speaking"] .sig-steps i:nth-child(1) { animation: step-out 0.9s steps(3, end) infinite; }
+.screen[data-sig="steps"][data-talk="speaking"] .sig-steps i:nth-child(2) { animation: step-out 0.9s steps(3, end) 0.12s infinite; }
+.screen[data-sig="steps"][data-talk="speaking"] .sig-steps i:nth-child(3) { animation: step-core 0.9s steps(2, end) infinite; }
+@keyframes step-out {
+  0%   { transform: scale(0.62); opacity: 0.15; }
+  40%  { transform: scale(0.88); opacity: 0.75; }
+  75%  { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1.3);  opacity: 0; }
+}
+@keyframes step-core {
+  0%, 49%   { transform: scale(1);    opacity: 1; }
+  50%, 100% { transform: scale(0.62); opacity: 0.55; }
+}
+/* idle (nobody talking): the signal rests, no animation */
+
+/* listening to you: soft concentric rings, organic */
+.sig-rings { width: 54px; height: 54px; display: grid; place-items: center; opacity: 0; }
+.sig-rings i, .sig-rings b {
+  position: absolute; border-radius: 50%;
+}
+.sig-rings i { border: 1.4px solid var(--red); }
+.sig-rings i:nth-child(1) { width: 54px; height: 54px; opacity: 0.22; }
+.sig-rings i:nth-child(2) { width: 38px; height: 38px; opacity: 0.42; }
+.sig-rings i:nth-child(3) { width: 23px; height: 23px; opacity: 0.7; }
+.sig-rings b { width: 10px; height: 10px; background: var(--red); }
+.screen[data-sig="rings"] .sig-rings { opacity: 1; }
+.screen[data-sig="rings"] .sig-rings i:nth-child(1) { animation: swell 2.6s ease-in-out infinite; }
+.screen[data-sig="rings"] .sig-rings i:nth-child(2) { animation: swell 2.6s ease-in-out 0.25s infinite; }
+.screen[data-sig="rings"] .sig-rings i:nth-child(3) { animation: swell 2.6s ease-in-out 0.5s infinite; }
+.screen[data-sig="rings"] .sig-rings b { animation: swell 2.6s ease-in-out 0.75s infinite; }
+@keyframes swell {
+  0%, 100% { transform: scale(0.9); opacity: 0.3; }
+  50% { transform: scale(1.06); opacity: 0.85; }
+}
+
+/* the robot is moving: the speed scale sits inside the arc */
+.sig-speed { display: grid; justify-items: center; gap: 5px; opacity: 0; }
+.screen[data-sig="gauge"] .sig-speed { opacity: 1; }
+.sig-label { font: 500 7px/1 var(--mono); letter-spacing: 0.16em; color: var(--dim); }
+.segs { display: flex; gap: 3px; }
+.segs i {
+  width: 6px; height: 9px; border-radius: 1.5px;
+  background: var(--ink); opacity: 0.12;
+  transition: opacity 0.25s, background 0.25s;
+}
+.segs i.on { background: var(--red); opacity: calc(0.45 + 0.55 * var(--lit, 0.3)); }
+.watch[data-skin="plate"] .segs i { width: 7px; height: 10px; }
+
+/* ---------- Title + detail ---------------------------------------------- */
+.title {
+  flex: none;
+  position: relative; z-index: 2;
+  margin: 9px 0 0;
+  font-size: 15px; line-height: 1.12; font-weight: 700;
+  letter-spacing: -0.005em;
+  text-wrap: balance;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.watch[data-shape="round"] .title { font-size: 13.5px; }
+.watch[data-skin="plate"] .title { margin-top: 7px; }
+.detail {
+  flex: none;
+  position: relative; z-index: 2;
+  margin: 3px 0 0;
+  font-size: 9px; line-height: 1.25;
+  color: var(--dim);
+}
+.watch[data-skin="plate"] .detail { display: none; }   /* the plate keeps one line */
+
+/* ---------- The dimension rail ------------------------------------------ */
+.rail {
+  position: relative; z-index: 2;
+  display: flex; align-items: center; gap: 6px;
+  width: 100%;
+  margin-top: 7px;
+  font: 500 7px/1 var(--mono);
+  letter-spacing: 0.12em;
+  color: var(--dim);
+}
+.rail-label, .rail-value { flex: none; }
+.rail-value { min-width: 18px; text-align: right; }
+.rail-track {
+  position: relative; flex: 1 1 auto; height: 2px; overflow: hidden;
+  background: var(--line);
+  border-radius: 1px;
+}
+.watch[data-mode="dark"] .rail-track { background: rgba(255, 255, 255, 0.1); }
+.rail-track i {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+  background: var(--red);
+  border-radius: 1px;
+  transition: width 0.3s linear;
+}
+.rail-track.is-indeterminate i { width: 32%; animation: sweep 1.9s ease-in-out infinite; }
+@keyframes sweep { 0% { left: -32%; } 100% { left: 100%; } }
+
+/* on the plate the rail is a segmented scale, like a drawing ruler */
+.watch[data-skin="plate"] .rail-track {
+  height: 4px; background: none; border-radius: 0;
+  -webkit-mask-image: repeating-linear-gradient(90deg, #000 0 7px, transparent 7px 10px);
+  mask-image: repeating-linear-gradient(90deg, #000 0 7px, transparent 7px 10px);
+}
+.watch[data-skin="plate"] .rail-track::before {
+  content: ""; position: absolute; inset: 0;
+  background: var(--ink); opacity: 0.13;
+}
+.watch[data-skin="plate"] .rail-track i { border-radius: 0; }
+
+/* speed −/+ flank the rail while the robot moves */
+.speed-btn {
+  width: 19px; height: 19px; flex: none;
+  border: 0; border-radius: 50%;
+  background: var(--pad);
+  color: var(--red);
+  font-size: 12px; font-weight: 500; line-height: 1;
+  cursor: pointer;
+  box-shadow: 2px 2px 5px var(--sh-dark), -2px -2px 5px var(--sh-light);
+}
+.speed-btn:active { transform: scale(0.94); box-shadow: inset 2px 2px 4px var(--sh-dark); }
+
+/* ---------- Pills -------------------------------------------------------- */
+.actions {
+  flex: none; position: relative; z-index: 2;
+  width: 100%;
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding-top: 9px;
+}
+.actions .row { display: flex; justify-content: center; gap: 6px; width: 100%; }
+
+.btn {
+  position: relative; overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  flex: 1 1 0; min-width: 0; min-height: 30px;
+  padding: 0 8px;
+  border: 0; border-radius: 15px;
+  background: var(--pad);
+  color: var(--ink);
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.02em;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none; -webkit-user-select: none;
+  touch-action: manipulation;
+  box-shadow: 3px 3px 8px var(--sh-dark), -3px -3px 8px var(--sh-light);
+  transition: transform 0.08s, box-shadow 0.25s, background 0.25s;
+}
+.btn:active { transform: scale(0.96); box-shadow: inset 2px 2px 6px var(--sh-dark); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn[data-role="primary"] {
+  background: var(--red);
+  color: #fff;
+  box-shadow: 3px 3px 9px rgba(110, 20, 12, 0.32), -2px -2px 6px var(--sh-light);
+}
+.watch[data-mode="dark"] .btn[data-role="primary"] { box-shadow: 3px 3px 9px rgba(0, 0, 0, 0.6); }
+.btn[data-role="danger"] { color: var(--red); }
+.btn .fill {                        /* the red that grows while you hold */
+  position: absolute; inset: 0;
+  background: var(--red);
+  transform: scaleX(0); transform-origin: left;
+  opacity: 0;
+}
+.btn.is-holding .fill { opacity: 1; transform: scaleX(1); transition: transform var(--hold-ms, 5000ms) linear; }
+.btn.is-holding { color: #fff; }
+.btn.is-confirmed {                  /* stays red for two seconds after firing */
+  background: var(--red) !important;
+  color: #fff !important;
+}
+.btn .label { position: relative; z-index: 1; white-space: nowrap; }
+.btn svg { position: relative; z-index: 1; }
+/* three answers in one row: the labels get the space, the icons step out */
+.row:has(.btn:nth-child(3)) .btn svg { display: none; }
+.row:has(.btn:nth-child(3)) .btn { font-size: 10px; padding: 0 5px; }
+.btn svg { width: 11px; height: 11px; flex: none; opacity: 0.75; }
+.hold-hint { font: 500 7px/1 var(--mono); letter-spacing: 0.12em; color: var(--dim); }
+
+/* ---------- Toast -------------------------------------------------------- */
+.toast {
+  position: absolute;
+  left: 12px; right: 12px; bottom: 6px;
+  padding: 6px 9px;
+  border-radius: 10px;
+  background: var(--ink);
+  color: var(--field);
+  font-size: 9.5px; line-height: 1.25;
+  opacity: 0; transform: translateY(6px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.toast.is-visible { opacity: 1; transform: translateY(0); }
+
+/* ---------- Round (Wear OS) density ------------------------------------- */
+.watch[data-shape="round"] .btn { min-height: 28px; font-size: 10px; padding: 0 7px; }
+.watch[data-shape="round"] .hold-hint { display: none; }
+.watch[data-shape="round"] .pad { width: 78px; height: 78px; }
+.watch[data-shape="round"] .paper { background-image: none; }
+
+/* ---------- Watch-only page (phone on the wrist) ------------------------- */
+body.watch-only {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: #000;
+}
+body.watch-only .watch { box-shadow: none; background: #000; padding: 0; }
+body.watch-only .watch::after { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* =====================================================================
+   SKIN: sheet — the drawing block. The stamp and the title run down the
+   left edge like a title block, the clay becomes one pressed plate that
+   holds the plotted signal, and the readings sit on dimension rails.
+   ===================================================================== */
+.sig-bars, .sig-wave, .pad-label { display: none; }
+
+.watch[data-skin="sheet"] .screen { align-items: stretch; text-align: left; padding: 10px 13px 12px; }
+.watch[data-skin="sheet"] .cross { display: none; }
+.watch[data-skin="sheet"] .stamp-row { margin-top: 7px; }
+.watch[data-skin="sheet"] .title { order: 2; margin: 7px 0 0; font-size: 15px; }
+.watch[data-skin="sheet"] .detail { display: none; }
+.watch[data-skin="sheet"] .stage { order: 3; margin-top: 8px; flex: 1 1 auto; align-items: stretch; }
+.watch[data-skin="sheet"] .rail { order: 4; }
+.watch[data-skin="sheet"] .actions { order: 5; }
+
+/* the plate: one pressed panel, wide, with its own label */
+.watch[data-skin="sheet"] .pad {
+  width: 100%; height: 100%;
+  min-height: 52px;
+  border-radius: 16px;
+  display: block;
+  padding: 13px 10px 9px;
+}
+.watch[data-skin="sheet"] .pad-label {
+  display: block;
+  position: absolute; left: 0; right: 0; top: 6px;
+  text-align: center;
+  font: 500 6.5px/1 var(--mono); letter-spacing: 0.18em;
+  color: var(--dim);
+}
+.watch[data-skin="sheet"] .gauge { display: none; }
+.watch[data-skin="sheet"] .sig { position: relative; }
+
+/* robot speaking: a bar trace — hard edges, machine-made */
+.watch[data-skin="sheet"] .screen[data-sig="steps"] .sig-steps { display: none; }
+.watch[data-skin="sheet"] .screen[data-sig="steps"] .sig-bars {
+  display: flex; align-items: center; justify-content: space-between;
+  position: absolute; inset: 0;
+}
+.sig-bars i {
+  width: 3px; border-radius: 1px;
+  background: var(--red);
+  height: 30%;
+}
+.sig-bars i:nth-child(3n)   { height: 62%; }
+.sig-bars i:nth-child(4n)   { height: 90%; }
+.sig-bars i:nth-child(5n)   { height: 22%; }
+.sig-bars i:nth-child(7n)   { height: 74%; }
+.watch[data-skin="sheet"] .screen[data-talk="speaking"] .sig-bars i {
+  animation: bar-step 0.75s steps(1, end) infinite;
+}
+.sig-bars i:nth-child(2n) { animation-delay: 0.15s; }
+.sig-bars i:nth-child(3n) { animation-delay: 0.3s; }
+.sig-bars i:nth-child(5n) { animation-delay: 0.45s; }
+@keyframes bar-step {
+  0%, 32%   { transform: scaleY(1.25); }
+  33%, 65%  { transform: scaleY(0.4); }
+  66%, 100% { transform: scaleY(0.85); }
+}
+
+/* listening to you: two drawn curves that drift — soft, hand-made */
+.watch[data-skin="sheet"] .screen[data-sig="rings"] .sig-rings { display: none; }
+.watch[data-skin="sheet"] .screen[data-sig="rings"] .sig-wave {
+  display: block;
+  position: absolute; inset: 0; width: 100%; height: 100%;
+}
+.sig-wave path { fill: none; stroke: var(--red); stroke-width: 1.6; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.sig-wave .wave-back { opacity: 0.35; animation: drift 4.2s ease-in-out infinite; }
+.sig-wave .wave-front { animation: drift 3.1s ease-in-out infinite reverse; }
+@keyframes drift {
+  0%, 100% { transform: translateX(-2%) scaleY(0.92); }
+  50% { transform: translateX(2%) scaleY(1.08); }
+}
+
+/* the robot is moving: the speed scale keeps the plate, with mono readings */
+.watch[data-skin="sheet"] .screen[data-sig="gauge"] .sig-speed {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.watch[data-skin="sheet"] .sig-speed .sig-label { display: none; }
+.watch[data-skin="sheet"] .segs { gap: 4px; }
+.watch[data-skin="sheet"] .segs i { width: 8px; height: 11px; border-radius: 2px; }
+
+/* the plate reads the ring, so its bottom row is the speed scale alone */
+.segs-rail { display: none; }
+.watch[data-skin="plate"] .segs-rail { display: flex; margin: 0 auto; }
+.watch[data-skin="plate"] .rail-label,
+.watch[data-skin="plate"] .rail-track,
+.watch[data-skin="plate"] .rail-value { display: none; }
+.watch[data-skin="plate"] .sig-speed { display: none; }
+.watch[data-skin="plate"] .rail { gap: 10px; justify-content: center; margin-top: 9px; }
+
+/* rails and pills sit on the block grid */
+.watch[data-skin="sheet"] .rail { margin-top: 8px; }
+.watch[data-skin="sheet"] .rail-value { font-weight: 600; color: var(--ink); }
+.watch[data-skin="sheet"] .btn { border-radius: 14px; }

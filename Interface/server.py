@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
+import functools
+import queue
+import os
 from pathlib import Path
+import signal
 import sys
+import threading
+import time
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -34,10 +41,13 @@ for layer in (
         sys.path.insert(0, path)
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(INTERFACE_DIR) not in sys.path:
+    sys.path.insert(0, str(INTERFACE_DIR))
 
 import config
 from event_transport import UDPEventReceiver
 from events import Event, EventType, RobotTaskState
+from watch_screens import TASK_NAMES, WATCH_COMMANDS, allowed_commands, build_screen
 
 
 # Literal gives FastAPI/Pydantic an explicit allowlist. A different command is
@@ -74,6 +84,27 @@ class PermissionAcknowledgement(BaseModel):
     event: PermissionEvent
 
 
+class WatchCommand(BaseModel):
+    """Any human command the state-driven watch screen can send."""
+
+    command: str
+    task_instance_id: str | None = None
+
+
+SimEventName = Literal[
+    "RECOGNITION_TRIGGER", "ROBOT_RUNNING", "ROBOT_SUCCESS", "ROBOT_HOMED", "SETTINGS"
+]
+
+
+class SimRequest(BaseModel):
+    """Simulator panel input (only accepted when started with --simulate)."""
+
+    event: SimEventName
+    step_id: int | None = None
+    auto_robot: bool | None = None
+    safe_home: bool | None = None
+
+
 @dataclass(frozen=True)
 class RuntimeSettings:
     """Values needed to run recognition input beside the HTTP server."""
@@ -84,6 +115,78 @@ class RuntimeSettings:
     debug_trigger: bool = False
     debug_round_id: int = 0
     debug_piece_id: int = 1
+    simulate: bool = False
+    sim_task_seconds: float = 16.0
+    voice: bool = True
+    force_voice: bool = False      # keep the real mic/TTS even with --simulate
+    free_port: bool = False
+
+
+def _udp_port_owners(host: str, port: int) -> list[tuple[int, str]]:
+    """PIDs (and process names) holding a UDP port, for a friendlier error."""
+
+    import subprocess
+
+    owners: list[tuple[int, str]] = []
+    try:
+        if sys.platform == "win32":
+            out = subprocess.run(
+                ["netstat", "-ano", "-p", "UDP"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                # UDP  127.0.0.1:5010  *:*  <pid>
+                if len(parts) >= 4 and parts[0].upper() == "UDP" and parts[1].endswith(f":{port}"):
+                    with suppress(ValueError):
+                        owners.append((int(parts[-1]), ""))
+            names = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            table = {}
+            for row in names.splitlines():
+                cells = [c.strip('"') for c in row.split('","')]
+                if len(cells) >= 2:
+                    with suppress(ValueError):
+                        table[int(cells[1])] = cells[0]
+            owners = [(pid, table.get(pid, "")) for pid, _ in owners]
+        else:
+            out = subprocess.run(
+                ["lsof", "-nP", f"-iUDP:{port}", "-t"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            owners = [(int(pid), "") for pid in out.split() if pid.isdigit()]
+    except Exception:
+        return []
+    # Never offer to kill this very process.
+    return [(pid, name) for pid, name in dict(owners).items() if pid != os.getpid()]
+
+
+def _free_udp_port(host: str, port: int) -> bool:
+    """Stop whatever is holding the recognition port (opt-in: --free-port)."""
+
+    import subprocess
+
+    owners = _udp_port_owners(host, port)
+    if not owners:
+        print(f"[port] nothing to free on UDP {port}.")
+        return False
+    for pid, name in owners:
+        label = f"{name} (pid {pid})" if name else f"pid {pid}"
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=10)
+            else:
+                os.kill(pid, signal.SIGTERM)
+            print(f"[port] stopped {label} holding UDP {port}.")
+        except Exception as exc:
+            print(f"[port] could not stop {label}: {exc}")
+    time.sleep(1.0)
+    return True
+
+
+TICK_SECONDS = 0.1      # runtime steps per second; higher rates starve speech
 
 
 class HRCBridge:
@@ -98,6 +201,8 @@ class HRCBridge:
         debug_trigger: bool = False,
         debug_round_id: int = 0,
         debug_piece_id: int = 1,
+        simulate: bool = False,
+        sim_task_seconds: float = 16.0,
     ):
         self.system = system
         self.receiver = receiver
@@ -106,7 +211,125 @@ class HRCBridge:
         self.debug_round_id = debug_round_id
         self.debug_piece_id = debug_piece_id
         self._process_lock = asyncio.Lock()
+        self._snapshot_cache: dict[str, Any] | None = None
+        self._snapshot_wanted = True
         self._process_task: asyncio.Task | None = None
+        self.messages: deque[dict] = deque(maxlen=6)
+        self._speaking_until = 0.0
+        # Without a real voice the spoken line is instant, so the simulator
+        # stretches the "robot is speaking" window: the stepped signal on the
+        # watch has to be readable, not a flicker.
+        self._speak_rate = 1.2 if simulate else 2.6      # words per second
+        self._speak_min = 3.0 if simulate else 1.2       # seconds
+        self._speech_queue: queue.Queue = queue.Queue()
+        self._speech_thread: threading.Thread | None = None
+        self._pending_listen: tuple | None = None
+        self._install_message_tap()
+        self.sim = None
+        if simulate:
+            from sim_robot import SimRobot
+
+            self.sim = SimRobot(system, task_seconds=sim_task_seconds)
+
+    def _install_message_tap(self) -> None:
+        """Mirror every CLI/voice message so the watch can show it as a toast."""
+
+        comm = getattr(self.system, "communication", None)
+        if comm is None:
+            return
+        for name in ("show_message", "show_permission_request"):
+            original = getattr(comm, name, None)
+            if original is None:
+                continue
+
+            def tapped(message, *args, _original=original, **kwargs):
+                text = kwargs.get("speech") or message
+                self.messages.append({"text": text, "timestamp": time.time()})
+                if self._speaking_until < time.time():
+                    words = len(str(text).split())
+                    self._speaking_until = time.time() + max(
+                        self._speak_min, words / self._speak_rate
+                    )
+                return _original(message, *args, **kwargs)
+
+            setattr(comm, name, tapped)
+
+        # The watch shows the speaking signal while the robot talks; pyttsx3
+        # gives no "is speaking" flag, so estimate it from the spoken words.
+        tts = getattr(self.system, "tts", None)
+        speak = getattr(tts, "speak", None)
+        if speak is not None:
+            def speaking(text, *args, _speak=speak, **kwargs):
+                words = len(str(text).split())
+                self._speaking_until = time.time() + max(
+                    self._speak_min, words / self._speak_rate
+                )
+                # Hand the sentence to the speech thread and return at once:
+                # spoken inline it would block the event loop, and the watch
+                # would only learn about the speech after it had finished.
+                self._speech_queue.put((_speak, text, args, kwargs))
+
+            tts.speak = speaking
+            self._speech_thread = threading.Thread(
+                target=self._speech_worker, name="hrc-speech", daemon=True
+            )
+            self._speech_thread.start()
+
+        voice = getattr(self.system, "voice", None)
+        start_listening = getattr(voice, "start_listening", None)
+        if start_listening is not None:
+            def deferred(*args, _start=start_listening, **kwargs):
+                wait = self._speaking_until - time.time()
+                if wait <= 0:
+                    self._pending_listen = None
+                    return _start(*args, **kwargs)
+                # Only the newest request survives: an older one would open the
+                # microphone with callbacks the runtime has already replaced.
+                self._pending_listen = (args, kwargs)
+                pending = self._pending_listen
+
+                def later():
+                    time.sleep(max(0.0, self._speaking_until - time.time()) + 0.15)
+                    if self._pending_listen is pending:
+                        self._pending_listen = None
+                        _start(*args, **kwargs)
+
+                threading.Thread(target=later, name="hrc-listen", daemon=True).start()
+
+            voice.start_listening = deferred
+
+    def _speech_worker(self) -> None:
+        """Speak queued lines one after another, off the event loop."""
+
+        while True:
+            item = self._speech_queue.get()
+            if item is None:
+                return
+            speak, text, args, kwargs = item
+            try:
+                speak(text, *args, **kwargs)
+            except Exception as exc:        # a broken voice must not stop the UI
+                print(f"[voice] could not speak: {exc}")
+
+    def _voice_status(self) -> dict[str, bool]:
+        """Who is talking right now: the robot (TTS) or the human (mic open)."""
+
+        now = time.time()
+        comm = getattr(self.system, "communication", None)
+        mode = getattr(comm, "mode", None)
+        listening = bool(mode is not None and getattr(mode, "name", "OFF") != "OFF")
+        speaking = now < self._speaking_until
+        if self.sim is not None and not config.VOICE_ENABLED and not listening and not speaking:
+            # Voice is off in the simulator: fake the channel so the orb is
+            # demonstrable -- the robot "speaks" right after a new message and
+            # then "listens" while a question is open.
+            last = self.messages[-1]["timestamp"] if self.messages else 0.0
+            speaking = now - last < 5.0
+            task = self.system.task_manager.active_task
+            listening = not speaking and task is not None and task.state.name in {
+                "R_WAITING_RESPONSE", "R_WAITING_FREE_DRIVE", "R_WAITING_HOME_PERMISSION",
+            }
+        return {"speaking": speaking, "listening": listening and not speaking}
 
     @classmethod
     def build_live(cls, settings: RuntimeSettings) -> "HRCBridge":
@@ -115,11 +338,54 @@ class HRCBridge:
         # Importing here keeps module import side-effect free. The microphone,
         # ROS connection, UDP sender, and other runtime resources are created
         # only when FastAPI actually starts its application lifespan.
+        import communication_runtime
         from communication_runtime import build_system
 
-        system = build_system()
+        if settings.simulate:
+            # No rosbridge: the SimRobot plays the robot side. The microphone
+            # stays off too, unless --voice asks for the real voice channel so
+            # the watch and speech can be tried together without a robot.
+            if not settings.force_voice:
+                config.VOICE_ENABLED = False
+            communication_runtime.ROSCommunication = functools.partial(
+                communication_runtime.ROSCommunication, auto_connect=False
+            )
+        if not settings.voice:
+            config.VOICE_ENABLED = False
+
+        # rosbridge already fails softly (console fallback), but the voice stack
+        # raises when the Vosk model or the microphone is missing. That should
+        # not take the whole interface down: start without voice and say so, so
+        # the watch, the timers and the robot side still run.
+        try:
+            system = build_system()
+        except Exception as exc:
+            if not config.VOICE_ENABLED:
+                raise
+            print(f"[voice] disabled: {exc}")
+            print("[voice] starting without speech input/output "
+                  "(use --no-voice to skip this attempt next time).")
+            config.VOICE_ENABLED = False
+            system = build_system()
+        if settings.free_port:
+            _free_udp_port(settings.event_host, settings.event_port)
         try:
             receiver = UDPEventReceiver(settings.event_host, settings.event_port)
+        except OSError as exc:
+            # Almost always a second copy of this server (or main.py) still
+            # holding the recognition port. Say that instead of a raw winerror.
+            system.close()
+            owners = _udp_port_owners(settings.event_host, settings.event_port)
+            who = ", ".join(
+                f"{name or 'python'} (pid {pid})" for pid, name in owners
+            ) or "another process"
+            raise RuntimeError(
+                f"Recognition UDP port {settings.event_host}:{settings.event_port} "
+                f"is already in use by {who} ({exc}). It is almost always an older "
+                f"server.py or main.py. Restart this one with --free-port to close "
+                f"it automatically, or use --event-port <free port> (and point the "
+                f"recognition sender at the same port)."
+            ) from exc
         except Exception:
             system.close()
             raise
@@ -130,6 +396,8 @@ class HRCBridge:
             debug_trigger=settings.debug_trigger,
             debug_round_id=settings.debug_round_id,
             debug_piece_id=settings.debug_piece_id,
+            simulate=settings.simulate,
+            sim_task_seconds=settings.sim_task_seconds,
         )
 
     async def start(self) -> None:
@@ -166,6 +434,8 @@ class HRCBridge:
             self._process_task = None
         if self.receiver is not None:
             self.receiver.close()
+        if self._speech_thread is not None:
+            self._speech_queue.put(None)
         self.system.close()
 
     async def _process_events(self) -> None:
@@ -176,8 +446,20 @@ class HRCBridge:
                 for event in self.receiver.poll():
                     self.system.event_queue.put(event)
             async with self._process_lock:
-                self.system.process_events()
-            await asyncio.sleep(0.05)
+                await asyncio.to_thread(self._tick)
+            await asyncio.sleep(TICK_SECONDS)
+
+    def _tick(self) -> None:
+        """One pass of the runtime, run in a worker thread."""
+
+        if self.sim is not None:
+            self.sim.tick()
+        self.system.process_events()
+        # Only build the JSON the watch actually asked for (about three times a
+        # second), not on every tick: that work competes with the speech.
+        if self._snapshot_wanted or self._snapshot_cache is None:
+            self._snapshot_wanted = False
+            self._snapshot_cache = self._snapshot()
 
     def _active_h0_permission(self):
         task = self.system.task_manager.active_task
@@ -243,6 +525,133 @@ class HRCBridge:
             )
 
 
+    # ------------------------------------------------------------------ #
+    # State-driven watch (all tasks, all states)                          #
+    # ------------------------------------------------------------------ #
+    def _pending(self) -> list:
+        pool = getattr(self.system, "pending_pool", None)
+        if pool is None:
+            pool = getattr(self.system.task_manager, "pending_pool", None)
+        return pool.list_all() if pool is not None else []
+
+    def _state_machine(self):
+        machine = getattr(self.system, "state_machine", None)
+        return machine or self.system.task_manager.state_machine
+
+    def _snapshot(self) -> dict[str, Any]:
+        now = time.time()
+        task = self.system.task_manager.active_task
+        pending = self._pending()
+        screen = build_screen(task, pending, self._state_machine(), now)
+        return {
+            "mode": "sim" if self.sim is not None else "live",
+            "server_time": now,
+            "state": task.state.name if task is not None else None,
+            "task": None if task is None else {
+                "task_instance_id": task.task_instance_id,
+                "task_id": task.task_id,
+                "name": TASK_NAMES.get(task.task_id, f"Task {task.task_id}"),
+                "human_step_id": task.step_id,
+                "piece_id": task.piece_id,
+            },
+            "speed": {
+                "value": getattr(task, "speed", config.DEFAULT_SPEED),
+                "min": config.MIN_SPEED,
+                "max": config.MAX_SPEED,
+            },
+            "progress": self.sim.progress if self.sim is not None else None,
+            "screen": screen.to_dict(),
+            "pending": [
+                {
+                    "task_instance_id": p.task_instance_id,
+                    "name": TASK_NAMES.get(p.task_id, f"Task {p.task_id}"),
+                    "reason": p.pending_reason,
+                }
+                for p in pending
+            ],
+            "voice": self._voice_status(),
+            "messages": list(self.messages),
+            "sim": None if self.sim is None else {
+                "auto_robot": self.sim.auto_robot,
+                "safe_home": self.sim.safe_home,
+            },
+        }
+
+    async def watch_state(self) -> dict[str, Any]:
+        self._snapshot_wanted = True
+        cached = self._snapshot_cache
+        if cached is not None and self._process_task is not None:
+            # Only while the runtime loop is the one driving the system: at
+            # most one tick old (50 ms), the countdown is derived from the
+            # deadline on the watch, and every command refreshes it. Tests and
+            # other callers that step the system themselves read it live.
+            return cached
+        async with self._process_lock:
+            return self._snapshot()
+
+    async def submit_watch_command(self, payload: WatchCommand) -> dict[str, Any]:
+        """Validate a watch command against the current screen, then queue it."""
+
+        if payload.command not in WATCH_COMMANDS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown watch command {payload.command}.",
+            )
+        async with self._process_lock:
+            task = self.system.task_manager.active_task
+            pending = self._pending()
+            allowed = allowed_commands(task, pending, self._state_machine())
+            if payload.command not in allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"{payload.command} is not available right now.",
+                )
+
+            instance_id = payload.task_instance_id
+            if payload.command == "H_EXECUTE_PENDING_TASK":
+                ids = [p.task_instance_id for p in pending]
+                instance_id = instance_id or ids[0]
+                if instance_id not in ids:
+                    raise HTTPException(status.HTTP_409_CONFLICT, "Pending task not found.")
+            elif instance_id is not None and instance_id != task.task_instance_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="The command belongs to an older task instance.",
+                )
+            else:
+                instance_id = task.task_instance_id
+
+            self.system.event_queue.put(
+                Event(
+                    event_type=EventType[payload.command],
+                    source="human_watch",
+                    task_instance_id=instance_id,
+                )
+            )
+            self.system.process_events()
+            self._snapshot_cache = self._snapshot()
+            return self._snapshot_cache
+
+    async def simulate(self, payload: SimRequest) -> dict[str, Any]:
+        if self.sim is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Start the server with --simulate.")
+        async with self._process_lock:
+            if payload.event == "SETTINGS":
+                if payload.auto_robot is not None:
+                    self.sim.auto_robot = payload.auto_robot
+                if payload.safe_home is not None:
+                    self.sim.set_safe_home(payload.safe_home)
+            elif payload.event == "RECOGNITION_TRIGGER":
+                if payload.step_id not in config.TRIGGER_RULES:
+                    raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown human step.")
+                self.sim.trigger(payload.step_id)
+            else:
+                self.sim.emit(EventType[payload.event])
+            self.system.process_events()
+            self._snapshot_cache = self._snapshot()
+            return self._snapshot_cache
+
+
 def create_app(
     settings: RuntimeSettings | None = None,
     bridge: HRCBridge | None = None,
@@ -287,15 +696,43 @@ def create_app(
     # FastAPI converts each returned FileResponse directly into an HTTP response.
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
-        return static_file("index.html")
+        # The watch is the interface. With --simulate the root also carries the
+        # Wizard-of-Oz panel; live, it is the watch alone.
+        return static_file("simulator.html" if runtime_settings.simulate else "watch.html")
 
-    @app.get("/styles.css", include_in_schema=False)
-    def styles() -> FileResponse:
-        return static_file("styles.css")
+    # State-driven watch: /watch = watch only (open on a phone), /sim = watch
+    # plus the Wizard-of-Oz simulator panel.
+    @app.get("/watch", include_in_schema=False)
+    def watch_page() -> FileResponse:
+        return static_file("watch.html")
 
-    @app.get("/app.js", include_in_schema=False)
-    def javascript() -> FileResponse:
-        return static_file("app.js")
+    @app.get("/sim", include_in_schema=False)
+    def sim_page() -> FileResponse:
+        return static_file("simulator.html")
+
+    @app.get("/watch.css", include_in_schema=False)
+    def watch_styles() -> FileResponse:
+        return static_file("watch.css")
+
+    @app.get("/watch.js", include_in_schema=False)
+    def watch_javascript() -> FileResponse:
+        return static_file("watch.js")
+
+    @app.get("/api/watch")
+    async def watch_state(hrc_bridge: HRCBridge = Depends(get_bridge)) -> dict:
+        return await hrc_bridge.watch_state()
+
+    @app.post("/api/watch/command")
+    async def watch_command(
+        payload: WatchCommand, hrc_bridge: HRCBridge = Depends(get_bridge)
+    ) -> dict:
+        return await hrc_bridge.submit_watch_command(payload)
+
+    @app.post("/api/sim")
+    async def sim_event(
+        payload: SimRequest, hrc_bridge: HRCBridge = Depends(get_bridge)
+    ) -> dict:
+        return await hrc_bridge.simulate(payload)
 
     # This GET lets the watch discover the current real task instance. It keeps
     # a stale browser page from replying to a newer permission request.
@@ -342,6 +779,31 @@ def main() -> None:
     )
     parser.add_argument("--debug-round-id", default=0, type=int)
     parser.add_argument("--debug-piece-id", default=1, type=int)
+    parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help="Run without robot/ROS/voice; open /sim for the watch simulator.",
+    )
+    parser.add_argument(
+        "--free-port",
+        action="store_true",
+        help="Stop whatever still holds the recognition UDP port, then start.",
+    )
+    parser.add_argument(
+        "--no-voice",
+        action="store_true",
+        help="Start without microphone/TTS (watch and ROS still run).",
+    )
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="Keep the real microphone and TTS even with --simulate, so the "
+             "watch and speech can be answered together without a robot.",
+    )
+    parser.add_argument(
+        "--sim-task-seconds", default=16.0, type=float,
+        help="Simulated duration of one robot task at default speed.",
+    )
     args = parser.parse_args()
 
     settings = RuntimeSettings(
@@ -350,7 +812,14 @@ def main() -> None:
         debug_trigger=args.debug_trigger,
         debug_round_id=args.debug_round_id,
         debug_piece_id=args.debug_piece_id,
+        simulate=args.simulate,
+        sim_task_seconds=args.sim_task_seconds,
+        voice=not args.no_voice,
+        force_voice=args.voice and not args.no_voice,
+        free_port=args.free_port,
     )
+    if args.simulate:
+        print(f"Watch simulator: http://{args.host}:{args.port}/sim")
     uvicorn.run(create_app(settings), host=args.host, port=args.port)
 
 
