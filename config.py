@@ -127,8 +127,8 @@ VOICE_GPT_ENABLED = False
 
 # List audio devices: .venv\Scripts\python.exe -m sounddevice
 VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-0.15"
-VOICE_INPUT_DEVICE_NAME = None
-VOICE_OUTPUT_DEVICE_NAME = None
+VOICE_INPUT_DEVICE_NAME = None  # System default: WH-1000XM4 microphone.
+VOICE_OUTPUT_DEVICE_NAME = None  # System default: WH-1000XM4 headphones.
 VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
 VOICE_TTS_RATE = 220
 VOICE_POST_TTS_GUARD_SECONDS = 0.2
