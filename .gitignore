@@ -68,3 +68,5 @@ temp/
 **/*.pth
 **/*.npz
 **/*.json
+
+1_recognition/results/**
