@@ -1,22 +1,22 @@
 [project]
 name = "hrc-communication"
 version = "0.1.0"
-description = "HRC recognition/communication/decision-making/execution pipeline -- run_recognition.py's realtime YOLO+MotionBERT+LSTM step recognition, the standalone 3D posture debug tool (1_recognition/src/pose_detection_live.py), and the communication/decision-making/execution layers (0_core..4_execution)."
+description = "HRC recognition/communication/decision-making/execution pipeline -- run_recognition.py's realtime YOLO+MotionBERT+LSTM step recognition, the standalone 3D posture debug tool (1_recognition/eval/pose_detection_live.py), and the communication/decision-making/execution layers (0_core..4_execution)."
 requires-python = ">=3.10,<3.11"
 dependencies = [
     # -- 1_recognition: YOLO 2D pose + MotionBERT 3D lift + LSTM step recognition --
     "numpy>=1.24,<2.0",
     "opencv-python>=4.8,<5.0",
-    # Savitzky-Golay streaming features (1_recognition/skeleton3d_pipeline.py's
-    # StreamingH36MFeatureExtractor / skeleton_pipeline/features/h36m_features.py).
+    # Savitzky-Golay streaming features (1_recognition/src/skeleton3d_pipeline.py's
+    # StreamingH36MFeatureExtractor / feature_utils/h36m_features.py).
     "scipy>=1.10",
-    # norm_feat_rlt.py's progress bar.
+    # feature_normalizer.py's progress bar.
     "tqdm>=4.65",
     "torch==2.11.0+cu128",
     "torchvision==0.26.0+cu128",
     "ultralytics>=8.4,<9.0",
     "lap>=0.5",  # ultralytics multi-object tracking (ByteTrack/BoT-SORT) support
-    # MotionBERT (pure PyTorch, see 1_recognition/src/skeleton_pipeline/motionbert_lifter.py)
+    # MotionBERT (pure PyTorch, see 1_recognition/src/skeleton_utils/motionbert_lifter.py)
     # -- same minimal inference-only subset as LSTM_HRC/data_proc_3d/app/pyproject.toml
     # (mmcv/mmpose/mmdet, tensorflow, depth_pro etc. deliberately NOT included -- this
     # pipeline doesn't need any of them, see that module's docstring).
@@ -28,7 +28,7 @@ dependencies = [
     # setuptools>=81 dropped pkg_resources, which easydict/tensorboardX still import at
     # runtime -- pinned for the same reason LSTM_HRC/data_proc_3d/app/pyproject.toml is.
     "setuptools<81",
-    # skeleton_pipeline/plotting (feature/label plots) + skeleton_pipeline/dataset/labels.py.
+    # skeleton_utils/plotting (feature/label plots) + skeleton_utils/dataset/labels.py.
     "matplotlib>=3.7",
     "pandas>=2.0,<3.0",
     # -- 4_execution: UR robot arm (rtde_control/rtde_receive) + ROS bridge (roslibpy,

@@ -138,7 +138,7 @@ class ROSCommunication:
         keypoints: dict[str, dict[str, float]] | None = None,
     ) -> None:
         """Publish the human's world-frame position (see
-        1_recognition/skeleton3d_pipeline.py's world_root_xyz -- same
+        1_recognition/src/skeleton3d_pipeline.py's world_root_xyz -- same
         world frame as /UR10/position/live, defined by the calibrated
         extrinsics) for downstream consumers like path planning, plus
         their pelvis-relative posture as an H36M-17 keypoint dict (see

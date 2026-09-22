@@ -22,6 +22,40 @@ load_dotenv(Path(__file__).parent / "gpt_live" / ".env")
 SAMPLE_RATE = 24_000
 
 
+def _vosk_safe_model_path(model_path: Path) -> str:
+    """Return a model path Vosk's native layer can actually open.
+
+    Vosk passes the path to Kaldi as UTF-8 bytes, but on Windows Kaldi opens it
+    through the ANSI codepage -- so any non-ASCII character in the path (e.g. the
+    "ä" in a OneDrive folder under "Universität Stuttgart") is mangled and the
+    model folder is not found, surfacing only as an opaque "Failed to create a
+    model". The 8.3 short name is pure ASCII, so hand Vosk that instead.
+    """
+    path_str = str(model_path)
+    if path_str.isascii() or os.name != "nt":
+        return path_str
+
+    import ctypes
+    from ctypes import wintypes
+
+    get_short_path = ctypes.windll.kernel32.GetShortPathNameW
+    get_short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get_short_path.restype = wintypes.DWORD
+
+    length = get_short_path(path_str, None, 0)
+    if length:
+        buffer = ctypes.create_unicode_buffer(length)
+        if get_short_path(path_str, buffer, length) and buffer.value.isascii():
+            return buffer.value
+
+    raise RuntimeError(
+        f"Vosk cannot load a model from a non-ASCII path ({path_str}) and no 8.3 "
+        "short name is available for it (8.3 name creation may be disabled on this "
+        "volume). Move the Vosk model to a path without non-ASCII characters and "
+        "point config.VOICE_MODEL_PATH at it."
+    )
+
+
 class VoiceInterface:
     def __init__(self, model_path: str | Path, gpt_enabled: bool, phrases,
                  device_name=None, timeout=8.0, output_device_name=None):
@@ -29,7 +63,7 @@ class VoiceInterface:
         if not model_path.is_dir():
             raise RuntimeError(f"Vosk model not found: {model_path}")
         SetLogLevel(-1)
-        self._model = Model(str(model_path))
+        self._model = Model(_vosk_safe_model_path(model_path))
         self._phrases = set(phrases)
         self._grammar = json.dumps(list(self._phrases))
         self._device = self._find_input_device(device_name)

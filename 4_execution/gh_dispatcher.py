@@ -18,7 +18,7 @@ class GHDispatcher:
 
     def dispatch_human_location(self, xyz: tuple[float, float, float], timestamp: float | None = None) -> dict:
         """Send the human's world-frame position (see
-        1_recognition/skeleton3d_pipeline.py's world_root_xyz) to Grasshopper."""
+        1_recognition/src/skeleton3d_pipeline.py's world_root_xyz) to Grasshopper."""
         message = self.build_human_location_message(xyz, timestamp)
         self.udp_sender.send(message)
         return message
