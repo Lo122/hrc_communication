@@ -230,12 +230,22 @@ class IPhoneCamera:
     """
 
     def __init__(self, dev_idx=0, auto_reconnect=True, reconnect_interval_sec=2.0,
-                 capture_rotate90=0):
+                 capture_rotate90=0, stale_after_sec=5.0):
         if capture_rotate90 not in (0, 90, 180, 270):
             raise ValueError(f"capture_rotate90 must be one of 0/90/180/270, got {capture_rotate90}")
         self._dev_idx = dev_idx
         self._auto_reconnect = auto_reconnect
         self._reconnect_interval_sec = reconnect_interval_sec
+        # How long a "connected" stream may deliver nothing before it is declared dead.
+        # Record3DStream.connect() returning does NOT mean frames will follow -- after a
+        # USB drop it routinely succeeds against a phone that never resumes streaming.
+        # Without this the connected flag stays set, the watchdog's "not connected" test
+        # never fires, and the camera is unrecoverable for the life of the process.
+        # on_stream_stopped does not cover it either: that only fires for a stream that
+        # was actually running and then stopped.
+        self._stale_after_sec = stale_after_sec
+        self._last_frame_at = None  # perf_counter of the last frame received
+        self._connected_at = None   # ...and of the last successful connect()
         self._capture_rotate90 = capture_rotate90
         self._stream = None
         self._generation = 0  # bumped on every successful connect; guards stale callbacks
@@ -327,6 +337,11 @@ class IPhoneCamera:
 
             self._stream = stream
             self._generation = generation
+            # Reset liveness for the NEW stream, so the staleness clock runs from this
+            # connect rather than inheriting the dead stream's last-frame time.
+            with self._lock:
+                self._last_frame_at = None
+            self._connected_at = time.perf_counter()
             self._connected_event.set()
             return True
 
@@ -377,6 +392,8 @@ class IPhoneCamera:
             depth = np.array(depth, copy=True)
         with self._lock:
             self._latest = (rgb, depth, intrinsic_mat, pose)
+            # Proof of life for the watchdog -- see _stale_after_sec.
+            self._last_frame_at = time.perf_counter()
             # Set under the lock, paired with the clear in get_latest_frame, so a
             # frame arriving mid-handover cannot have its notification dropped.
             self._new_frame_event.set()
@@ -393,8 +410,34 @@ class IPhoneCamera:
         self._connected_event.clear()
         logger.warning("IPhoneCamera: stream disconnected.")
 
+    def _is_stale(self):
+        """True when we believe we are connected but nothing is arriving.
+
+        Covers the case on_stream_stopped cannot: a connect() that reported success
+        against a phone that never actually started sending.
+        """
+        if self._stale_after_sec is None or not self._connected_event.is_set():
+            return False
+        with self._lock:
+            last = self._last_frame_at
+        # No frame since the connect attempt is itself the symptom, so an unset
+        # timestamp counts from when the stream was opened.
+        reference = last if last is not None else self._connected_at
+        if reference is None:
+            return False
+        return (time.perf_counter() - reference) > self._stale_after_sec
+
     def _watchdog_loop(self):
         while not self._stop_event.is_set():
+            if self._is_stale():
+                logger.warning(
+                    "IPhoneCamera: connected but no frame for >%.0fs -- treating the "
+                    "stream as dead and reconnecting.", self._stale_after_sec)
+                self._connected_event.clear()
+                with self._lock:
+                    self._latest = None
+                    self._new_frame_event.set()  # unblock readers waiting on a dead stream
+
             if not self._connected_event.is_set():
                 if self._connect_once(raise_if_absent=False):
                     logger.info("IPhoneCamera: reconnected.")

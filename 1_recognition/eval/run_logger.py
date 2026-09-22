@@ -51,6 +51,9 @@ from typing import Any
 FRAME_COLUMNS = [
     "frame_index", "video_time_s", "wall_time_s", "dropped_before", "update_ms",
     "detected", "warmup", "raw_step_id", "stable_step_id", "confidence", "progress",
+    # Blank for a model trained without a mistake head. mistake_score is 1 - P(no
+    # mistake), so it stays meaningful if a later model has more than two classes.
+    "mistake_id", "mistake_score",
     "world_x", "world_y", "world_z",
 ]
 
@@ -137,6 +140,8 @@ class RunLogger:
             "stable_step_id": record.get("stable_step_id"),
             "confidence": _round(record.get("confidence"), 5),
             "progress": _round(record.get("progress"), 5),
+            "mistake_id": record.get("mistake_id"),
+            "mistake_score": _round(record.get("mistake_score"), 5),
             "world_x": _round(world[0], 4),
             "world_y": _round(world[1], 4),
             "world_z": _round(world[2], 4),

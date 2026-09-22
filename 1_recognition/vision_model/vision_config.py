@@ -54,6 +54,11 @@ class CameraConfig:
                                   # TIMESTAMPS stay on the recording's own timeline either way,
                                   # so measured velocities/accelerations are unaffected.
     dev_idx: int = 0  # Record3D device index, only used when video_source == "iphone".
+    # How long one read() waits for an iPhone frame before giving up and returning None.
+    # Short, because a live source returning None is a hiccup the loop rides out, whereas
+    # blocking stalls everything -- see FrameSource._open_capture. Not the reconnect
+    # interval: IPhoneCamera's watchdog keeps retrying in the background regardless.
+    iphone_read_timeout_sec: float = 1.5
     capture_rotate90: int = 0  # one of 0, 90, 180, 270 -- iPhone only, MUST match whatever
                                 # was used when calibrating iphone_intrinsics.json/
                                 # iphone_extrinsics.json, or K and the world frame will be
@@ -127,6 +132,28 @@ class VisionConfig:
     # KeypointOutlierHoldFilter + shared confidence gate.
     conf_threshold: float = 0.3
     use_keypoint_filter: bool = True
+
+    # Which detection to follow when YOLO finds more than one person. Without this the
+    # pipeline takes results[0].keypoints.xy[0] -- whichever person YOLO happens to list
+    # first, which can change frame to frame and silently swaps the subject for a
+    # bystander. See skeleton_utils/person_selection.py; the same selector the training
+    # data was generated with, so live and offline follow the same person the same way.
+    # Deliberately NOT ultralytics' tracker: that keeps its own id state across frames and
+    # re-detects/reassigns ids on occlusion, whereas this is a stateless nearest-pose match
+    # against the last accepted skeleton and costs nothing per frame.
+    use_person_selection: bool = True
+    # The "do not switch person" threshold: per-joint displacement from the last accepted
+    # pose, normalized by body size, above which the best-matching detection is judged to
+    # be a DIFFERENT person rather than fast motion -- the previous pose is then held
+    # instead of jumping onto it. 1.0 is roughly "moved its own body width in one frame".
+    # Lower sticks harder to the subject but takes longer to recover from a genuine
+    # mis-track; None disables the hold and always takes the closest detection.
+    person_max_jump_ratio: float | None = 0.6
+    # A detection needs this many joints above conf_threshold to be considered at all.
+    person_min_valid_joints: int = 4
+    # ...and this much mean keypoint confidence, which rejects the low-score phantom
+    # detections YOLO emits for reflections and half-occluded bystanders.
+    person_min_detection_score: float = 0.25
 
     # StreamingH36MFeatureExtractor's smoothing window -- see that class's
     # docstring / feature_utils/h36m_features.py's "Why

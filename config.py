@@ -136,7 +136,11 @@ VOICE_GPT_ENABLED = False
 
 # List audio devices: .venv\Scripts\python.exe -m sounddevice
 VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-0.15"
-VOICE_INPUT_DEVICE_NAME = None
+# Left at None, sounddevice falls back to the OS default input, which on this
+# laptop is a virtual NDI webcam audio device (no real signal) rather than the
+# physical mic -- pin it explicitly. Run `uv run python -m sounddevice` to list
+# devices and update this if the laptop's mic name/index differs.
+VOICE_INPUT_DEVICE_NAME = "Microphone Array (AMD Audio Dev"
 VOICE_OUTPUT_DEVICE_NAME = None
 VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
 VOICE_TTS_RATE = 220

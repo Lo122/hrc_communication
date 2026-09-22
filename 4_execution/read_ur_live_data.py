@@ -320,6 +320,15 @@ def main() -> None:
     print(f"[rtde] connected to receive interface at {args.ip} ({args.rtde_hz:.0f} Hz)")
 
     if args.set_payload:
+        # Brief, but still a full RTDE control session: the constructor uploads
+        # rtde_control.script and takes the controller's single set of input registers.
+        # Anything else holding that session (the MAIL UR bridge, ur_state_reader.py
+        # --enable-ft-zero) gets its socket closed and reports
+        # "RTDEReceiveInterface boost system Exception: (asio.misc:2) End of file".
+        print(
+            "[warn] --set-payload briefly takes the RTDE control session; "
+            "stop other RTDE control clients first"
+        )
         rtde_c = RTDEControlInterface(args.ip)
         ok = rtde_c.setPayload(args.mass, list(args.cog))
         print(f"[rtde] setPayload(mass={args.mass}, cog={args.cog}) -> {ok}")

@@ -97,19 +97,44 @@ def zero_ftsensor(rtde_c: RTDEControlInterface) -> None:
         print("Failed to zero FT sensor.")
 
 
-def ur_reader_node(enable_plot: bool = False) -> None:
+def ur_reader_node(enable_plot: bool = False, enable_ft_zero: bool = False) -> None:
     print(f"Connecting to UR at {ROBOT_IP}...")
     rtde_r = RTDEReceiveInterface(ROBOT_IP)
-    rtde_c = RTDEControlInterface(ROBOT_IP)
+
+    # The control interface is opt-in because a controller has exactly one RTDE control
+    # session. Constructing RTDEControlInterface uploads rtde_control.script, which stops
+    # whatever control script is already running and claims the same RTDE input registers.
+    # If anything else owns that session -- the Multi-Actor-Interface-Library UR bridge, a
+    # second copy of this reader, read_ur_live_data.py --set-payload -- the loser's socket
+    # is closed by the controller and its receive thread prints
+    #   RTDEReceiveInterface boost system Exception: (asio.misc:2) End of file
+    # Reading state needs no control session at all, so the default here is read-only.
+    rtde_c = None
+    if enable_ft_zero:
+        print(
+            "[warn] --enable-ft-zero opens an RTDE *control* session. Nothing else "
+            "(the MAIL UR bridge, another reader) may hold one at the same time."
+        )
+        rtde_c = RTDEControlInterface(ROBOT_IP)
 
     print(f"Connecting to rosbridge at {ROS_BRIDGE_HOST}:{ROS_BRIDGE_PORT}...")
     ros_client = roslibpy.Ros(host=ROS_BRIDGE_HOST, port=ROS_BRIDGE_PORT)
     ros_client.run()
     print("Connected to rosbridge.")
 
-    zero_ftsensor(rtde_c)
+    def _handle_ft_zero(_msg) -> None:
+        if rtde_c is None:
+            print(
+                f"[skip] {ROS_TOPICS['ft_zero']} needs a control session; "
+                "restart this reader with --enable-ft-zero to tare from here."
+            )
+            return
+        zero_ftsensor(rtde_c)
+
+    if rtde_c is not None:
+        zero_ftsensor(rtde_c)
     ft_zero_topic = roslibpy.Topic(ros_client, ROS_TOPICS["ft_zero"], "std_msgs/Empty")
-    ft_zero_topic.subscribe(lambda _msg: zero_ftsensor(rtde_c))
+    ft_zero_topic.subscribe(_handle_ft_zero)
 
     joint_state_pub = roslibpy.Topic(ros_client, ROS_TOPICS["joint_state"], "sensor_msgs/JointState")
     position_pub = roslibpy.Topic(ros_client, ROS_TOPICS["robot_position"], "trajectory_msgs/JointTrajectoryPoint")
@@ -186,19 +211,27 @@ def ur_reader_node(enable_plot: bool = False) -> None:
                 pass
         ft_zero_topic.unsubscribe()
         ros_client.terminate()
-        rtde_c.disconnect()
+        if rtde_c is not None:
+            rtde_c.disconnect()
         rtde_r.disconnect()
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="UR RTDE state reader / ROS publisher.")
     parser.add_argument("--plot", action="store_true", help="Show a live plot of the TCP force/torque wrench.")
+    parser.add_argument(
+        "--enable-ft-zero",
+        action="store_true",
+        help="open an RTDE control session so this reader can tare the FT sensor. Off by "
+        "default: a controller has only one control session, and taking it here drops "
+        "whoever else holds it (see ur_reader_node).",
+    )
     return parser.parse_args(sys.argv[1:])
 
 
 if __name__ == '__main__':
     args = _parse_args()
     try:
-        ur_reader_node(enable_plot=args.plot)
+        ur_reader_node(enable_plot=args.plot, enable_ft_zero=args.enable_ft_zero)
     except KeyboardInterrupt:
         pass

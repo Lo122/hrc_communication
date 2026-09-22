@@ -367,8 +367,15 @@ class FrameSource:
 
         if is_iphone:
             from camera_utils.iphone_connection import IPhoneVideoCaptureAdapter
+            # max_wait_sec short on purpose. The adapter's default (30 s) exists so the
+            # one-shot calibration scripts ride out a USB drop rather than aborting, but
+            # here it would block the whole recognition loop for half a minute on a dead
+            # stream -- the loop then logs a 30 s overrun and looks hung. A live source
+            # returning None is already treated as a hiccup (see read() below), so the
+            # loop keeps ticking while IPhoneCamera's watchdog reconnects underneath.
             return IPhoneVideoCaptureAdapter(
-                dev_idx=self.camera.dev_idx, capture_rotate90=self.camera.capture_rotate90)
+                dev_idx=self.camera.dev_idx, capture_rotate90=self.camera.capture_rotate90,
+                max_wait_sec=self.camera.iphone_read_timeout_sec)
 
         source = self.camera.video_source
         if isinstance(source, str) and source.isdigit():

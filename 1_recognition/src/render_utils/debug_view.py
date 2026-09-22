@@ -50,6 +50,7 @@ class DebugView:
         plot_panel_size: tuple[int, int],
         history_len: int,
         conf_threshold: float,
+        render_world_skeleton: bool = False,
     ):
         self.enabled = enabled
         self.window_name = window_name
@@ -57,6 +58,16 @@ class DebugView:
         self.plot_window_name = plot_window_name
         self.plot_panel_size = plot_panel_size
         self.conf_threshold = conf_threshold
+        # Which skeleton the 3D panel draws. False (default) draws
+        # pipeline_out["root_relative"] -- the pelvis-centred, camera-frame posture that
+        # is ACTUALLY fed to the feature extractor and hence the model, so what you see
+        # is what the model sees. True draws pipeline_out["skeleton"], the world-frame
+        # fusion of that posture with the depth estimate, which lives in the calibration
+        # target's frame and is therefore rotated away from the video's own axes.
+        # Absolute position is already reported separately (the World XYZ overlay and
+        # the top-down trajectory), so the world skeleton adds nothing to a POSTURE view
+        # except the extrinsics' rotation.
+        self.render_world_skeleton = render_world_skeleton
 
         self._cv2 = None
         self._draw_2d_skeleton = None
@@ -103,6 +114,8 @@ class DebugView:
         confidence: float | None = None,
         world_xyz: tuple[float, float, float] | None = None,
         status_line: str = "",
+        mistake_id: int | None = None,
+        mistake_score: float | None = None,
     ) -> None:
         """Draw and display one frame. Raises KeyboardInterrupt when the
         user presses q, which is how the run loop is asked to stop."""
@@ -117,7 +130,14 @@ class DebugView:
                 overlay = self._draw_2d_skeleton(
                     frame, pipeline_out["keypoints_2d"], pipeline_out["keypoints_conf"],
                     conf_threshold=self.conf_threshold)
-            skeleton = pipeline_out.get("skeleton")
+            # root_relative is MotionBERT's own output: pelvis at (0,0,0), +z up,
+            # untouched by extrinsics or the depth estimate. FastSkeleton3DRenderer
+            # assumes +z up, so this renders upright and matches the video's framing.
+            skeleton = pipeline_out.get(
+                "skeleton" if self.render_world_skeleton else "root_relative")
+            if skeleton is None and not self.render_world_skeleton:
+                # No lift this frame -- fall back rather than blanking the panel.
+                skeleton = pipeline_out.get("skeleton")
 
         panel_w, panel_h = self.panel_size
         display = overlay
@@ -133,7 +153,7 @@ class DebugView:
         display = self._draw_overlay(
             display, raw_step_id=raw_step_id, stable_step_id=stable_step_id,
             progress=progress, confidence=confidence, world_xyz=world_xyz,
-            status_line=status_line)
+            status_line=status_line, mistake_id=mistake_id, mistake_score=mistake_score)
 
         cv2.imshow(self.window_name, display)
         self._draw_plot()
@@ -150,6 +170,8 @@ class DebugView:
         confidence: float | None,
         world_xyz: tuple[float, float, float] | None,
         status_line: str,
+        mistake_id: int | None = None,
+        mistake_score: float | None = None,
     ):
         """Burn live model output + absolute human position as text onto the
         top-left corner of the display frame, for debugging without needing
@@ -176,15 +198,28 @@ class DebugView:
         else:
             step_lines = [status_line]
 
+        # Only present for a model trained with a mistake head; a model without one
+        # leaves these None and the line is simply absent rather than reading 0.00,
+        # which would look like a confident "no mistake" the model never made.
+        mistake_line = None
+        if mistake_score is not None:
+            verdict = "MISTAKE" if mistake_id else "ok"
+            mistake_line = f"Mistake: {verdict} ({mistake_score:.2f})"
+
         lines = [world_line, *step_lines]
+        if mistake_line is not None:
+            lines.append(mistake_line)
         for i, text in enumerate(lines):
             origin = (10, 24 + i * 22)
+            # Red for a flagged mistake so it reads at a glance; green otherwise.
+            colour = ((0, 0, 255) if text is mistake_line and mistake_id
+                      else (0, 255, 0))
             # Black outline then colored fill so the text stays legible over
             # any background (skeleton overlay, bright frame, etc.).
             cv2.putText(display, text, origin, cv2.FONT_HERSHEY_SIMPLEX,
                         0.55, (0, 0, 0), 3, cv2.LINE_AA)
             cv2.putText(display, text, origin, cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55, (0, 255, 0), 1, cv2.LINE_AA)
+                        0.55, colour, 1, cv2.LINE_AA)
         return display
 
     def _draw_plot(self) -> None:

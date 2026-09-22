@@ -4,6 +4,9 @@ Reads frames from a camera, an iPhone (Record3D) or a recorded file, runs them
 through RecognitionManager, and sends RECOGNITION_TRIGGER and
 HUMAN_LOCATION_UPDATE events to the communication layer over UDP.
 
+This repo's venv lives outside the project tree, so point uv at it first:
+    $env:UV_PROJECT_ENVIRONMENT = "C:\\Users\\Owner\\.venvs\\hrc_communication"
+
 Four modes:
 
   full pipeline       vision + LSTM step classification (the default)
@@ -42,10 +45,35 @@ Usage:
             --extrinsics-file iphone_extrinsics.json `
             --body-calibration 1_recognition/calib_data/body_uid-08.json `
             --iphone-rotate 270 `
-            --fp16
+            --fp16 `
+            --loop-hz 10
+
+            
+    
+    uv run python run_recognition.py `
+            --iphone `
+            --model-dir 1_recognition/best_model/3d_skeleton_01 `
+            --intrinsics-file iphone_intrinsics.json `
+            --extrinsics-file iphone_extrinsics.json `
+            --body-calibration 1_recognition/calib_data/body_uid-08.json `
+            --iphone-rotate 270 `
+            --fp16 `
+            --loop-hz 10
+            
+                
+
+    uv run python run_recognition.py `
+        --realtime-playback `
+        --video-source "G:\\My Drive\\University of Stuttgart\\ITECH_Thesis\\Videos\\raw\\cam-05\\video__cam-05_uid-11_take-01.mp4" `
+        --model-dir 1_recognition/best_model/3d_skeleton_01 `
+        --intrinsics-file iphone_intrinsics.json `
+        --extrinsics-file iphone_extrinsics.json `
+        --body-calibration 1_recognition/calib_data/body_uid-08.json `
+        --fp16 
+
 
     # live line graph of every step's softmax probability and the progress value
-    uv run python run_recognition.py --loop-hz 15 --show-probabilities
+    uv run python run_recognition.py --loop-hz 10 --show-probabilities
     uv run python run_recognition.py --iphone --iphone-rotate 270 --show-probabilities `
         --extrinsics-file iphone_extrinsics_synthetic.json
 
@@ -175,6 +203,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default=config.EVENT_TRANSPORT_HOST, help="Communication event receiver host.")
     parser.add_argument("--port", type=int, default=config.EVENT_TRANSPORT_PORT, help="Communication event receiver port.")
     parser.add_argument("--no-display", action="store_true", help="Disable the recognition video preview window.")
+    parser.add_argument("--render-world-skeleton", action="store_true",
+                         help="Draw the 3D panel in WORLD coordinates (posture fused with the "
+                              "depth estimate, expressed in the calibration target's frame) "
+                              "instead of the default: the pelvis-centred camera-frame posture "
+                              "that is actually fed to the model. The world skeleton carries the "
+                              "extrinsics' rotation, so it does not line up with the video's own "
+                              "axes -- absolute position is already shown by the World XYZ "
+                              "overlay, so this is only useful when checking the extrinsics "
+                              "themselves.")
     parser.add_argument("--show-probabilities", action="store_true",
                          help="Show a live line-graph preview window of each task step's "
                               "softmax probability and the progress value over time -- see "
@@ -414,10 +451,12 @@ if __name__ == "__main__":
     recognition_manager = RecognitionManager(
         model_dir=args.model_dir, video_source=source, show_video=not args.no_display,
         enable_step_model=not args.fake_recognition,
+        render_world_skeleton=args.render_world_skeleton,
         vision_config=_build_vision_config(args))
     trigger_manager = TriggerManager()
     probability_plot: StepProbabilityPlot | None = None
     last_plotted_probabilities_timestamp = None
+    last_mistake_id = None  # so the mistake verdict is printed only when it changes
 
     print(f"Recognition running with source: {source}")
     print(f"Publishing recognition events to {args.host}:{args.port}")
@@ -463,6 +502,18 @@ if __name__ == "__main__":
                     if run_logger is not None:
                         run_logger.log_event(event)
                     print(f"[recognition event] sent {event.event_type.name} {event.payload}", flush=True)
+
+            # Mistake head (models trained with config.json's num_mistakes; None for
+            # models without one). Reported on CHANGE rather than every frame: at
+            # --loop-hz 10 a per-frame line would bury everything else, while the
+            # transitions are the part worth seeing in a terminal.
+            mistake_id = recognition_manager.last_mistake_id
+            if mistake_id is not None and mistake_id != last_mistake_id:
+                score = recognition_manager.last_mistake_score
+                verdict = "MISTAKE" if mistake_id else "ok"
+                print(f"[recognition] mistake: {verdict} "
+                      f"(class {mistake_id}, score {score:.2f})", flush=True)
+                last_mistake_id = mistake_id
 
             # Live line-graph preview of raw per-frame model output (see
             # step_probability_plot.py) -- fed from RecognitionManager.last_step_probabilities/

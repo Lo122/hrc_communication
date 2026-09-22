@@ -85,7 +85,6 @@ Record3D / iPhone:
     uv run python 1_recognition/setup/calibrate_camera.py iphone-extrinsic `
         --capture-rotate90 270 --method marker `
         --intrinsics 1_recognition/calib_data/iphone_intrinsics.json `
-        --capture-width 1920 --capture-height 1440 `
         --output 1_recognition/calib_data/iphone_extrinsics.json `
         --aruco-dict DICT_4X4_50 `
         --marker-id 0 --marker-length-mm 200 --ground-z -0.70

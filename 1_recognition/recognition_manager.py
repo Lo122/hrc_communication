@@ -27,6 +27,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "0_core"))
 # src/ holds this layer's internals, on the path here so the collaborators below
 # import at module level like everything else.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "best_model"))
 import config
 from models import RecognitionResult
 from vision_model.vision_config import VisionConfig
@@ -72,6 +73,7 @@ class RecognitionManager:
         plot_panel_size: tuple[int, int] = (480, 320),
         plot_history_len: int = 300,
         enable_step_model: bool = True,
+        render_world_skeleton: bool = False,
         vision_config: VisionConfig | None = None,
     ):
         self.step_stabilizer = step_stabilizer
@@ -112,7 +114,8 @@ class RecognitionManager:
             window_name=display_window_name, panel_size=display_panel_size,
             plot_window_name=plot_window_name, plot_panel_size=plot_panel_size,
             history_len=plot_history_len,
-            conf_threshold=self.vision_config.conf_threshold)
+            conf_threshold=self.vision_config.conf_threshold,
+            render_world_skeleton=render_world_skeleton)
 
         self.window_size: int | None = None
         self.num_steps: int | None = None
@@ -141,6 +144,10 @@ class RecognitionManager:
         # _ensure_realtime_pipeline, where h36m_features is first imported -- it pulls in
         # scipy, which a manager that never processes a frame need not pay for.
         self.last_root_relative_skeleton: np.ndarray | None = None
+        # The same posture rotated into world axes -- what get_last_keypoints() publishes,
+        # so that a consumer placing it at last_world_xyz gets an upright body rather than
+        # one tilted by the extrinsics rotation.
+        self.last_world_relative_skeleton: np.ndarray | None = None
         self._h36m_joint_names: list[str] | None = None
 
         # Per-step softmax probabilities and the raw progress-head output from the most
@@ -149,6 +156,11 @@ class RecognitionManager:
         # a live plot (see step_probability_plot.py) can show raw model output over time
         # rather than only the sparse, debounced RecognitionResult stream.
         self.last_step_probabilities: np.ndarray | None = None
+        self.last_mistake_probabilities: np.ndarray | None = None
+        # Argmax of the above, and 1 - P(no mistake) as a single 0..1 score. Both stay
+        # None for a model trained without a mistake head (config.json's num_mistakes).
+        self.last_mistake_id: int | None = None
+        self.last_mistake_score: float | None = None
         self.last_progress: float | None = None
         self.last_step_probabilities_timestamp: float | None = None
 
@@ -279,6 +291,12 @@ class RecognitionManager:
         root_relative = pipeline_out.get("root_relative")
         if root_relative is not None and not np.isnan(root_relative).any():
             self.last_root_relative_skeleton = root_relative
+            # Published alongside last_world_xyz, so it has to share that frame -- see
+            # get_last_keypoints(). Falls back to the camera-frame posture when there are
+            # no extrinsics, which is the best available and is what world position does too.
+            rotated = pipeline_out.get("root_relative_world")
+            self.last_world_relative_skeleton = (
+                rotated if rotated is not None and not np.isnan(rotated).any() else root_relative)
 
         if not self.enable_step_model:
             # Vision-only: the lift and world position above are real and keep feeding the
@@ -308,14 +326,27 @@ class RecognitionManager:
         x = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            step_logits, progress_pred = self._model(x)
+            # Models trained with a mistake head return a third output; models without
+            # one return two.
+            outputs = self._model(x)
+            step_logits, progress_pred = outputs[0], outputs[1]
+            mistake_logits = outputs[2] if len(outputs) > 2 else None
             step_probs = torch.softmax(step_logits, dim=1)
             raw_step_id = int(torch.argmax(step_probs, dim=1).item())
             confidence = float(torch.max(step_probs, dim=1).values.item())
             progress = float(progress_pred.item())
+            mistake_probs = (None if mistake_logits is None
+                             else torch.softmax(mistake_logits, dim=1).squeeze(0).cpu().numpy())
 
         probabilities = step_probs.squeeze(0).cpu().numpy()
         self.last_step_probabilities = probabilities
+        self.last_mistake_probabilities = mistake_probs
+        # Class 0 is "no mistake", so the mistake SCORE is 1 - P(class 0) -- with
+        # num_mistakes=2 that is just P(class 1), but writing it this way keeps working
+        # if a later model splits mistakes into several kinds.
+        self.last_mistake_id = None if mistake_probs is None else int(np.argmax(mistake_probs))
+        self.last_mistake_score = (None if mistake_probs is None
+                                   else float(1.0 - mistake_probs[0]))
         self.last_progress = progress
         self.last_step_probabilities_timestamp = frame_timestamp
         stable_step_id = self._stable_step_id(probabilities)
@@ -323,7 +354,9 @@ class RecognitionManager:
         self._view.record_prediction(progress, confidence)
 
         record.update(warmup=False, raw_step_id=raw_step_id, confidence=confidence,
-                      progress=progress, stable_step_id=stable_step_id)
+                      progress=progress, stable_step_id=stable_step_id,
+                      mistake_id=self.last_mistake_id,
+                      mistake_score=self.last_mistake_score)
 
 
         if stable_step_id is None:
@@ -348,16 +381,23 @@ class RecognitionManager:
         return result
 
     def get_last_keypoints(self) -> dict[str, dict[str, float]] | None:
-        """Latest pelvis-relative skeleton as {joint_name: {"x", "y", "z"}}.
+        """Latest pelvis-relative skeleton as {joint_name: {"x", "y", "z"}}, in WORLD axes.
 
         Pelvis is included and is always exactly (0,0,0). None until the first valid
         frame, or before the pipeline has been set up and joint names resolved.
+
+        World axes, not the camera's, because this is published next to last_world_xyz
+        (see run_recognition.py's HUMAN_LOCATION_UPDATE): a consumer that draws the body
+        at that position needs a posture in the same frame, or the skeleton comes out
+        rotated by however the camera is mounted. Without extrinsics there is no world
+        frame and this falls back to the camera-frame posture.
         """
-        if self.last_root_relative_skeleton is None or self._h36m_joint_names is None:
+        skeleton = self.last_world_relative_skeleton
+        if skeleton is None or self._h36m_joint_names is None:
             return None
         return {
             name: {"x": float(xyz[0]), "y": float(xyz[1]), "z": float(xyz[2])}
-            for name, xyz in zip(self._h36m_joint_names, self.last_root_relative_skeleton)
+            for name, xyz in zip(self._h36m_joint_names, skeleton)
         }
 
     def set_video_source(self, video_source: str | int | None, *, live: bool | None = None) -> None:
@@ -380,6 +420,10 @@ class RecognitionManager:
     def _show(self, frame, pipeline_out, **prediction) -> None:
         """Hand one frame to the debug view, adding the context it cannot know:
         the latest world position, and what to say when there is no prediction yet."""
+        # Mistake comes from the manager rather than the call sites: it is refreshed on
+        # every frame the LSTM runs on, independently of whether a step was confirmed.
+        prediction.setdefault("mistake_id", self.last_mistake_id)
+        prediction.setdefault("mistake_score", self.last_mistake_score)
         self._view.show(frame, pipeline_out, world_xyz=self.last_world_xyz,
                         status_line=self._status_line(), **prediction)
 
@@ -460,10 +504,18 @@ class RecognitionManager:
             if model_dir not in sys.path:
                 sys.path.insert(0, model_dir)
             from LSTM_model_train import AssistLSTM
+            # num_mistakes/num_layers/dropout must mirror the values the checkpoint was
+            # trained with, or load_state_dict rejects the weights (a mistake_head trained
+            # into the checkpoint has no place to go in a head-less model). Older configs
+            # predate these keys, hence the defaults.
+            num_mistakes = self.model_config.get("num_mistakes")
             self._model = AssistLSTM(
                 input_dim=int(self.model_config["input_dim"]),
                 hidden_dim=int(self.model_config["hidden_dim"]),
                 num_steps=self.num_steps,
+                num_layers=int(self.model_config.get("num_layers", 1)),
+                dropout=float(self.model_config.get("dropout", 0.5)),
+                num_mistakes=int(num_mistakes) if num_mistakes is not None else None,
             ).to(self.device)
             self._model.load_state_dict(torch.load(self.model_path, map_location=self.device))
             self._model.eval()

@@ -48,6 +48,7 @@ from skeleton_utils.bone_length_filter import BoneLengthConstraintFilter  # noqa
 from skeleton_utils.coco_h36m import coco_to_h36m_xy  # noqa: E402
 from skeleton_utils.keypoint_filter import KeypointOutlierHoldFilter  # noqa: E402
 from skeleton_utils.metric_depth_estimator import MetricDepthEstimator  # noqa: E402
+from skeleton_utils.person_selection import select_tracked_person_keypoints  # noqa: E402
 from feature_utils.h36m_features import (  # noqa: E402
     FEATURE_JOINTS, L_SHOULDER, R_SHOULDER, compute_distance_from_center_ratio,
     compute_joint_angles, compute_polar, compute_ratios,
@@ -92,16 +93,45 @@ def estimate_pitch_from_torso_vector(root_relative: np.ndarray) -> float:
     return float(np.arccos(cos_pitch))
 
 
-def run_yolo_2d(yolo, frame, imgsz=None):
+def run_yolo_2d(yolo, frame, imgsz=None, selection=None,
+                previous_keypoints=None, previous_conf=None):
+    """Detect 2D keypoints and return ONE person's (keypoints_xy, conf).
+
+    selection: None (default) keeps the historical behaviour of taking YOLO's
+        first listed detection -- fine when only one person is ever in frame.
+        A dict of select_tracked_person_keypoints() kwargs instead picks the
+        detection matching `previous_keypoints`, which is what stops a
+        bystander from stealing the subject mid-run. See
+        skeleton_utils/person_selection.py.
+    """
     kwargs = {"imgsz": imgsz} if imgsz is not None else {}
     results = yolo(frame, verbose=False, **kwargs)
     if not results or results[0].keypoints is None or results[0].keypoints.xy.numel() == 0:
         return None, None
-    kpts_xy = results[0].keypoints.xy[0].cpu().numpy()
-    conf = (results[0].keypoints.conf[0].cpu().numpy()
-            if results[0].keypoints.conf is not None
-            else np.ones(kpts_xy.shape[0], dtype=np.float32))
-    return kpts_xy, conf
+
+    keypoints = results[0].keypoints
+    if selection is None:
+        kpts_xy = keypoints.xy[0].cpu().numpy()
+        conf = (keypoints.conf[0].cpu().numpy()
+                if keypoints.conf is not None
+                else np.ones(kpts_xy.shape[0], dtype=np.float32))
+        return kpts_xy, conf
+
+    all_xy = keypoints.xy.cpu().numpy()  # (n_people, 17, 2)
+    all_conf = (keypoints.conf.cpu().numpy()
+                if keypoints.conf is not None
+                else np.ones(all_xy.shape[:2], dtype=np.float32))
+    # Box confidence is the "is this a person at all" score, which is a better
+    # filter for phantom detections than mean keypoint confidence alone.
+    boxes = getattr(results[0], "boxes", None)
+    det_scores = (boxes.conf.cpu().numpy()
+                  if boxes is not None and getattr(boxes, "conf", None) is not None
+                  else None)
+
+    return select_tracked_person_keypoints(
+        all_xy, all_conf, det_scores,
+        previous_keypoints=previous_keypoints, previous_conf=previous_conf,
+        **selection)
 
 
 class RealtimeSkeleton3DPipeline:
@@ -164,6 +194,22 @@ class RealtimeSkeleton3DPipeline:
         self.bone_filter = (BoneLengthConstraintFilter()
                             if config.use_bone_length_filter else None)
 
+        # Sticky person selection (see run_yolo_2d / skeleton_utils/person_selection.py).
+        # The kwargs are fixed at construction; only the previous pose changes per frame.
+        self.person_selection = None
+        if config.use_person_selection:
+            self.person_selection = {
+                "conf_threshold": config.conf_threshold,
+                "min_valid_joints": config.person_min_valid_joints,
+                "min_detection_score": config.person_min_detection_score,
+                "max_jump_ratio": config.person_max_jump_ratio,
+            }
+        # Last ACCEPTED detection -- what the next frame's candidates are matched against.
+        # Held (not cleared) on a frame with no detection, so a brief dropout does not
+        # reset the identity and let a bystander win the next frame by default.
+        self._previous_keypoints = None
+        self._previous_conf = None
+
         self.calibration = None
         if config.body_calibration_file:
             self.calibration = BodyCalibration.load(config.body_calibration_file)
@@ -200,6 +246,9 @@ class RealtimeSkeleton3DPipeline:
         without this a second subject is forced into the first one's skeleton.
         """
         self.lifter.reset()
+        # Forget who we were following, or the new subject is rejected as a "jump".
+        self._previous_keypoints = None
+        self._previous_conf = None
         if self.kp_filter is not None:
             self.kp_filter = KeypointOutlierHoldFilter()
         if self.bone_filter is not None:
@@ -226,7 +275,18 @@ class RealtimeSkeleton3DPipeline:
         """
         K_frame = self.K if K is None else np.asarray(K, dtype=np.float64)
         h, w = frame.shape[:2]
-        keypoints_2d, keypoints_conf = run_yolo_2d(self.yolo, frame, imgsz=self.yolo_imgsz)
+        keypoints_2d, keypoints_conf = run_yolo_2d(
+            self.yolo, frame, imgsz=self.yolo_imgsz,
+            selection=self.person_selection,
+            previous_keypoints=self._previous_keypoints,
+            previous_conf=self._previous_conf)
+        # Anchor the next frame on the RAW selected detection, before the keypoint filter
+        # holds/smooths it -- matching against filtered output would compare candidates to
+        # a pose that was partly invented, and let the anchor drift away from any real person.
+        if keypoints_2d is not None:
+            self._previous_keypoints = keypoints_2d
+            self._previous_conf = keypoints_conf
+
         kp_status = None
         if self.kp_filter is not None:
             keypoints_2d, keypoints_conf, kp_status = self.kp_filter.filter(keypoints_2d, keypoints_conf)
@@ -236,6 +296,7 @@ class RealtimeSkeleton3DPipeline:
             "keypoints_conf": keypoints_conf,
             "kp_status": kp_status,
             "root_relative": None,
+            "root_relative_world": None,
             "world_root_xyz": np.full(3, np.nan),
             "skeleton": None,
         }
@@ -266,9 +327,16 @@ class RealtimeSkeleton3DPipeline:
             root_camera_xyz = tf.pixel_depth_to_camera_point(K_frame, pelvis_px, z_filtered)
             world_root_xyz = tf.camera_point_to_world(self.T_world_from_camera, root_camera_xyz)
             out["world_root_xyz"] = world_root_xyz
-            # Posture and location fused into one world-frame skeleton.
-            out["skeleton"] = world_root_xyz + tf.transform_directions(
-                self.T_world_from_camera, root_relative)
+            # The same posture in three useful forms. root_relative is camera-frame:
+            # its axes are the lens's, so it only means anything alongside the camera's
+            # own orientation. root_relative_world is that posture ROTATED into world
+            # axes but still pelvis-centred -- which is what a consumer needs if it is
+            # going to place the skeleton at world_root_xyz itself, since mixing a
+            # world-frame position with a camera-frame posture tilts the body by
+            # whatever the extrinsics rotation is. skeleton is both applied at once.
+            rotated = tf.transform_directions(self.T_world_from_camera, root_relative)
+            out["root_relative_world"] = rotated
+            out["skeleton"] = world_root_xyz + rotated
 
         return out
 
