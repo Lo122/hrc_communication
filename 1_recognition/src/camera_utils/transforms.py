@@ -53,6 +53,49 @@ def rpy_deg_to_matrix(roll_deg, pitch_deg, yaw_deg):
     return Rz @ Ry @ Rx
 
 
+def rigid_transform_from_points(points_from, points_to):
+    """Best-fit rigid transform T_to_from_from mapping one point set onto
+    another (Kabsch/Umeyama, via SVD). Returns (T, rms_residual_m).
+
+    Both arrays are (N, 3) and must correspond element-wise; N >= 3, and the
+    points must not be collinear. Rotation and translation only -- no scale,
+    which is the point: the two sets are the same physical points measured in
+    two frames, so any scale difference is measurement error and should show
+    up in the residual rather than being absorbed.
+
+    Used to turn robot TCP touch points on a calibration marker into
+    T_base_from_marker (see setup/calibration/robot_camera_calibration.py).
+    """
+    points_from = np.asarray(points_from, dtype=np.float64).reshape(-1, 3)
+    points_to = np.asarray(points_to, dtype=np.float64).reshape(-1, 3)
+    if points_from.shape != points_to.shape:
+        raise ValueError(
+            f"Point sets must have the same shape, got {points_from.shape} and "
+            f"{points_to.shape}.")
+    if len(points_from) < 3:
+        raise ValueError(f"Need at least 3 point pairs, got {len(points_from)}.")
+
+    centroid_from = points_from.mean(axis=0)
+    centroid_to = points_to.mean(axis=0)
+    centered_from = points_from - centroid_from
+    centered_to = points_to - centroid_to
+
+    U, _S, Vt = np.linalg.svd(centered_to.T @ centered_from)
+    # A plain U @ Vt can come out as a reflection (det == -1) when the points are
+    # near-degenerate or noisy. Flipping the sign of the least-significant
+    # singular vector gives the best proper rotation instead -- without this the
+    # "fit" can mirror the marker and still report a small residual.
+    d = np.sign(np.linalg.det(U @ Vt))
+    R = U @ np.diag([1.0, 1.0, d]) @ Vt
+
+    t = centroid_to - R @ centroid_from
+    T = make_transform(R, t)
+
+    residuals = transform_points(T, points_from) - points_to
+    rms = float(np.sqrt(np.mean(np.sum(residuals ** 2, axis=1))))
+    return T, rms
+
+
 def transform_points(T, points):
     """Apply a 4x4 transform to an array of 3D points, shape (..., 3)."""
     T = np.asarray(T, dtype=np.float64)

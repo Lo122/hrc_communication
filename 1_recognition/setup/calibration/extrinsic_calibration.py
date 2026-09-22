@@ -1,11 +1,13 @@
 """Extrinsic calibration: solvePnP against a target of known world pose ->
 T_world_from_camera. Two target methods, selected with --method:
 
-- ``board`` (default): a ChArUco board (generate_charuco_board.py) -- many
+- ``board`` (default): a ChArUco board (printed by generate_charuco_board.py
+  in the data-processing repo, see below) -- many
   correspondence points spread over a larger physical area, usually a more
   accurate/stable solvePnP, and tolerant of partial occlusion/cropping
   (see charuco_board.py's docstring).
-- ``marker``: a single plain ArUco marker (generate_calibration_targets.py)
+- ``marker``: a single plain ArUco marker (printed by
+  generate_calibration_targets.py in the data-processing repo, see below)
   -- quicker to print/set up (one small square instead of a full board),
   useful when the board doesn't fit your calibration space or a full board
   is overkill.
@@ -25,16 +27,16 @@ Physical setup this expects (either method):
   X, then Y, then Z of the world frame).
 
 Usage:
-    python -m camera_utils.extrinsic_calibration `
-        --intrinsics ../dataset/calib_data/intrinsics.json `
+    uv run python 1_recognition/setup/calibration/extrinsic_calibration.py `
+        --intrinsics 1_recognition/calib_data/intrinsics.json `
         --camera-index 0 --squares-x 7 --squares-y 9 `
         --square-length-mm 25 --marker-length-mm 19 `
-        --output ../dataset/calib_data/extrinsics.json
+        --output 1_recognition/calib_data/extrinsics.json
 
-    python -m camera_utils.extrinsic_calibration `
-        --method marker --intrinsics ../dataset/calib_data/intrinsics.json `
+    uv run python 1_recognition/setup/calibration/extrinsic_calibration.py `
+        --method marker --intrinsics 1_recognition/calib_data/intrinsics.json `
         --camera-index 0 --marker-id 0 --marker-length-mm 100 `
-        --output ../dataset/calib_data/extrinsics.json
+        --output 1_recognition/calib_data/extrinsics.json
 
 Press SPACE to use the current frame's target detection, Q/ESC to abort. Or
 pass --image path/to/frame.png to calibrate from a single still image
@@ -48,11 +50,20 @@ import cv2
 import numpy as np
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    # src/ for camera_utils, setup/ for the sibling calibration package.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from camera_utils.calibration_io import load_intrinsics, save_extrinsics
-from camera_utils.charuco_board import detect_charuco, draw_charuco_detection, make_charuco_board
+from calibration.charuco_board import detect_charuco, draw_charuco_detection, make_charuco_board
 from camera_utils import transforms as tf
+from logging_setup import configure_logging, get_logger
+from video_source import (
+    DEFAULT_PREVIEW_WIDTH, add_capture_args, forget_preview_windows, open_camera,
+    preview_scale, resolve_capture_size, show_preview)
+
+logger = get_logger(__name__)
+
 
 
 def solve_board_pose(charuco_corners, charuco_ids, board, K, dist, min_corners=6):
@@ -66,10 +77,12 @@ def solve_board_pose(charuco_corners, charuco_ids, board, K, dist, min_corners=6
     return tf.rvec_tvec_to_transform(rvec, tvec)
 
 
-def capture_board_pose_live(camera_index, detector, board, K, dist, min_corners):
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        raise IOError(f"Could not open camera index {camera_index}")
+def capture_board_pose_live(camera_index, detector, board, K, dist, min_corners,
+                             capture_size=None, backend="auto",
+                             preview_width=DEFAULT_PREVIEW_WIDTH):
+    width, height = capture_size if capture_size else (None, None)
+    cap, actual = open_camera(camera_index, width, height, backend)
+    s = preview_scale(actual[0], preview_width)
 
     print("Live extrinsic calibration: press SPACE to accept the current board "
           "detection, ESC/Q to abort.")
@@ -85,12 +98,13 @@ def capture_board_pose_live(camera_index, detector, board, K, dist, min_corners)
             draw_charuco_detection(display, charuco_corners, charuco_ids)
             if charuco_corners is not None:
                 n = len(charuco_ids)
-                cv2.putText(display, f"board found ({n} corners) - SPACE to accept", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.putText(display, f"board found ({n} corners) - SPACE to accept",
+                            (int(10 * s), int(30 * s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8 * s, (0, 255, 0), max(int(2 * s), 1))
             else:
-                cv2.putText(display, "board not found", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            cv2.imshow("extrinsic calibration", display)
+                cv2.putText(display, "board not found", (int(10 * s), int(30 * s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8 * s, (0, 0, 255), max(int(2 * s), 1))
+            show_preview("extrinsic calibration", display, preview_width)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord(" ") and charuco_corners is not None:
@@ -103,6 +117,7 @@ def capture_board_pose_live(camera_index, detector, board, K, dist, min_corners)
     finally:
         cap.release()
         cv2.destroyAllWindows()
+        forget_preview_windows()
 
     return T_camera_from_board
 
@@ -142,10 +157,14 @@ def solve_marker_pose(corners_2d, marker_length_m, K, dist):
     return tf.rvec_tvec_to_transform(rvec, tvec)
 
 
-def capture_marker_pose_live(camera_index, detector, marker_id, marker_length_m, K, dist):
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        raise IOError(f"Could not open camera index {camera_index}")
+def capture_marker_pose_live(camera_index, detector, marker_id, marker_length_m, K, dist,
+                              capture_size=None, backend="auto",
+                              preview_width=DEFAULT_PREVIEW_WIDTH):
+    width, height = capture_size if capture_size else (None, None)
+    cap, actual = open_camera(camera_index, width, height, backend)
+    # Overlays are drawn on the full-resolution frame but seen in a preview
+    # window, so their sizes are scaled to survive the downscale.
+    s = preview_scale(actual[0], preview_width)
 
     print("Live extrinsic calibration: press SPACE to accept the current marker "
           "detection, ESC/Q to abort.")
@@ -158,13 +177,14 @@ def capture_marker_pose_live(camera_index, detector, marker_id, marker_length_m,
             corners_2d = detect_marker_in_frame(detector, frame, marker_id)
             display = frame.copy()
             if corners_2d is not None:
-                cv2.polylines(display, [corners_2d.astype(np.int32)], True, (0, 255, 0), 2)
-                cv2.putText(display, "marker found - SPACE to accept", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.polylines(display, [corners_2d.astype(np.int32)], True, (0, 255, 0),
+                              max(int(2 * s), 1))
+                cv2.putText(display, "marker found - SPACE to accept", (int(10 * s), int(30 * s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8 * s, (0, 255, 0), max(int(2 * s), 1))
             else:
-                cv2.putText(display, "marker not found", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            cv2.imshow("extrinsic calibration - aruco marker", display)
+                cv2.putText(display, "marker not found", (int(10 * s), int(30 * s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8 * s, (0, 0, 255), max(int(2 * s), 1))
+            show_preview("extrinsic calibration - aruco marker", display, preview_width)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord(" ") and corners_2d is not None:
@@ -176,6 +196,7 @@ def capture_marker_pose_live(camera_index, detector, marker_id, marker_length_m,
     finally:
         cap.release()
         cv2.destroyAllWindows()
+        forget_preview_windows()
 
     return T_camera_from_marker
 
@@ -183,10 +204,15 @@ def capture_marker_pose_live(camera_index, detector, marker_id, marker_length_m,
 def run_extrinsic_calibration(intrinsics_path, image, camera_index, squares_x, squares_y,
                                square_length_mm, marker_length_mm, aruco_dict, min_corners,
                                board_xyz, board_rpy_deg, robot_base_xyz, robot_base_rpy_deg,
-                               ground_z, output):
+                               ground_z, output, capture_width=None, capture_height=None,
+                               backend="auto", preview_width=DEFAULT_PREVIEW_WIDTH):
     """Shared entry point used by both this module's CLI and the
-    calibrate_camera app. Returns T_world_from_camera, or None on failure."""
-    K, dist, _ = load_intrinsics(intrinsics_path)
+    calibrate_camera app. Returns T_world_from_camera, or None on failure.
+
+    Live capture defaults to the resolution the intrinsics were solved at --
+    see resolve_capture_size."""
+    K, dist, calibrated_size = load_intrinsics(intrinsics_path)
+    capture_size = resolve_capture_size(capture_width, capture_height, calibrated_size)
     board, detector = make_charuco_board(
         squares_x, squares_y,
         square_length_mm / 1000.0, marker_length_mm / 1000.0,
@@ -195,21 +221,22 @@ def run_extrinsic_calibration(intrinsics_path, image, camera_index, squares_x, s
     if image:
         frame = cv2.imread(image)
         if frame is None:
-            print(f"Could not read image {image}")
+            logger.error("Could not read image %s", image)
             return None
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         charuco_corners, charuco_ids = detect_charuco(detector, gray, min_corners=min_corners)
         if charuco_corners is None:
-            print("No ChArUco board found in the given image.")
+            logger.error("No ChArUco board found in the given image.")
             return None
         T_camera_from_board = solve_board_pose(
             charuco_corners, charuco_ids, board, K, dist, min_corners=min_corners)
     else:
         T_camera_from_board = capture_board_pose_live(
-            camera_index, detector, board, K, dist, min_corners)
+            camera_index, detector, board, K, dist, min_corners,
+            capture_size=capture_size, backend=backend, preview_width=preview_width)
 
     if T_camera_from_board is None:
-        print("Failed to solve board pose. Aborting.")
+        logger.error("Failed to solve board pose. Aborting.")
         return None
 
     T_world_from_board = tf.make_transform(
@@ -220,7 +247,7 @@ def run_extrinsic_calibration(intrinsics_path, image, camera_index, squares_x, s
     T_world_from_robot_base = tf.make_transform(
         tf.rpy_deg_to_matrix(*robot_base_rpy_deg), robot_base_xyz)
 
-    print(f"T_world_from_camera =\n{T_world_from_camera}")
+    logger.info("T_world_from_camera =\n%s", T_world_from_camera)
 
     save_extrinsics(
         output,
@@ -232,36 +259,44 @@ def run_extrinsic_calibration(intrinsics_path, image, camera_index, squares_x, s
                f"square_length_mm={square_length_mm}, "
                f"marker_length_mm={marker_length_mm}, aruco_dict={aruco_dict}"),
     )
-    print(f"Saved extrinsics to {output}")
+    logger.info("Saved extrinsics to %s", output)
     return T_world_from_camera
 
 
 def run_extrinsic_calibration_marker(intrinsics_path, image, camera_index, marker_id,
                                       marker_length_mm, aruco_dict, board_xyz, board_rpy_deg,
-                                      robot_base_xyz, robot_base_rpy_deg, ground_z, output):
+                                      robot_base_xyz, robot_base_rpy_deg, ground_z, output,
+                                      capture_width=None, capture_height=None, backend="auto",
+                                      preview_width=DEFAULT_PREVIEW_WIDTH):
     """Marker variant of run_extrinsic_calibration -- solves against a single
-    plain ArUco marker (generate_calibration_targets.py) instead of a
-    ChArUco board. Returns T_world_from_camera, or None on failure."""
-    K, dist, _ = load_intrinsics(intrinsics_path)
+    plain ArUco marker (printed by generate_calibration_targets.py in
+    LSTM_HRC/data_proc_3d/src/camera_utils/) instead of a
+    ChArUco board. Returns T_world_from_camera, or None on failure.
+
+    Live capture defaults to the resolution the intrinsics were solved at --
+    see resolve_capture_size."""
+    K, dist, calibrated_size = load_intrinsics(intrinsics_path)
+    capture_size = resolve_capture_size(capture_width, capture_height, calibrated_size)
     detector = make_aruco_detector(aruco_dict)
     marker_length_m = marker_length_mm / 1000.0
 
     if image:
         frame = cv2.imread(image)
         if frame is None:
-            print(f"Could not read image {image}")
+            logger.error("Could not read image %s", image)
             return None
         corners_2d = detect_marker_in_frame(detector, frame, marker_id)
         if corners_2d is None:
-            print("No marker found in the given image.")
+            logger.error("No marker found in the given image.")
             return None
         T_camera_from_marker = solve_marker_pose(corners_2d, marker_length_m, K, dist)
     else:
         T_camera_from_marker = capture_marker_pose_live(
-            camera_index, detector, marker_id, marker_length_m, K, dist)
+            camera_index, detector, marker_id, marker_length_m, K, dist,
+            capture_size=capture_size, backend=backend, preview_width=preview_width)
 
     if T_camera_from_marker is None:
-        print("Failed to solve marker pose. Aborting.")
+        logger.error("Failed to solve marker pose. Aborting.")
         return None
 
     T_world_from_marker = tf.make_transform(
@@ -272,7 +307,7 @@ def run_extrinsic_calibration_marker(intrinsics_path, image, camera_index, marke
     T_world_from_robot_base = tf.make_transform(
         tf.rpy_deg_to_matrix(*robot_base_rpy_deg), robot_base_xyz)
 
-    print(f"T_world_from_camera =\n{T_world_from_camera}")
+    logger.info("T_world_from_camera =\n%s", T_world_from_camera)
 
     save_extrinsics(
         output,
@@ -282,11 +317,12 @@ def run_extrinsic_calibration_marker(intrinsics_path, image, camera_index, marke
         marker_id=marker_id,
         notes=f"aruco_dict={aruco_dict}, marker_length_mm={marker_length_mm}",
     )
-    print(f"Saved extrinsics to {output}")
+    logger.info("Saved extrinsics to %s", output)
     return T_world_from_camera
 
 
 def main():
+    configure_logging("extrinsic_calibration")
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--method", type=str, choices=("board", "marker"), default="board",
@@ -319,7 +355,10 @@ def main():
                          help="Robot base origin in world coords, meters.")
     parser.add_argument("--robot-base-rpy-deg", type=float, nargs=3, default=(0.0, 0.0, 0.0))
     parser.add_argument("--ground-z", type=float, default=0.0,
-                         help="World Z of the ground plane used later for ankle back-projection.")
+                         help="World Z of the ground plane used later for ankle back-projection. "
+                              "The FLOOR's height relative to the target: 0.0 only when the "
+                              "target lies on the floor, -0.75 for a target on a 0.75 m table.")
+    add_capture_args(parser)
     parser.add_argument("--output", type=str, required=True)
     args = parser.parse_args()
 
@@ -334,12 +373,16 @@ def main():
             args.intrinsics, args.image, args.camera_index, args.squares_x, args.squares_y,
             args.square_length_mm, args.marker_length_mm, args.aruco_dict, args.min_corners,
             args.board_xyz, args.board_rpy_deg, args.robot_base_xyz, args.robot_base_rpy_deg,
-            args.ground_z, args.output)
+            args.ground_z, args.output,
+            capture_width=args.capture_width, capture_height=args.capture_height,
+            backend=args.backend, preview_width=args.preview_width)
     else:
         run_extrinsic_calibration_marker(
             args.intrinsics, args.image, args.camera_index, args.marker_id,
             args.marker_length_mm, args.aruco_dict, args.board_xyz, args.board_rpy_deg,
-            args.robot_base_xyz, args.robot_base_rpy_deg, args.ground_z, args.output)
+            args.robot_base_xyz, args.robot_base_rpy_deg, args.ground_z, args.output,
+            capture_width=args.capture_width, capture_height=args.capture_height,
+            backend=args.backend, preview_width=args.preview_width)
 
 
 if __name__ == "__main__":

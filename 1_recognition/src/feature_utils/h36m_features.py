@@ -22,7 +22,7 @@ Differences from the 2D schema, and why:
     -- per-joint panels below iterate H36M's joint set, not COCO's.
   - pelvis (joint 0) is excluded from every per-joint panel: this
     pipeline's skeletons are root-relative (pelvis forced to (0,0,0), see
-    skeleton_pipeline/motionbert_lifter.py), so pelvis's own velocity/
+    skeleton_utils/motionbert_lifter.py), so pelvis's own velocity/
     position/etc. is trivially always zero -- not a meaningful feature.
   - 2D's single "polar angle" (one angle is enough to describe a 2D
     direction) becomes an azimuth/elevation PAIR here (two angles are
@@ -54,7 +54,7 @@ underestimate of genuine fast motion. See _savgol_derivative()'s docstring
 for how NaN gaps (missing detections) are handled.
 """
 import numpy as np
-from scipy.signal import savgol_filter
+from scipy.signal import savgol_coeffs, savgol_filter
 
 H36M_JOINT_NAMES = [
     "pelvis", "r_hip", "r_knee", "r_ankle", "l_hip", "l_knee", "l_ankle",
@@ -82,7 +82,48 @@ def _valid_runs(mask):
     return list(zip(edges[0::2], edges[1::2]))
 
 
-def _savgol_derivative(positions, fps, window_length, polyorder, deriv):
+def _causal_run(run_positions, fps, window_length, polyorder, deriv):
+    """One contiguous non-NaN run -> the deriv-th derivative at each frame,
+    fitted over that frame and the ones BEFORE it only.
+
+    Reproduces skeleton3d_pipeline.StreamingH36MFeatureExtractor's
+    _fit_derivative exactly, which is the entire point, so it copies three
+    behaviours a plain "shift the window" approximation would get wrong:
+
+      - the window GROWS. Live, the extractor's deque is not full yet at the
+        start, so frame i is fitted over min(i+1, window_length) samples, not
+        over window_length padded ones.
+      - below polyorder + 2 samples it does not fit at all, returning the raw
+        latest position (deriv=0) or zero (deriv>0). Same margin the centered
+        path uses, and for the same reason: fewer samples than that gives a
+        degenerate exact-interpolation polynomial with unstable derivatives.
+      - the fit is evaluated at the LATEST sample, not the window centre.
+
+    savgol_coeffs(..., pos=n-1, use="dot") is the fixed-delta equivalent of
+    live's np.polyfit against real timestamps: identical for the uniformly
+    spaced samples an offline video decode produces, and much cheaper. Live
+    keeps the polyfit form because its frame spacing is NOT uniform (see that
+    class's docstring); here it is, by construction.
+    """
+    run_len = run_positions.shape[0]
+    out = np.empty_like(run_positions)
+    coeff_cache = {}
+    for i in range(run_len):
+        n = min(i + 1, window_length)
+        if n < polyorder + 2:
+            out[i] = run_positions[i] if deriv == 0 else 0.0
+            continue
+        coeffs = coeff_cache.get(n)
+        if coeffs is None:
+            coeffs = savgol_coeffs(n, polyorder, deriv=deriv, delta=1.0 / fps,
+                                   pos=n - 1, use="dot")
+            coeff_cache[n] = coeffs
+        window = run_positions[i - n + 1:i + 1]          # (n, 17, 3), chronological
+        out[i] = np.tensordot(coeffs, window, axes=(0, 0))
+    return out
+
+
+def _savgol_derivative(positions, fps, window_length, polyorder, deriv, causal=False):
     """positions: (T, 17, 3), may contain fully-NaN rows (missing
     detections, see module docstring). Returns the deriv-th derivative via
     Savitzky-Golay, applied independently within each contiguous run of
@@ -90,11 +131,25 @@ def _savgol_derivative(positions, fps, window_length, polyorder, deriv):
     filter window, corrupting frames well outside the actual gap) --
     frames in a run shorter than the window (too little data to fit a
     reliable polynomial to, e.g. right after a lost-and-reacquired
-    detection) are left NaN rather than guessed at."""
+    detection) are left NaN rather than guessed at.
+
+    causal=True fits over TRAILING windows instead of centered ones, which
+    is what the live pipeline necessarily does -- it cannot see future
+    frames. Left False, the training features are produced by an estimator
+    deployment cannot reproduce: a centered window at window_length=9 uses
+    4 frames of lookahead, i.e. 400 ms at the 10 Hz the live loop actually
+    runs at. The centered fit is the better ESTIMATOR (no phase lag, lower
+    variance); it is simply not one inference can run, and matching the two
+    sides beats being individually better on either. See _causal_run for
+    exactly what is reproduced."""
     out = np.full_like(positions, np.nan)
     valid = ~np.isnan(positions).any(axis=(1, 2))
     for start, stop in _valid_runs(valid):
         run_len = stop - start
+        if causal:
+            out[start:stop] = _causal_run(
+                positions[start:stop], fps, window_length, polyorder, deriv)
+            continue
         wl = min(window_length, run_len if run_len % 2 == 1 else run_len - 1)
         if wl < polyorder + 2:
             continue  # too short a run to fit/differentiate reliably -- leave NaN
@@ -104,27 +159,29 @@ def _savgol_derivative(positions, fps, window_length, polyorder, deriv):
     return out
 
 
-def compute_velocity(positions, fps, window_length=9, polyorder=3):
+def compute_velocity(positions, fps, window_length=9, polyorder=3, causal=False):
     """positions: (T, 17, 3). Returns (T, 17, 3) velocity, m/s -- see
     module docstring's "Why Savitzky-Golay" note. window_length (odd,
     frames) / polyorder are the smoothing-vs-responsiveness knobs: at 30fps
     the default window_length=9 is a ~0.3s smoothing window -- widen it
     for noisier input, narrow it if genuinely fast motion is being
-    over-smoothed."""
-    return _savgol_derivative(positions, fps, window_length, polyorder, deriv=1)
+    over-smoothed. causal: see _savgol_derivative."""
+    return _savgol_derivative(positions, fps, window_length, polyorder, deriv=1,
+                              causal=causal)
 
 
-def compute_acceleration(positions, fps, window_length=9, polyorder=3):
+def compute_acceleration(positions, fps, window_length=9, polyorder=3, causal=False):
     """positions: (T, 17, 3) -- note this takes POSITIONS directly, NOT
     compute_velocity()'s output: Savitzky-Golay differentiates the
     ORIGINAL position signal twice in one analytic step, which is far
     better-behaved than differencing an already-differenced (and thus
     already noise-amplified) velocity signal a second time -- see module
-    docstring."""
-    return _savgol_derivative(positions, fps, window_length, polyorder, deriv=2)
+    docstring. causal: see _savgol_derivative."""
+    return _savgol_derivative(positions, fps, window_length, polyorder, deriv=2,
+                              causal=causal)
 
 
-def compute_smoothed_positions(positions, fps, window_length=9, polyorder=3):
+def compute_smoothed_positions(positions, fps, window_length=9, polyorder=3, causal=False):
     """positions: (T, 17, 3). Returns the deriv=0 (smoothed, not
     differentiated) Savitzky-Golay fit -- used for every feature computed
     DIRECTLY from position (joint angles, polar azimuth/elevation, ratios,
@@ -136,8 +193,10 @@ def compute_smoothed_positions(positions, fps, window_length=9, polyorder=3):
     is a smaller, but not zero, effect. Smoothing POSITION (not the angles
     themselves) also sidesteps the failure mode of naively averaging a
     wrap-around angle (e.g. azimuth flipping between +179deg/-179deg would
-    average toward 0deg, not +-180deg, if smoothed directly)."""
-    return _savgol_derivative(positions, fps, window_length, polyorder, deriv=0)
+    average toward 0deg, not +-180deg, if smoothed directly). causal: see
+    _savgol_derivative."""
+    return _savgol_derivative(positions, fps, window_length, polyorder, deriv=0,
+                              causal=causal)
 
 
 def compute_polar(positions):
@@ -193,16 +252,62 @@ def compute_joint_angles(positions):
     }
 
 
-def compute_ratios(positions):
+def compute_ratios(positions, shoulder_width=None):
     """positions: (T, 17, 3). Returns dict with elbow_over_shoulder_ratio
     and wrist_over_shoulder_ratio (T,): mean(left, right) distance of that
     joint from the shoulder midpoint, divided by shoulder width -- a
     scale-invariant "how far the arm reaches relative to this person's own
     shoulder width" measure (naming/intent inferred from the JSON schema,
-    see module docstring's reimplementation caveat)."""
+    see module docstring's reimplementation caveat).
+
+    The denominator is this person's MEDIAN shoulder width over the clip, not
+    the per-frame value. Shoulder width is an anatomical constant -- "this
+    person's own shoulder width" is a property of the person, not of the
+    frame -- so any per-frame variation is monocular-lifter noise, and
+    dividing by it injects that noise into the feature on every frame.
+
+    It also fails catastrophically, not just noisily. When the subject turns
+    edge-on to the camera, both shoulders project to almost the same 2D
+    point, the lifter has little evidence for their separation in depth, and
+    it can collapse them onto each other. On cam-07_uid-02_take-01 at 193.9s
+    the shoulder width fell from 0.251m to 0.027m -- a tenth of normal --
+    while the wrist and elbow distances stayed flat at 0.280m/0.228m. The
+    arms had not moved at all, yet wrist_over_shoulder_ratio spiked to 10.4
+    and the elbow ratio to 8.5 (baseline ~1.0 for both; they spike together
+    precisely because they share this denominator).
+
+    BoneLengthConstraintFilter cannot prevent that: the H36M bone tree
+    constrains thorax->l_shoulder and thorax->r_shoulder, but there is no
+    l_shoulder--r_shoulder edge, so both shoulders can sit at their correct
+    distance from the thorax while folded onto the same side -- every bone
+    length valid, shoulder width ~0.
+
+    shoulder_width: pass a scalar to use that as the denominator instead of
+    this clip's own median. This exists because the clip median is NOT
+    computable live -- it is a whole-clip statistic, the same class of
+    lookahead as a centered (rather than causal) Savitzky-Golay window. A
+    streaming caller must supply a CAUSAL estimate of the same anatomical
+    quantity instead; see skeleton3d_pipeline.py's
+    StreamingH36MFeatureExtractor, which keeps a running median over the
+    widths it has seen so far. Note the residual train/inference gap that
+    leaves: offline every frame of a clip divides by one converged median,
+    while live the denominator is still settling over the first seconds of a
+    session. It converges, but it is not identical -- the same caveat that
+    applies to bone_length_targets/body_scale_m in
+    generate_lstm_training_data.py, which are likewise read off after the
+    whole clip.
+    """
     shoulder_mid = (positions[:, L_SHOULDER] + positions[:, R_SHOULDER]) / 2.0
-    shoulder_width = np.linalg.norm(positions[:, L_SHOULDER] - positions[:, R_SHOULDER], axis=-1)
-    shoulder_width = np.where(shoulder_width > 1e-8, shoulder_width, np.nan)
+
+    if shoulder_width is None:
+        per_frame_width = np.linalg.norm(
+            positions[:, L_SHOULDER] - positions[:, R_SHOULDER], axis=-1)
+        per_frame_width = np.where(per_frame_width > 1e-8, per_frame_width, np.nan)
+        shoulder_width = np.nanmedian(per_frame_width) if per_frame_width.size else np.nan
+
+    shoulder_width = float(shoulder_width)
+    if not np.isfinite(shoulder_width) or shoulder_width <= 1e-8:
+        shoulder_width = np.nan  # degenerate clip; ratios become NaN, not inf
 
     def _mean_dist_ratio(joint_l, joint_r):
         d_l = np.linalg.norm(positions[:, joint_l] - shoulder_mid, axis=-1)
@@ -226,10 +331,16 @@ def compute_distance_from_center_ratio(positions):
     return dist / torso_height[:, None]
 
 
-def compute_all_features(positions, fps, window_length=9, polyorder=3):
+def compute_all_features(positions, fps, window_length=9, polyorder=3, causal=False):
     """positions: (T, 17, 3) root-relative H36M skeleton sequence, meters.
     window_length/polyorder: passed to compute_velocity/compute_acceleration's
     Savitzky-Golay filter -- see those functions' docstrings.
+
+    causal=True computes every derived panel with TRAILING windows, matching
+    what skeleton3d_pipeline.StreamingH36MFeatureExtractor must do live. Set
+    it for any data a deployed model will be trained on; see
+    _savgol_derivative for why the centered default cannot be reproduced at
+    inference time.
 
     Returns (feature_dict, panel_groups):
       feature_dict: {column_name: (T,) ndarray} -- every scalar feature.
@@ -240,13 +351,14 @@ def compute_all_features(positions, fps, window_length=9, polyorder=3):
       stable panel ordering across runs.
     """
     positions = np.asarray(positions, dtype=np.float64)
-    velocity = compute_velocity(positions, fps, window_length, polyorder)        # (T, 17, 3)
-    acceleration = compute_acceleration(positions, fps, window_length, polyorder)  # (T, 17, 3)
+    velocity = compute_velocity(positions, fps, window_length, polyorder, causal)        # (T, 17, 3)
+    acceleration = compute_acceleration(positions, fps, window_length, polyorder, causal)  # (T, 17, 3)
     # Smoothed (not raw) position for everything computed directly from
     # position -- see compute_smoothed_positions()'s docstring on why
     # angles/polar/ratios/distance-from-center need this too, just via a
     # gentler mechanism than velocity/acceleration's amplified spikes.
-    smoothed_positions = compute_smoothed_positions(positions, fps, window_length, polyorder)
+    smoothed_positions = compute_smoothed_positions(positions, fps, window_length, polyorder,
+                                                    causal)
     azimuth, elevation = compute_polar(smoothed_positions)         # (T, 17) each
     joint_angles = compute_joint_angles(smoothed_positions)
     ratios = compute_ratios(smoothed_positions)

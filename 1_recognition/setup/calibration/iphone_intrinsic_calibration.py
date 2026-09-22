@@ -5,6 +5,7 @@ intrinsic_calibration.py (make_charuco_board/detect_charuco/
 calibrate_from_images) -- only the frame source changes (Record3D's RGBD
 stream over USB instead of cv2.VideoCapture). See iphone_connection.py for
 the connection wrapper. Uses the board printed by generate_charuco_board.py
+in the data-processing repo (LSTM_HRC/data_proc_3d/src/camera_utils/)
 -- keep --squares-x/--squares-y/--square-length-mm/--marker-length-mm/
 --aruco-dict identical to whatever you passed that script.
 
@@ -12,16 +13,16 @@ Two modes:
 
 1. ChArUco board calibration (matches intrinsic_calibration.py's method,
    useful to verify/compare against Record3D's own reported intrinsics):
-   python -m camera_utils.iphone_intrinsic_calibration `
+   uv run python 1_recognition/setup/calibration/iphone_intrinsic_calibration.py `
        --squares-x 7 --squares-y 9 --square-length-mm 25 --marker-length-mm 19 `
-       --output ../dataset/calib_data/iphone_intrinsics.json
+       --output 1_recognition/calib_data/iphone_intrinsics.json
 
 2. Use Record3D's own per-frame reported intrinsics directly (ARKit
    focus-corrected calibration; no board needed -- recommended for the
    built-in iPhone camera since Apple already calibrates it in software):
-   python -m camera_utils.iphone_intrinsic_calibration `
+   uv run python 1_recognition/setup/calibration/iphone_intrinsic_calibration.py `
        --use-reported-intrinsics `
-       --output ../dataset/calib_data/iphone_intrinsics.json
+       --output 1_recognition/calib_data/iphone_intrinsics.json
 """
 import argparse
 import sys
@@ -30,14 +31,21 @@ from pathlib import Path
 import cv2
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    # src/ for camera_utils, setup/ for the sibling calibration package.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from camera_utils.calibration_io import save_intrinsics
-from camera_utils.charuco_board import detect_charuco, draw_charuco_detection, make_charuco_board
-from camera_utils.intrinsic_calibration import calibrate_from_images, imwrite_unicode
+from calibration.charuco_board import detect_charuco, draw_charuco_detection, make_charuco_board
+from calibration.intrinsic_calibration import calibrate_from_images, imwrite_unicode
 from camera_utils.iphone_connection import IPhoneCamera
+from logging_setup import configure_logging, get_logger
+from video_source import forget_preview_windows, show_preview
 
-DEFAULT_CALIB_DIR = Path(__file__).resolve().parent.parent.parent / "dataset" / "calib_data"
+logger = get_logger(__name__)
+
+
+DEFAULT_CALIB_DIR = Path(__file__).resolve().parents[2] / "calib_data"
 IPHONE_INTRINSICS_FILENAME = "iphone_intrinsics.json"
 
 
@@ -64,7 +72,7 @@ def capture_from_iphone(dev_idx, board, detector, min_corners=6, capture_rotate9
                 n_corners = 0 if charuco_ids is None else len(charuco_ids)
                 cv2.putText(display, f"captured: {len(frames)}  (corners this frame: {n_corners})",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                cv2.imshow("iphone intrinsic calibration - SPACE=capture, Q=done", display)
+                show_preview("iphone intrinsic calibration - SPACE=capture, Q=done", display)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord(" ") and charuco_corners is not None:
@@ -73,8 +81,9 @@ def capture_from_iphone(dev_idx, board, detector, min_corners=6, capture_rotate9
                 elif key in (27, ord("q")):
                     break
         except KeyboardInterrupt:
-            print("Interrupted by user.")
+            logger.warning("Interrupted by user.")
     cv2.destroyAllWindows()
+    forget_preview_windows()
 
     return frames
 
@@ -83,7 +92,7 @@ def average_reported_intrinsics(dev_idx, num_samples, capture_rotate90=0):
     """Average Record3D's own per-frame reported intrinsic matrix over num_samples frames."""
     import numpy as np
 
-    print(f"Reading {num_samples} frames of Record3D-reported intrinsics...")
+    logger.info("Reading %d frames of Record3D-reported intrinsics...", num_samples)
     Ks = []
     image_size = None
     with IPhoneCamera(dev_idx=dev_idx, capture_rotate90=capture_rotate90) as cam:
@@ -131,17 +140,18 @@ def run_iphone_intrinsic_calibration(use_reported_intrinsics, dev_idx, num_sampl
         K, dist, image_size, err = calibrate_from_images(
             tmp_paths, board, detector, min_corners=min_corners)
 
-    print(f"K =\n{K}")
-    print(f"dist = {dist.ravel()}")
+    logger.info("K =\n%s", K)
+    logger.info("dist = %s", dist.ravel())
     if err is not None:
-        print(f"Reprojection error: {err:.4f} px")
+        logger.info("Reprojection error: %.4f px", err)
 
     save_intrinsics(output, K, dist, image_size, reprojection_error=err)
-    print(f"Saved intrinsics to {output}")
+    logger.info("Saved intrinsics to %s", output)
     return K, dist, image_size, err
 
 
 def main():
+    configure_logging("iphone_intrinsic_calibration")
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dev-idx", type=int, default=0,
@@ -182,7 +192,7 @@ def main():
             args.squares_x, args.squares_y, args.square_length_mm, args.marker_length_mm,
             args.aruco_dict, args.min_corners, args.capture_rotate90, args.output)
     except RuntimeError as e:
-        print(e)
+        logger.error("%s", e)
 
 
 if __name__ == "__main__":

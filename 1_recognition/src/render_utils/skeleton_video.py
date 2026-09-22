@@ -43,7 +43,11 @@ def _edge_side(i, j):
     return "center"
 
 
-def draw_2d_skeleton(frame, keypoints_2d, keypoints_conf, conf_threshold=0.3):
+def draw_2d_skeleton(frame, keypoints_2d, keypoints_conf, conf_threshold=0.3, distances=None):
+    """distances: optional (17,) COCO-order per-keypoint distance from the
+    camera in meters (e.g. a raw depth-sensor sample at that pixel -- see
+    r3d_skeleton_utils.py), NaN/None entries skipped. Purely a preview
+    annotation -- has no effect on the returned skeleton data."""
     out = frame.copy()
     for i, j in COCO_SKELETON_EDGES:
         if keypoints_conf[i] < conf_threshold or keypoints_conf[j] < conf_threshold:
@@ -55,7 +59,16 @@ def draw_2d_skeleton(frame, keypoints_2d, keypoints_conf, conf_threshold=0.3):
         conf = float(np.clip(keypoints_conf[k], 0.0, 1.0))
         color = (0, int(255 * conf), int(255 * (1.0 - conf)))
         radius = 2 + int(round(3 * conf))
-        cv2.circle(out, tuple(keypoints_2d[k].astype(int)), radius, color, -1, cv2.LINE_AA)
+        center = tuple(keypoints_2d[k].astype(int))
+        cv2.circle(out, center, radius, color, -1, cv2.LINE_AA)
+        if (distances is not None and keypoints_conf[k] >= conf_threshold
+                and np.isfinite(distances[k])):
+            label = f"{distances[k]:.2f}m"
+            text_pos = (center[0] + radius + 3, center[1] - radius - 3)
+            cv2.putText(out, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                        (0, 0, 0), 2, cv2.LINE_AA)  # dark outline for legibility
+            cv2.putText(out, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                        (255, 255, 255), 1, cv2.LINE_AA)
     return out
 
 
@@ -143,15 +156,41 @@ class FastSkeleton3DRenderer:
         return canvas
 
 
+def draw_pelvis_label(overlay, pelvis_distance, panel_h):
+    """Big, bottom-center 'PELVIS: X.XXm' label on an already-resized 2D
+    overlay panel -- a single always-legible headline number, distinct from
+    draw_2d_skeleton's small per-joint labels. Skipped (no-op) if
+    pelvis_distance is None/NaN. Font scale is tied to panel_h so it stays
+    readable across --panel-size choices. Drawn on a copy; doesn't touch
+    the input array."""
+    if pelvis_distance is None or not np.isfinite(pelvis_distance):
+        return overlay
+    out = overlay.copy()
+    label = f"PELVIS: {pelvis_distance:.2f} m"
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, panel_h / 240.0, 2
+    (text_w, text_h), _ = cv2.getTextSize(label, font, scale, thickness)
+    x = max((out.shape[1] - text_w) // 2, 4)
+    y = out.shape[0] - 12
+    cv2.putText(out, label, (x, y), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(out, label, (x, y), font, scale, (0, 255, 255), thickness, cv2.LINE_AA)
+    return out
+
+
 def render_combined_frame(frame_bgr, keypoints_2d, keypoints_conf, skeleton_3d,
-                           renderer_3d, panel_size):
+                           renderer_3d, panel_size, distances=None, pelvis_distance=None):
     """One (2D overlay | 3D 4-view) side-by-side frame, ready to write to a
     cv2.VideoWriter. keypoints_2d/keypoints_conf: COCO-17 (YOLO order);
-    skeleton_3d: (17,3) H36M-order root-relative, or None."""
+    skeleton_3d: (17,3) H36M-order root-relative, or None. distances:
+    optional (17,) COCO-order per-keypoint camera distance in meters, drawn
+    next to each keypoint on the 2D overlay panel -- see draw_2d_skeleton.
+    pelvis_distance: optional scalar meters, drawn as a large label at the
+    bottom of the 2D overlay panel -- see draw_pelvis_label."""
     panel_w, panel_h = panel_size
     if keypoints_2d is not None and keypoints_conf is not None:
-        overlay = draw_2d_skeleton(frame_bgr, keypoints_2d, keypoints_conf)
+        overlay = draw_2d_skeleton(frame_bgr, keypoints_2d, keypoints_conf, distances=distances)
     else:
         overlay = frame_bgr
+    overlay = cv2.resize(overlay, (panel_w, panel_h))
+    overlay = draw_pelvis_label(overlay, pelvis_distance, panel_h)
     panel_3d = renderer_3d.render(skeleton_3d)
-    return np.hstack([cv2.resize(overlay, (panel_w, panel_h)), panel_3d])
+    return np.hstack([overlay, panel_3d])

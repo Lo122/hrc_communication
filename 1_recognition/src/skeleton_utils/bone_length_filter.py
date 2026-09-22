@@ -38,6 +38,32 @@ class BoneLengthConstraintFilter:
         self._target_length = {}
         self._frames_seen = {}
 
+    def seed(self, target_lengths, frames_seen=None):
+        """Pre-set per-bone targets from a prior calibration (see
+        body_calibration.py's TPoseCalibrator) instead of letting them
+        converge from whatever the first frame happens to measure.
+
+        frames_seen defaults to warmup_frames, which matters: filter()
+        branches on it, and anything LOWER would put the seeded target back
+        into the running-mean warmup where the next few raw frames would
+        largely overwrite it. At >= warmup_frames the seed goes straight
+        into the gated-EMA regime -- adapting slowly (length_alpha) and only
+        within [min_length_ratio, max_length_ratio], which is the point of
+        seeding: the calibration is trusted and defended, not averaged away.
+
+        target_lengths: {(parent, child): length}, in the same MotionBERT
+        root-relative units filter() sees. Non-finite or ~zero lengths are
+        skipped rather than stored, so a partial calibration seeds the bones
+        it does have and leaves the rest to converge normally.
+        """
+        frames = self.warmup_frames if frames_seen is None else int(frames_seen)
+        for edge, length in dict(target_lengths).items():
+            parent, child = int(edge[0]), int(edge[1])
+            length = float(length)
+            if np.isfinite(length) and length > 1e-8:
+                self._target_length[(parent, child)] = length
+                self._frames_seen[(parent, child)] = frames
+
     def target_lengths(self):
         """Returns {(parent, child): target_length} for every bone this
         filter has calibrated so far -- the per-subject scale summary to

@@ -3,22 +3,23 @@
 Two ways to get calibration images:
 
 1. Live capture from a camera:
-   python -m camera_utils.intrinsic_calibration `
+   uv run python 1_recognition/setup/calibration/intrinsic_calibration.py `
        --camera-index 0 --squares-x 7 --squares-y 9 `
        --square-length-mm 25 --marker-length-mm 19 `
-       --output ../dataset/calib_data/intrinsics.json
+       --output 1_recognition/calib_data/intrinsics.json
    Press SPACE to capture a frame once the board is detected, ESC/Q to stop
    capturing and run the calibration.
 
 2. From a folder of already-captured images:
-   python -m camera_utils.intrinsic_calibration `
+   uv run python 1_recognition/setup/calibration/intrinsic_calibration.py `
        --images-dir path/to/imgs --squares-x 7 --squares-y 9 `
        --square-length-mm 25 --marker-length-mm 19 `
-       --output ../dataset/calib_data/intrinsics.json
+       --output 1_recognition/calib_data/intrinsics.json
 
 ``--squares-x``/``--squares-y`` are the number of full checkerboard squares
 along each side (including the black ones) -- must match the board used to
-generate the print, i.e. generate_charuco_board.py's --squares-x/--squares-y.
+generate the print, i.e. generate_charuco_board.py's --squares-x/--squares-y
+(that script lives in the data-processing repo, LSTM_HRC/data_proc_3d/src/camera_utils/).
 """
 import argparse
 import sys
@@ -28,10 +29,18 @@ import cv2
 import numpy as np
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    # src/ for camera_utils, setup/ for the sibling calibration package.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from camera_utils.calibration_io import save_intrinsics
-from camera_utils.charuco_board import detect_charuco, draw_charuco_detection, make_charuco_board
+from calibration.charuco_board import detect_charuco, draw_charuco_detection, make_charuco_board
+from logging_setup import configure_logging, get_logger
+from video_source import (
+    DEFAULT_PREVIEW_WIDTH, add_capture_args, forget_preview_windows, open_camera,
+    preview_scale, show_preview)
+
+logger = get_logger(__name__)
 
 
 def imread_unicode(path):
@@ -66,8 +75,8 @@ def calibrate_from_images(image_paths, board, detector, min_corners=6):
 
         charuco_corners, charuco_ids = detect_charuco(detector, gray, min_corners=min_corners)
         if charuco_corners is None:
-            print(f"  [skip] fewer than {min_corners} ChArUco corners found in "
-                  f"{Path(path).name}")
+            logger.debug("  [skip] fewer than %d ChArUco corners found in %s",
+                         min_corners, Path(path).name)
             skipped += 1
             continue
 
@@ -86,17 +95,27 @@ def calibrate_from_images(image_paths, board, detector, min_corners=6):
             f"varied views for a stable calibration ({skipped} images skipped)."
         )
 
-    print(f"Calibrating from {used} views ({skipped} skipped)...")
+    logger.info("Calibrating from %d views (%d skipped)...", used, skipped)
     reprojection_error, K, dist, _, _ = cv2.calibrateCamera(
         all_object_points, all_image_points, image_size, None, None)
 
     return K, dist, image_size, reprojection_error
 
 
-def capture_from_camera(camera_index, detector, min_corners=6):
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        raise IOError(f"Could not open camera index {camera_index}")
+def capture_from_camera(camera_index, detector, min_corners=6,
+                         capture_width=None, capture_height=None, backend="auto",
+                         preview_width=DEFAULT_PREVIEW_WIDTH):
+    """Live ChArUco capture. The resolution requested here is the resolution
+    the resulting K is valid for, and nothing downstream can recover from
+    getting it wrong -- on Windows/DirectShow an unasked camera negotiates
+    640x480 however capable it is, so a 1080p camera would silently produce a
+    640x480 calibration. open_camera requests a mode and VERIFIES it against a
+    decoded frame (the capture properties lie; see video_source.py)."""
+    cap, actual = open_camera(camera_index, capture_width, capture_height, backend)
+    # Overlays are drawn full-size but shown downscaled; scale them to match.
+    s = preview_scale(actual[0], preview_width)
+    logger.info("Calibrating at %dx%d -- the intrinsics will only be valid at this "
+                "resolution.", actual[0], actual[1])
 
     print("Live capture: press SPACE to capture a frame when the ChArUco board "
           "is highlighted, ESC or Q to finish and calibrate.")
@@ -113,8 +132,9 @@ def capture_from_camera(camera_index, detector, min_corners=6):
             draw_charuco_detection(display, charuco_corners, charuco_ids)
             n_corners = 0 if charuco_ids is None else len(charuco_ids)
             cv2.putText(display, f"captured: {len(frames)}  (corners this frame: {n_corners})",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            cv2.imshow("intrinsic calibration - SPACE=capture, Q=done", display)
+                        (int(10 * s), int(30 * s)), cv2.FONT_HERSHEY_SIMPLEX, 0.8 * s,
+                        (0, 255, 0), max(int(2 * s), 1))
+            show_preview("intrinsic calibration - SPACE=capture, Q=done", display, preview_width)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord(" ") and charuco_corners is not None:
@@ -125,15 +145,23 @@ def capture_from_camera(camera_index, detector, min_corners=6):
     finally:
         cap.release()
         cv2.destroyAllWindows()
+        forget_preview_windows()
 
     return frames
 
 
 def run_intrinsic_calibration(images_dir, camera_index, squares_x, squares_y,
                                square_length_mm, marker_length_mm, aruco_dict,
-                               min_corners, output):
+                               min_corners, output, capture_width=None,
+                               capture_height=None, backend="auto",
+                               preview_width=DEFAULT_PREVIEW_WIDTH):
     """Shared entry point used by both this module's CLI and the
-    calibrate_camera app. Returns (K, dist, image_size, reprojection_error)."""
+    calibrate_camera app. Returns (K, dist, image_size, reprojection_error).
+
+    capture_width/height apply to live capture only -- images from
+    --images-dir are already whatever size they were taken at. Either way the
+    image_size written into the JSON is the size actually measured from the
+    frames, never the size that was requested."""
     board, detector = make_charuco_board(
         squares_x, squares_y,
         square_length_mm / 1000.0, marker_length_mm / 1000.0,
@@ -151,7 +179,10 @@ def run_intrinsic_calibration(images_dir, camera_index, squares_x, squares_y,
         K, dist, image_size, err = calibrate_from_images(
             image_paths, board, detector, min_corners=min_corners)
     else:
-        frames = capture_from_camera(camera_index, detector, min_corners=min_corners)
+        frames = capture_from_camera(camera_index, detector, min_corners=min_corners,
+                                     capture_width=capture_width,
+                                     capture_height=capture_height, backend=backend,
+                                     preview_width=preview_width)
         if len(frames) < 5:
             raise RuntimeError(f"Only captured {len(frames)} frame(s); need at least ~5-10.")
         tmp_dir = Path(output).resolve().parent / "_capture_tmp"
@@ -164,16 +195,17 @@ def run_intrinsic_calibration(images_dir, camera_index, squares_x, squares_y,
         K, dist, image_size, err = calibrate_from_images(
             tmp_paths, board, detector, min_corners=min_corners)
 
-    print(f"Reprojection error: {err:.4f} px")
-    print(f"K =\n{K}")
-    print(f"dist = {dist.ravel()}")
+    logger.info("Reprojection error: %.4f px", err)
+    logger.info("K =\n%s", K)
+    logger.info("dist = %s", dist.ravel())
 
     save_intrinsics(output, K, dist, image_size, reprojection_error=err)
-    print(f"Saved intrinsics to {output}")
+    logger.info("Saved intrinsics to %s", output)
     return K, dist, image_size, err
 
 
 def main():
+    configure_logging("intrinsic_calibration")
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--images-dir", type=str, default=None,
@@ -191,6 +223,7 @@ def main():
     parser.add_argument("--aruco-dict", type=str, default="DICT_5X5_50")
     parser.add_argument("--min-corners", type=int, default=6,
                          help="Minimum ChArUco corners required to accept a view.")
+    add_capture_args(parser)
     parser.add_argument("--output", type=str, required=True,
                          help="Where to write the intrinsics JSON file.")
     args = parser.parse_args()
@@ -199,9 +232,11 @@ def main():
         run_intrinsic_calibration(
             args.images_dir, args.camera_index, args.squares_x, args.squares_y,
             args.square_length_mm, args.marker_length_mm, args.aruco_dict,
-            args.min_corners, args.output)
+            args.min_corners, args.output,
+            capture_width=args.capture_width, capture_height=args.capture_height,
+            backend=args.backend, preview_width=args.preview_width)
     except RuntimeError as e:
-        print(e)
+        logger.error("%s", e)
 
 
 if __name__ == "__main__":

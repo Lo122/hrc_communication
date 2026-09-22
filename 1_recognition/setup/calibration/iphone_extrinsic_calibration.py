@@ -34,11 +34,11 @@ Physical setup and coordinate conventions are identical to
 extrinsic_calibration.py -- see that file's docstring.
 
 Usage:
-    python -m camera_utils.iphone_extrinsic_calibration `
-        --intrinsics ../dataset/calib_data/iphone_intrinsics.json `
+    uv run python 1_recognition/setup/calibration/iphone_extrinsic_calibration.py `
+        --intrinsics 1_recognition/calib_data/iphone_intrinsics.json `
         --squares-x 7 --squares-y 9 --square-length-mm 25 --marker-length-mm 19 `
         --capture-rotate90 90 `
-        --output ../dataset/calib_data/iphone_extrinsics.json
+        --output 1_recognition/calib_data/iphone_extrinsics.json
 
 Press SPACE to use the current frame's board detection, Q/ESC to abort.
 Pass --no-auto-gravity-correct to use the board's assumed orientation as-is
@@ -60,11 +60,13 @@ import cv2
 import numpy as np
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    # src/ for camera_utils, setup/ for the sibling calibration package.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from camera_utils.calibration_io import load_intrinsics, save_extrinsics
-from camera_utils.charuco_board import detect_charuco, draw_charuco_detection, make_charuco_board
-from camera_utils.extrinsic_calibration import (
+from calibration.charuco_board import detect_charuco, draw_charuco_detection, make_charuco_board
+from calibration.extrinsic_calibration import (
     detect_marker_in_frame, make_aruco_detector, solve_board_pose, solve_marker_pose,
 )
 from camera_utils.iphone_connection import (
@@ -72,8 +74,13 @@ from camera_utils.iphone_connection import (
     rotate_frame,
 )
 from camera_utils import transforms as tf
+from logging_setup import configure_logging, get_logger
+from video_source import forget_preview_windows, show_preview
 
-DEFAULT_CALIB_DIR = Path(__file__).resolve().parent.parent.parent / "dataset" / "calib_data"
+logger = get_logger(__name__)
+
+
+DEFAULT_CALIB_DIR = Path(__file__).resolve().parents[2] / "calib_data"
 IPHONE_EXTRINSICS_FILENAME = "iphone_extrinsics.json"
 
 
@@ -124,7 +131,7 @@ def capture_board_pose_from_iphone(dev_idx, board, detector, K, dist, min_corner
                 elif preview_rotate_deg != 0.0:
                     display = rotate_frame(display, preview_rotate_deg)
 
-                cv2.imshow("iphone extrinsic calibration", display)
+                show_preview("iphone extrinsic calibration", display)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord(" ") and charuco_corners is not None:
@@ -136,8 +143,9 @@ def capture_board_pose_from_iphone(dev_idx, board, detector, K, dist, min_corner
                 elif key in (27, ord("q")):
                     break
         except KeyboardInterrupt:
-            print("Interrupted by user.")
+            logger.warning("Interrupted by user.")
     cv2.destroyAllWindows()
+    forget_preview_windows()
 
     return T_camera_from_board, accepted_pose
 
@@ -181,7 +189,7 @@ def capture_marker_pose_from_iphone(dev_idx, detector, marker_id, marker_length_
                 elif preview_rotate_deg != 0.0:
                     display = rotate_frame(display, preview_rotate_deg)
 
-                cv2.imshow("iphone extrinsic calibration", display)
+                show_preview("iphone extrinsic calibration", display)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord(" ") and corners_2d is not None:
@@ -192,8 +200,9 @@ def capture_marker_pose_from_iphone(dev_idx, detector, marker_id, marker_length_
                 elif key in (27, ord("q")):
                     break
         except KeyboardInterrupt:
-            print("Interrupted by user.")
+            logger.warning("Interrupted by user.")
     cv2.destroyAllWindows()
+    forget_preview_windows()
 
     return T_camera_from_marker, accepted_pose
 
@@ -256,7 +265,7 @@ def run_iphone_extrinsic_calibration(intrinsics_path, dev_idx, squares_x, square
         capture_rotate90=capture_rotate90)
 
     if T_camera_from_board is None:
-        print("Failed to solve board pose. Aborting.")
+        logger.error("Failed to solve board pose. Aborting.")
         return None
 
     T_world_from_board = tf.make_transform(
@@ -266,20 +275,22 @@ def run_iphone_extrinsic_calibration(intrinsics_path, dev_idx, squares_x, square
 
     if auto_gravity_correct:
         if arkit_pose is None:
-            print("--auto-gravity-correct requested but no ARKit pose was available on the "
-                  "accepted frame; using the board-derived orientation as-is.")
+            logger.warning("--auto-gravity-correct requested but no ARKit pose was "
+                           "available on the accepted frame; using the board-derived "
+                           "orientation as-is.")
         else:
             T_world_from_camera, correction_deg = gravity_correct_rotation(
                 T_world_from_camera, arkit_pose, capture_rotate90=capture_rotate90)
-            print(f"Auto-gravity-correct: rotated T_world_from_camera by {correction_deg:.1f}deg "
-                  f"to match ARKit's measured gravity (this is how far off the board-assumed "
-                  f"orientation, i.e. --board-rpy-deg vs. how the board was actually placed, "
-                  f"was from true level -- large values are worth investigating physically).")
+            logger.info("Auto-gravity-correct: rotated T_world_from_camera by %.1fdeg to "
+                        "match ARKit's measured gravity (this is how far off the board-assumed "
+                        "orientation, i.e. --board-rpy-deg vs. how the board was actually "
+                        "placed, was from true level -- large values are worth investigating "
+                        "physically).", correction_deg)
 
     T_world_from_robot_base = tf.make_transform(
         tf.rpy_deg_to_matrix(*robot_base_rpy_deg), robot_base_xyz)
 
-    print(f"T_world_from_camera =\n{T_world_from_camera}")
+    logger.info("T_world_from_camera =\n%s", T_world_from_camera)
 
     save_extrinsics(
         output,
@@ -291,7 +302,7 @@ def run_iphone_extrinsic_calibration(intrinsics_path, dev_idx, squares_x, square
                f"marker_length_mm={marker_length_mm}, aruco_dict={aruco_dict}, source=Record3D, "
                f"auto_gravity_correct={auto_gravity_correct}, capture_rotate90={capture_rotate90}"),
     )
-    print(f"Saved extrinsics to {output}")
+    logger.info("Saved extrinsics to %s", output)
     return T_world_from_camera
 
 
@@ -313,7 +324,7 @@ def run_iphone_extrinsic_calibration_marker(intrinsics_path, dev_idx, marker_id,
         capture_rotate90=capture_rotate90)
 
     if T_camera_from_marker is None:
-        print("Failed to solve marker pose. Aborting.")
+        logger.error("Failed to solve marker pose. Aborting.")
         return None
 
     T_world_from_marker = tf.make_transform(
@@ -336,7 +347,7 @@ def run_iphone_extrinsic_calibration_marker(intrinsics_path, dev_idx, marker_id,
     T_world_from_robot_base = tf.make_transform(
         tf.rpy_deg_to_matrix(*robot_base_rpy_deg), robot_base_xyz)
 
-    print(f"T_world_from_camera =\n{T_world_from_camera}")
+    logger.info("T_world_from_camera =\n%s", T_world_from_camera)
 
     save_extrinsics(
         output,
@@ -348,11 +359,12 @@ def run_iphone_extrinsic_calibration_marker(intrinsics_path, dev_idx, marker_id,
                f"source=Record3D, auto_gravity_correct={auto_gravity_correct}, "
                f"capture_rotate90={capture_rotate90}"),
     )
-    print(f"Saved extrinsics to {output}")
+    logger.info("Saved extrinsics to %s", output)
     return T_world_from_camera
 
 
 def main():
+    configure_logging("iphone_extrinsic_calibration")
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--method", type=str, choices=("board", "marker"), default="board",

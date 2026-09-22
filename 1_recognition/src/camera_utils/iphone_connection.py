@@ -56,6 +56,10 @@ import time
 import cv2
 import numpy as np
 
+from logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 
 def _intrinsic_coeffs_to_matrix(coeffs):
     """record3d.Record3DStream.get_intrinsic_mat() returns an
@@ -236,6 +240,9 @@ class IPhoneCamera:
         self._stream = None
         self._generation = 0  # bumped on every successful connect; guards stale callbacks
         self._lock = threading.Lock()
+        # Separate from _lock on purpose: connecting is slow and must not block
+        # _on_new_frame, which takes _lock on every frame.
+        self._connect_lock = threading.Lock()
         self._latest = None  # (rgb, depth, intrinsic_mat, pose)
         self._new_frame_event = threading.Event()
         self._connected_event = threading.Event()
@@ -269,42 +276,71 @@ class IPhoneCamera:
             self._watchdog_thread.start()
         return self
 
+    def _close_stream(self):
+        """Tear down the current native stream, if any, and forget it.
+
+        Every (re)connect must go through this first. A Record3DStream that is
+        merely dropped on the floor keeps its usbmuxd session open until the GC
+        finalizes it -- so without this, each disconnect leaves an orphan still
+        attached to the phone, and the replacement stream's connect() contends
+        with it for the same device. That is what makes repeated drops get
+        progressively harder to recover from rather than each one being
+        independent.
+        """
+        stream, self._stream = self._stream, None
+        if stream is None:
+            return
+        try:
+            stream.disconnect()
+        except Exception:
+            # A stream whose USB session already died can raise here; there is
+            # nothing to salvage and the caller is about to open a fresh one.
+            logger.debug("IPhoneCamera: disconnecting the old stream failed.", exc_info=True)
+
     def _connect_once(self, raise_if_absent):
         """Try to (re)connect once. Returns True on success, False if no device
         was found (and raise_if_absent is False)."""
         from record3d import Record3DStream
 
-        devices = self.list_devices()
-        if not devices or self._dev_idx >= len(devices):
-            if raise_if_absent:
-                raise IOError(
-                    "No Record3D devices found. Make sure the Record3D app is open "
-                    "on the iPhone, the phone is connected via USB, and 'USB "
-                    "Streaming' is enabled in the app."
-                )
-            return False
+        # connect() (main thread) and the watchdog can both land here. Two
+        # overlapping attempts would each build a stream and race to store it,
+        # leaking whichever lost -- the same orphan problem _close_stream fixes.
+        with self._connect_lock:
+            devices = self.list_devices()
+            if not devices or self._dev_idx >= len(devices):
+                if raise_if_absent:
+                    raise IOError(
+                        "No Record3D devices found. Make sure the Record3D app is open "
+                        "on the iPhone, the phone is connected via USB, and 'USB "
+                        "Streaming' is enabled in the app."
+                    )
+                return False
 
-        generation = self._generation + 1
+            self._close_stream()
 
-        stream = Record3DStream()
-        stream.on_new_frame = lambda: self._on_new_frame(stream, generation)
-        stream.on_stream_stopped = lambda: self._on_stream_stopped(generation)
-        stream.connect(devices[self._dev_idx])
+            generation = self._generation + 1
 
-        self._stream = stream
-        self._generation = generation
-        self._connected_event.set()
-        return True
+            stream = Record3DStream()
+            stream.on_new_frame = lambda: self._on_new_frame(stream, generation)
+            stream.on_stream_stopped = lambda: self._on_stream_stopped(generation)
+            stream.connect(devices[self._dev_idx])
+
+            self._stream = stream
+            self._generation = generation
+            self._connected_event.set()
+            return True
 
     def disconnect(self):
         self._stop_event.set()
         self._connected_event.clear()
+        # Wake anyone blocked in get_latest_frame rather than making them sit
+        # out their full timeout against a camera that is going away.
+        self._new_frame_event.set()
         if self._watchdog_thread is not None:
             self._watchdog_thread.join(timeout=self._reconnect_interval_sec + 1.0)
             self._watchdog_thread = None
-        if self._stream is not None:
-            self._stream.disconnect()
-            self._stream = None
+        with self._connect_lock:
+            self._close_stream()
 
     def __enter__(self):
         self.connect()
@@ -328,37 +364,53 @@ class IPhoneCamera:
             # matters far more than the display-only rotate_frame below.
             h, w = rgb.shape[:2]
             flag = _ROTATE_FLAGS[self._capture_rotate90]
-            rgb = cv2.rotate(rgb, flag)
+            rgb = cv2.rotate(rgb, flag)      # allocates, so _latest owns its pixels
             depth = cv2.rotate(depth, flag)
             intrinsic_mat, _ = _rotate_intrinsics_90(intrinsic_mat, (w, h), self._capture_rotate90)
+        else:
+            # Unrotated, get_rgb_frame()/get_depth_frame() may hand back a VIEW of a
+            # buffer the native side reuses for the next frame. Publishing that view
+            # would let a consumer read a half-written frame, or one whose memory was
+            # freed by a disconnect. Rotation above copies as a side effect; with no
+            # rotation nothing else would.
+            rgb = np.array(rgb, copy=True)
+            depth = np.array(depth, copy=True)
         with self._lock:
             self._latest = (rgb, depth, intrinsic_mat, pose)
-        self._new_frame_event.set()
+            # Set under the lock, paired with the clear in get_latest_frame, so a
+            # frame arriving mid-handover cannot have its notification dropped.
+            self._new_frame_event.set()
 
     def _on_stream_stopped(self, generation):
         if generation != self._generation:
             return  # already superseded by a newer (re)connection
         with self._lock:
             self._latest = None
+            # Wake readers immediately instead of leaving them to time out against
+            # a stream that is already gone -- they get None and can see
+            # is_connected is False, which is the whole point of the flag.
+            self._new_frame_event.set()
         self._connected_event.clear()
-        print("IPhoneCamera: stream disconnected.")
+        logger.warning("IPhoneCamera: stream disconnected.")
 
     def _watchdog_loop(self):
         while not self._stop_event.is_set():
             if not self._connected_event.is_set():
                 if self._connect_once(raise_if_absent=False):
-                    print("IPhoneCamera: reconnected.")
+                    logger.info("IPhoneCamera: reconnected.")
             self._stop_event.wait(self._reconnect_interval_sec)
 
     def get_latest_frame(self, timeout=None):
         """Return the most recently received (rgb, depth, intrinsic_mat, pose), or None
         (including while disconnected and waiting to reconnect -- see is_connected)."""
-        if timeout is not None:
-            got_frame = self._new_frame_event.wait(timeout=timeout)
-            self._new_frame_event.clear()
-            if not got_frame:
-                return None
+        if timeout is not None and not self._new_frame_event.wait(timeout=timeout):
+            return None
         with self._lock:
+            # Clear under the same lock the producer sets it under, and only once
+            # the snapshot is in hand. Clearing after wait() but outside the lock
+            # would discard the notification for any frame that landed in between,
+            # so the NEXT call would block for the frame after that one.
+            self._new_frame_event.clear()
             return self._latest
 
 
@@ -388,6 +440,12 @@ class IPhoneVideoCaptureAdapter:
         self._max_wait_sec = max_wait_sec
         self._cam.connect()
         self.last_pose = None
+        # Same "cache it beside the VideoCapture-alike API" trick as last_pose: the
+        # device reports fx/fy/cx/cy with every frame and they MOVE with autofocus
+        # (measured 0.57% on an iPhone at 1920x1440), but (ok, frame) has nowhere to
+        # put them. Consumers that care read this after each read(); those that don't
+        # keep using the calibrated file K and are unaffected.
+        self.last_intrinsics = None
 
     def isOpened(self):
         return True
@@ -399,10 +457,12 @@ class IPhoneVideoCaptureAdapter:
         while time.time() < deadline:
             result = self._cam.get_latest_frame(timeout=1.0)
             if result is not None:
-                rgb, _depth, _intrinsic_mat, pose = result
+                rgb, _depth, intrinsic_mat, pose = result
                 self.last_pose = pose
+                self.last_intrinsics = intrinsic_mat
                 return True, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         self.last_pose = None
+        self.last_intrinsics = None
         return False, None
 
     def release(self):

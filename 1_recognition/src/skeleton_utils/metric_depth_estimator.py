@@ -159,7 +159,8 @@ class MetricDepthEstimator:
         return state
 
     def update(self, track_id: int, keypoints_2d, user_height_meters: float = 1.70,
-               pitch_angle_rad: float = 0.0, timestamp: float = None) -> float:
+               pitch_angle_rad: float = 0.0, timestamp: float = None,
+               focal_length_y: float = None) -> float:
         """Feed one new frame's keypoints for one tracked person; returns
         the current filtered metric depth estimate (meters), or None if
         this person has never had a usable measurement yet.
@@ -192,7 +193,12 @@ class MetricDepthEstimator:
                 cos_pitch = max(math.cos(pitch_angle_rad), 0.2)
                 h_torso_corrected = h_torso_pixels / cos_pitch
 
-                z_raw = (self.focal_length_y * h_torso_meters) / h_torso_corrected
+                # A source that reports its own intrinsics per frame (an iPhone via
+                # Record3D does; a webcam does not) can pass fy for THIS frame, so
+                # autofocus moving the focal length does not silently rescale depth --
+                # z is linear in fy, so a 0.6% focus swing is 0.6% on every position.
+                fy = self.focal_length_y if focal_length_y is None else float(focal_length_y)
+                z_raw = (fy * h_torso_meters) / h_torso_corrected
                 z_filtered = state.filter(z_raw, timestamp)
                 state.last_depth = z_filtered
                 return z_filtered
