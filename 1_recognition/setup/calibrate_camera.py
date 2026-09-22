@@ -91,7 +91,7 @@ Record3D / iPhone:
         --marker-id 0 --marker-length-mm 200 --ground-z -0.70
 
     # both back to back (add --use-reported-intrinsics to skip the board)
-    $env:UV_PROJECT_ENVIRONMENT = "C:\Users\Owner\.venvs\hrc_communication"
+    $env:UV_PROJECT_ENVIRONMENT = "C:\\Users\\Owner\\.venvs\\hrc_communication"
     uv run python 1_recognition/setup/calibrate_camera.py iphone-full `
         --capture-rotate90 270 `
         --use-reported-intrinsics --num-samples 60 `
@@ -100,8 +100,8 @@ Record3D / iPhone:
         --ground-z -0.70 `
         --intrinsics-output 1_recognition/calib_data/iphone_intrinsics.json `
         --extrinsics-output 1_recognition/calib_data/iphone_extrinsics.json
+        """
 
-"""
 import argparse
 import sys
 from pathlib import Path
