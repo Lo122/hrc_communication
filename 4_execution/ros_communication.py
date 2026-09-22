@@ -43,6 +43,7 @@ class ROSCommunication:
         self._subscriptions = []
         self.latest_joint_positions = None
         self.latest_gripper_open = None
+        self.r_task_done = None
 
         if auto_connect:
             self.connect()
@@ -97,7 +98,7 @@ class ROSCommunication:
 
     def publish_pause(self) -> None:
         """Temporarily stop motion without overwriting the task's saved speed."""
-        self.publish_global_speed(config.MIN_SPEED)
+        self.publish_global_speed(config.MIN_SPEED)  # ROS speed topics are Float64, not zero, to avoid divide-by-zero errors
 
     def publish_resume(self, speed: float) -> None:
         """Restore the task speed saved by TaskManager."""
@@ -108,6 +109,9 @@ class ROSCommunication:
 
     def publish_cancel(self) -> None:
         self._publish_control("stop")
+    
+    def publish_real_pause(self) ->None:
+        self._publish_control("pause")
 
     def publish_return_home(self) -> None:
         self._publish_control("home")
@@ -134,7 +138,7 @@ class ROSCommunication:
         keypoints: dict[str, dict[str, float]] | None = None,
     ) -> None:
         """Publish the human's world-frame position (see
-        1_recognition/skeleton3d_pipeline.py's world_root_xyz -- same
+        1_recognition/src/skeleton3d_pipeline.py's world_root_xyz -- same
         world frame as /UR10/position/live, defined by the calibrated
         extrinsics) for downstream consumers like path planning, plus
         their pelvis-relative posture as an H36M-17 keypoint dict (see
@@ -167,6 +171,14 @@ class ROSCommunication:
         }
 
     def _init_subscribers(self) -> None:
+        topic = roslibpy.Topic(
+            self.client,
+            config.ROS_TOPICS["r_task_done"],
+            "std_msgs/String",
+        )
+        topic.subscribe(self._on_robot_task_done_signal)
+        self._subscriptions.append(topic)
+
         topic = roslibpy.Topic(
             self.client,
             config.ROS_TOPICS["robot_success"],
@@ -236,14 +248,19 @@ class ROSCommunication:
             return None
         return not self.latest_gripper_open
     def _on_robot_status_message(self, message: dict) -> None:
-        """Create robot status events from /Robot/status/physical."""
+        """Create return-home events from /Robot/status/physical."""
         status = message.get("data") if isinstance(message, dict) else message
-        if status == "running":
-            self._emit_robot_status_event(EventType.ROBOT_RUNNING, message)
-        elif status == "success":
-            self._emit_robot_status_event(EventType.ROBOT_SUCCESS, message)
-        elif status == "homed":
+        if status == "homed":
             self._emit_robot_status_event(EventType.ROBOT_HOMED, message)
+
+    def _on_robot_task_done_signal(self, message: dict) -> None:
+        """Create task lifecycle events from /Task/signal."""
+        status = message.get("data") if isinstance(message, dict) else message
+        if status == "start_job":
+            self._emit_robot_status_event(EventType.ROBOT_RUNNING, message)
+        elif status == "end_job":
+            self._emit_robot_status_event(EventType.ROBOT_SUCCESS, message)
+
 
     def _emit_robot_status_event(self, event_type: EventType, message) -> None:
         event = Event(

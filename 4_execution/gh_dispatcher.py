@@ -18,7 +18,7 @@ class GHDispatcher:
 
     def dispatch_human_location(self, xyz: tuple[float, float, float], timestamp: float | None = None) -> dict:
         """Send the human's world-frame position (see
-        1_recognition/skeleton3d_pipeline.py's world_root_xyz) to Grasshopper."""
+        1_recognition/src/skeleton3d_pipeline.py's world_root_xyz) to Grasshopper."""
         message = self.build_human_location_message(xyz, timestamp)
         self.udp_sender.send(message)
         return message
@@ -31,9 +31,10 @@ class GHDispatcher:
 
     def build_message(self, task: RobotTask) -> dict:
         """Create the outbound Grasshopper JSON message."""
-        step_message = config.GH_STEP_MESSAGES.get(task.step_id, {})
+        step_message = config.GH_STEP_MESSAGES[task.task_id]
         return {
-            "step_id": int(task.step_id),
+            "step_id": int(task.task_id),
+            "human_step_id": int(task.step_id),
             "progress": float(task.progress),
             "piece_id": int(task.piece_id),
             "round_id": int(task.round_id),

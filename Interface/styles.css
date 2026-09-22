@@ -1,0 +1,284 @@
+:root {
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+  background: #e9e9ee;
+  color: #f5f5f7;
+  font-synthesis: none;
+  --watch-width: min(88vw, 25.625rem);
+  --accent: #0a84ff;
+  --green: #30d158;
+  --surface-raised: #2c2c2e;
+  --muted: #a1a1a6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 20rem;
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at 50% 22%, rgba(255, 255, 255, 0.95), transparent 32rem),
+    linear-gradient(145deg, #f1f1f4, #d8d8de);
+}
+
+button {
+  font: inherit;
+}
+
+.demo-shell {
+  display: grid;
+  justify-items: center;
+  padding: 2rem 1rem;
+}
+
+.watch {
+  width: var(--watch-width);
+  aspect-ratio: 410 / 502;
+  padding: 0.625rem;
+  border-radius: 5.25rem;
+  background: linear-gradient(145deg, #27272a 0%, #050506 45%, #1a1a1c 100%);
+  box-shadow:
+    0 2.3rem 4.5rem rgba(34, 34, 42, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 0 0 3px rgba(0, 0, 0, 0.65);
+}
+
+.watch-screen {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 4.7rem;
+  padding: 1.55rem 1.4rem 1.35rem;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(58, 58, 64, 0.5), transparent 48%),
+    #050506;
+}
+
+.status-bar {
+  height: 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #d1d1d6;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.025em;
+}
+
+.connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+}
+
+.connection-dot {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0.5rem rgba(48, 209, 88, 0.8);
+}
+
+.view {
+  position: absolute;
+  inset: 4rem 1.4rem 1.4rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.view-heading {
+  margin-top: 0.55rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.45rem;
+  color: #64d2ff;
+  font-size: 0.74rem;
+  font-weight: 750;
+  letter-spacing: 0.11em;
+}
+
+h1 {
+  margin: 0;
+  max-width: 17rem;
+  color: #fff;
+  font-size: clamp(1.75rem, 7vw, 2.15rem);
+  font-weight: 700;
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+}
+
+.supporting-text {
+  margin: 0.62rem 0 0;
+  color: var(--muted);
+  font-size: 0.98rem;
+  line-height: 1.35;
+}
+
+.permission-actions {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 0.65rem;
+}
+
+.button-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem;
+}
+
+.button {
+  min-height: 4.2rem;
+  border: 0;
+  border-radius: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  padding: 0.8rem 1rem;
+  color: #fff;
+  background: var(--surface-raised);
+  font-size: 1.08rem;
+  font-weight: 680;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 120ms ease, filter 120ms ease;
+}
+
+.button-primary {
+  min-height: 4.75rem;
+  background: var(--accent);
+  font-size: 1.17rem;
+}
+
+.button-icon {
+  display: grid;
+  width: 1.65rem;
+  height: 1.65rem;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  font-size: 1.05rem;
+}
+
+.clock-icon {
+  position: relative;
+}
+
+.clock-icon::before,
+.clock-icon::after {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0.11rem;
+  height: 0.48rem;
+  border-radius: 999px;
+  background: currentColor;
+  content: "";
+  transform-origin: 50% 0;
+}
+
+.clock-icon::before {
+  transform: translate(-50%, 0) rotate(180deg);
+}
+
+.clock-icon::after {
+  height: 0.38rem;
+  transform: translate(-50%, 0) rotate(125deg);
+}
+
+.button:hover {
+  filter: brightness(1.12);
+}
+
+.button:active {
+  transform: scale(0.96);
+}
+
+.permission-actions.has-response .button {
+  cursor: default;
+}
+
+.permission-actions.has-response .button:not(.is-selected) {
+  opacity: 0.34;
+}
+
+.button.is-selected {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.9);
+}
+
+.permission-actions:not(.has-response) .button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+button:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+
+.feedback {
+  min-height: 2.3rem;
+  align-self: center;
+  margin-top: auto;
+  max-width: calc(100% - 2.8rem);
+  padding: 0.62rem 0.9rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(44, 44, 46, 0.94);
+  box-shadow: 0 0.6rem 1.5rem rgba(0, 0, 0, 0.42);
+  font-size: 0.76rem;
+  font-weight: 650;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(0.45rem);
+  pointer-events: none;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.feedback.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (max-width: 430px), (max-height: 650px) {
+  :root {
+    --watch-width: min(94vw, 22rem, calc(92vh * 410 / 502));
+  }
+
+  .demo-shell {
+    padding-block: 0.8rem;
+  }
+
+  .watch {
+    padding: 0.5rem;
+    border-radius: 4.5rem;
+  }
+
+  .watch-screen {
+    border-radius: 4rem;
+    padding-inline: 1.2rem;
+  }
+
+  .view {
+    inset-inline: 1.2rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

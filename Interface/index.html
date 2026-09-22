@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#050506" />
+    <title>HRC Watch Interface Demo</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="demo-shell" aria-label="HRC watch interface demo">
+      <section class="watch" aria-label="Simulated watch screen">
+        <div class="watch-screen">
+          <header class="status-bar" aria-label="Watch status">
+            <span class="connection"><span class="connection-dot"></span>HRC</span>
+            <time id="clock" datetime="">--:--</time>
+          </header>
+
+          <div class="view" aria-labelledby="permission-title">
+            <div class="view-heading">
+              <p class="eyebrow">HUMAN STEP 0</p>
+              <h1 id="permission-title">Lift the panel?</h1>
+              <p id="permission-detail" class="supporting-text">Waiting for H0…</p>
+            </div>
+
+            <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
+
+            <div class="permission-actions" aria-label="Respond to robot request">
+              <button class="button button-primary" type="button" data-command="H_ACCEPT" disabled>
+                <span class="button-icon" aria-hidden="true">✓</span>
+                <span>Start</span>
+              </button>
+              <div class="button-row">
+                <button class="button button-secondary" type="button" data-command="H_REFUSE" disabled>
+                  <span class="button-icon" aria-hidden="true">×</span>
+                  <span>No</span>
+                </button>
+                <button class="button button-secondary" type="button" data-command="H_DEFER" disabled>
+                  <span class="button-icon clock-icon" aria-hidden="true"></span>
+                  <span>In 5 sec</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
