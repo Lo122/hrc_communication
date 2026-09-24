@@ -40,18 +40,18 @@ TASK_RETURN_CLAMPING_TOOL = 5
 TRIGGER_RULES = {
     HUMAN_PULL_CABLES: {
         "task_id": TASK_LIFT_PANEL,
-        "progress_threshold": 0.1,
-        "min_confidence": 0.1,
+        "progress_threshold": 0.2,
+        "min_confidence": 0.7,
     },
     HUMAN_CONNECT_PIPES: {
         "task_id": TASK_BRING_CLAMPING_TOOL,
         "progress_threshold": 0.1,
-        "min_confidence": 0.1,
+        "min_confidence": 0.5,
     },
     HUMAN_CLAMP_TOOL: {
         "task_id": TASK_RETURN_CLAMPING_TOOL,
         "progress_threshold": 0.1,
-        "min_confidence": 0.1,
+        "min_confidence": 0.5,
     },
 }
 
@@ -140,7 +140,7 @@ VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-
 # laptop is a virtual NDI webcam audio device (no real signal) rather than the
 # physical mic -- pin it explicitly. Run `uv run python -m sounddevice` to list
 # devices and update this if the laptop's mic name/index differs.
-VOICE_INPUT_DEVICE_NAME = "Microphone Array (AMD Audio Dev"
+VOICE_INPUT_DEVICE_NAME = None
 VOICE_OUTPUT_DEVICE_NAME = None
 VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
 VOICE_TTS_RATE = 220

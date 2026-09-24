@@ -588,6 +588,17 @@ if __name__ == "__main__":
             if total:
                 print(f"[realtime playback] model saw {read}/{total} frames "
                       f"({100.0 * read / total:.1f}%), dropped {dropped} to processing latency.")
+        elif args.iphone:
+            # The iPhone capture keeps only the newest frame, so frames arriving while
+            # update() runs or the loop sleeps are overwritten, just as with a camera.
+            read = recognition_manager.playback_frames_read
+            dropped = recognition_manager.playback_frames_dropped
+            total = read + dropped
+            if total:
+                age_s = recognition_manager.live_frame_age_mean_s
+                age_text = f", mean frame age {age_s * 1000:.0f} ms" if age_s is not None else ""
+                print(f"[iphone] model saw {read}/{total} frames "
+                      f"({100.0 * read / total:.1f}%), dropped {dropped} as stale{age_text}.")
         if run_logger is not None:
             summary = run_logger.close(recognition_manager)
             print(f"[run log] {run_logger.run_dir}")

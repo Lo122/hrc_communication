@@ -270,7 +270,8 @@ class DebugView:
         maxlen = self._progress_history.maxlen or 1
 
         if y_range is None:
-            values = [v for values, _color, _label in series for v in values]
+            # NaN/inf would poison min/max and so the whole axis, not just one sample.
+            values = [v for values, _color, _label in series for v in values if np.isfinite(v)]
             if values:
                 lo, hi = min(values), max(values)
                 margin = max((hi - lo) * 0.1, 0.05)
@@ -289,8 +290,21 @@ class DebugView:
             n = len(values)
             if n < 2:
                 continue
-            points = [to_point(i, v, n) for i, v in enumerate(values)]
-            cv2.polylines(canvas, [np.array(points, dtype=np.int32)], False, color, 1, cv2.LINE_AA)
+            # A non-finite sample (e.g. a NaN score while the camera is reconnecting)
+            # has no pixel position, so it breaks the line into separate runs
+            # instead of crashing the int conversion in to_point.
+            runs, run = [], []
+            for i, v in enumerate(values):
+                if np.isfinite(v):
+                    run.append(to_point(i, v, n))
+                elif run:
+                    runs.append(run)
+                    run = []
+            if run:
+                runs.append(run)
+            runs = [np.array(r, dtype=np.int32) for r in runs if len(r) >= 2]
+            if runs:
+                cv2.polylines(canvas, runs, False, color, 1, cv2.LINE_AA)
 
         legend = f"{title}  [" + ", ".join(label for _v, _c, label in series) + f"]  y:[{y_lo:.2f},{y_hi:.2f}]"
         cv2.putText(canvas, legend, (6, row0 + 14), cv2.FONT_HERSHEY_SIMPLEX,

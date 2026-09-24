@@ -9,7 +9,7 @@ class StepIdStabilizer:
         num_steps=7,
         smoothing_window=5,
         confirmation_count=3,
-        min_confidence=0.6,
+        min_confidence=0.2,
         min_margin=0.15,
         allowed_transitions=None,
     ):

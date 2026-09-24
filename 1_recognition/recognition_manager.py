@@ -48,7 +48,7 @@ COMPOSITE_FEATURE_KEYS = {"pol_angles": ("polar_azimuth", "polar_elevation")}
 
 STEP_SMOOTHING_WINDOW = 5
 STEP_CONFIRMATION_COUNT = 3
-STEP_MIN_CONFIDENCE = 0.4
+STEP_MIN_CONFIDENCE = 0.2
 STEP_MIN_MARGIN = 0.10
 
 
@@ -198,6 +198,14 @@ class RecognitionManager:
     @property
     def playback_frames_dropped(self) -> int:
         return self._frames.frames_dropped
+
+    @property
+    def live_frame_age_mean_s(self) -> float | None:
+        """Mean capture-to-read age of live frames, for sources that report it
+        (iPhone). Stays small when the loop is keeping up with the camera."""
+        if not self._frames.frames_read or not self._frames.frame_age_sum_s:
+            return None
+        return self._frames.frame_age_sum_s / self._frames.frames_read
 
     @property
     def T_world_from_camera(self):
