@@ -62,3 +62,8 @@ explicit = true
 [tool.uv]
 package = false
 environments = ["sys_platform == 'win32'"]
+# Copy instead of hardlinking out of the uv cache: OneDrive's cloud-files filter
+# (cldflt) attaches to all of C: and intermittently rejects hardlink creation with
+# os error 396, ERROR_CLOUD_FILE_INCOMPATIBLE_HARDLINKS. Wheels with many small
+# files (pytz's zoneinfo tree) trip it most often.
+link-mode = "copy"

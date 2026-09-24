@@ -1,5 +1,22 @@
 ﻿"""Configuration values and mappings for the HRC communication system."""
 
+# The LSTM step head's output class names, in output-index order (index == the
+# model's step_head column). Mirrors LSTM_HRC/data_proc_3d/src/skeleton_pipeline/
+# dataset/labels.py's LABEL_MAP_DICT entries 0-6 -- that repo runs in its own
+# separate venv (see that file's docstring) so the names are copied here by hand
+# rather than imported; keep in sync if the label taxonomy changes. Entry 7
+# ("Mistake") and 8 ("No Related Task") are not part of this 7-class step head
+# (best_model/*/config.json's "num_steps": 7).
+STEP_NAMES = [
+    "Pull Cables",
+    "Lift",
+    "Place",
+    "Align",
+    "Screw",
+    "Connect Cables",
+    "Clamp Coupling",
+]
+
 RESPONSE_TIMEOUT_SECONDS = 20.0
 DEFER_SECONDS = 5.0
 RECOVERY_STOP_DELAY_SECONDS = 0.5

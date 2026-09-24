@@ -51,6 +51,10 @@ STEP_CONFIRMATION_COUNT = 3
 STEP_MIN_CONFIDENCE = 0.4
 STEP_MIN_MARGIN = 0.10
 
+# Log one in every N frames that carry non-finite features or predictions -- see the
+# counters in __init__.
+NONFINITE_FEATURE_LOG_EVERY = 100
+
 
 class RecognitionManager:
     """Converts passthrough data or camera frames into a RecognitionResult."""
@@ -74,6 +78,8 @@ class RecognitionManager:
         plot_history_len: int = 300,
         enable_step_model: bool = True,
         render_world_skeleton: bool = False,
+        record_path: str | Path | None = None,
+        record_fps: float = 20.0,
         vision_config: VisionConfig | None = None,
     ):
         self.step_stabilizer = step_stabilizer
@@ -106,7 +112,8 @@ class RecognitionManager:
             self.vision_config.camera.video_source = video_source
 
         # Both are inert until used: neither imports cv2 at construction, and the view is
-        # a no-op entirely when show_video is False.
+        # a no-op entirely when show_video is False AND no record_path is given (a
+        # recording still needs the compositing work done, just not the windows).
         self._frames = FrameSource(self.vision_config.camera,
                                    fallback_fps=self.vision_config.fps)
         self._view = DebugView(
@@ -115,7 +122,8 @@ class RecognitionManager:
             plot_window_name=plot_window_name, plot_panel_size=plot_panel_size,
             history_len=plot_history_len,
             conf_threshold=self.vision_config.conf_threshold,
-            render_world_skeleton=render_world_skeleton)
+            render_world_skeleton=render_world_skeleton,
+            record_path=record_path, record_fps=record_fps)
 
         self.window_size: int | None = None
         self.num_steps: int | None = None
@@ -170,6 +178,12 @@ class RecognitionManager:
         self.seen_trigger_steps_in_round: set[int] = set()
         self._last_recorded_step_id: int | None = None
         self.last_raw_step_id = None
+
+        # Counters behind the throttled non-finite warnings below. Both conditions
+        # persist for as long as nobody is in frame, so logging every frame would bury
+        # the run log at loop_hz.
+        self._nonfinite_feature_frames = 0
+        self._nonfinite_prediction_frames = 0
 
     # -- capture state, read by run_recognition.py and eval/run_logger.py ---
 
@@ -316,6 +330,23 @@ class RecognitionManager:
         features = self._feature_extractor.update(pipeline_out["root_relative"], frame_timestamp)
         features = self._norm_real_time.normalize_features(features)
         feature_vector = self._build_feature_vector(features)
+        if not np.all(np.isfinite(feature_vector)):
+            # With nobody in frame the feature extractor holds a zero skeleton, and
+            # panels that divide by a body dimension (the ratios panel's shoulder
+            # width, the polar angles' radius) then divide by zero. Left alone that
+            # NaN survives the LSTM as NaN logits, so a single undetected frame makes
+            # every prediction NaN for the whole window_size that follows -- and the
+            # debug plot's int(round(nan)) turns that into a crash.
+            #
+            # Zeros match what the extractor already substitutes for an absent body,
+            # so the damage stays on this frame instead of spreading through the window.
+            self._nonfinite_feature_frames += 1
+            if self._nonfinite_feature_frames % NONFINITE_FEATURE_LOG_EVERY == 1:
+                logger.warning(
+                    "Non-finite features at t=%.3f (%d frame(s) so far); substituting "
+                    "zeros. Normally means no person has been detected.",
+                    frame_timestamp, self._nonfinite_feature_frames)
+            feature_vector = np.nan_to_num(feature_vector, nan=0.0, posinf=0.0, neginf=0.0)
 
         self.buffer.append(feature_vector)
         if len(self.buffer) < self.window_size:
@@ -339,6 +370,21 @@ class RecognitionManager:
                              else torch.softmax(mistake_logits, dim=1).squeeze(0).cpu().numpy())
 
         probabilities = step_probs.squeeze(0).cpu().numpy()
+        if not (np.isfinite(confidence) and np.isfinite(progress)
+                and np.all(np.isfinite(probabilities))):
+            # Belt to the feature guard's braces: whatever produced it, a non-finite
+            # prediction is not a prediction. Publishing it would seed the stabilizer's
+            # smoothing window with NaN (which then never recovers, since NaN loses
+            # every comparison) and push NaN into the debug plot. The frame is treated
+            # exactly like the warm-up case: displayed, not predicted from.
+            self._nonfinite_prediction_frames += 1
+            if self._nonfinite_prediction_frames % NONFINITE_FEATURE_LOG_EVERY == 1:
+                logger.warning(
+                    "Model produced a non-finite prediction at t=%.3f (%d frame(s) so "
+                    "far); skipping it.", frame_timestamp, self._nonfinite_prediction_frames)
+            self._show(frame, pipeline_out)
+            return None
+
         self.last_step_probabilities = probabilities
         self.last_mistake_probabilities = mistake_probs
         # Class 0 is "no mistake", so the mistake SCORE is 1 - P(class 0) -- with

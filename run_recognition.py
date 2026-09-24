@@ -31,11 +31,12 @@ Usage:
 
     uv run python run_recognition.py `
         --video-source 6 `
-        --fake-recognition `
+        --model-dir 1_recognition/best_model/3d_skeleton_01 `
         --intrinsics-file intrinsics_640x360_obs.json `
         --extrinsics-file extrinsics_3840x2160_obs.json `
         --body-calibration 1_recognition/calib_data/body_uid-08.json `
-        --fp16
+        --fp16 `
+        --record 1_recognition/results/recognition_test/detection_test.mp4
 
     
     uv run python run_recognition.py `
@@ -212,6 +213,16 @@ def _parse_args() -> argparse.Namespace:
                               "axes -- absolute position is already shown by the World XYZ "
                               "overlay, so this is only useful when checking the extrinsics "
                               "themselves.")
+    parser.add_argument("--record", default=None, metavar="PATH",
+                         help="Also write the render screen -- the 2D overlay beside the "
+                              "3D panel, with the model readout burned in, i.e. exactly "
+                              "what the preview window shows -- to this .mp4. Works with "
+                              "--no-display for a headless capture. The scrolling debug "
+                              "plot is a separate window and is not recorded.")
+    parser.add_argument("--record-fps", type=float, default=None,
+                         help="Frame rate stamped into the --record file. Defaults to "
+                              "--loop-hz, which is the rate frames are actually rendered "
+                              "at, so the recording plays back at wall-clock speed.")
     parser.add_argument("--show-probabilities", action="store_true",
                          help="Show a live line-graph preview window of each task step's "
                               "softmax probability and the progress value over time -- see "
@@ -452,6 +463,8 @@ if __name__ == "__main__":
         model_dir=args.model_dir, video_source=source, show_video=not args.no_display,
         enable_step_model=not args.fake_recognition,
         render_world_skeleton=args.render_world_skeleton,
+        record_path=args.record,
+        record_fps=args.record_fps if args.record_fps is not None else args.loop_hz,
         vision_config=_build_vision_config(args))
     trigger_manager = TriggerManager()
     probability_plot: StepProbabilityPlot | None = None
@@ -460,6 +473,8 @@ if __name__ == "__main__":
 
     print(f"Recognition running with source: {source}")
     print(f"Publishing recognition events to {args.host}:{args.port}")
+    if args.record:
+        print(f"Recording the render screen to {args.record}")
 
     if args.fake_recognition:
         # Vision runs for real; only step classification comes from stdin.
@@ -523,9 +538,13 @@ if __name__ == "__main__":
                 probs_timestamp = recognition_manager.last_step_probabilities_timestamp
                 if probs_timestamp is not None and probs_timestamp != last_plotted_probabilities_timestamp:
                     if probability_plot is None:
+                        step_labels = (config.STEP_NAMES
+                                       if len(config.STEP_NAMES) == recognition_manager.num_steps
+                                       else None)
                         probability_plot = StepProbabilityPlot(
                             recognition_manager.num_steps,
-                            history_seconds=args.probability_history_seconds)
+                            history_seconds=args.probability_history_seconds,
+                            step_labels=step_labels)
                     probability_plot.update(
                         probs_timestamp,
                         recognition_manager.last_step_probabilities,

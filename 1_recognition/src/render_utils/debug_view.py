@@ -1,8 +1,8 @@
 """Live debug windows for RecognitionManager: the skeleton preview and the
 scrolling time-series plot.
 
-Two OpenCV windows, both optional (`show_video=False` makes every call here
-a no-op):
+Two OpenCV windows, both optional (with `show_video=False` and no `record_path`
+every call here is a no-op):
 
   - **preview**: the 2D keypoint overlay, optionally side by side with a
     four-view orthographic 3D posture panel, with the model's current output
@@ -12,6 +12,11 @@ a no-op):
   - **plot**: progress/confidence and world x/y/z scrolling against sample
     index. A single-frame text overlay cannot show a trend, and the trend is
     usually what is wrong.
+
+The preview can also be written to an .mp4 (`record_path`), which is the
+composited frame the preview window shows -- overlay, 3D panel and burned-in
+readout -- not the raw camera feed. Recording is independent of display, so a
+headless run can capture the same view it would have shown.
 
 Extracted from RecognitionManager because none of this is recognition: it
 reads the manager's output and owns nothing the manager needs back. Keeping
@@ -26,8 +31,13 @@ are only imported once the realtime pipeline spins up.
 from __future__ import annotations
 
 from collections import deque
+from pathlib import Path
 
 import numpy as np
+
+from logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 
 class DebugView:
@@ -51,8 +61,17 @@ class DebugView:
         history_len: int,
         conf_threshold: float,
         render_world_skeleton: bool = False,
+        record_path: str | Path | None = None,
+        record_fps: float = 20.0,
     ):
-        self.enabled = enabled
+        # Showing the windows and recording the composite are independent reasons to
+        # do the compositing work, so neither implies the other: --no-display with a
+        # recording path is a valid headless capture, and self.enabled -- which gates
+        # whether show() does anything at all -- is the OR of the two.
+        self.show_windows = enabled
+        self.record_path = Path(record_path) if record_path is not None else None
+        self.record_fps = float(record_fps)
+        self.enabled = bool(enabled or self.record_path is not None)
         self.window_name = window_name
         self.panel_size = panel_size
         self.plot_window_name = plot_window_name
@@ -72,6 +91,9 @@ class DebugView:
         self._cv2 = None
         self._draw_2d_skeleton = None
         self._renderer_3d = None
+        self._writer = None
+        self._record_size: tuple[int, int] | None = None
+        self._record_size_warned = False
 
         self._progress_history: deque[float] = deque(maxlen=history_len)
         self._confidence_history: deque[float] = deque(maxlen=history_len)
@@ -155,10 +177,61 @@ class DebugView:
             progress=progress, confidence=confidence, world_xyz=world_xyz,
             status_line=status_line, mistake_id=mistake_id, mistake_score=mistake_score)
 
+        self._write_frame(display)
+
+        # Recording-only runs stop here: no window to update, and no waitKey to poll,
+        # which is what makes --no-display --record usable without a display attached.
+        if not self.show_windows:
+            return
+
         cv2.imshow(self.window_name, display)
         self._draw_plot()
         if cv2.waitKey(1) & 0xFF == ord("q"):
             raise KeyboardInterrupt
+
+    # -- recording ---------------------------------------------------------
+
+    def _write_frame(self, display) -> None:
+        """Append one composited frame to the recording, opening the writer on the
+        first call.
+
+        The writer's frame size comes from that first frame rather than from
+        panel_size, because what is recorded is the finished composite -- 2D overlay
+        beside the 3D panel, model readout burned in -- which is wider than one panel
+        and is exactly what the preview window shows.
+
+        A writer that will not open (missing codec, unwritable path) disables
+        recording and logs once, rather than raising: losing the recording should not
+        take the recognition run down with it."""
+        if self.record_path is None:
+            return
+        cv2 = self._ensure_cv2()
+        height, width = display.shape[:2]
+
+        if self._writer is None:
+            self.record_path.parent.mkdir(parents=True, exist_ok=True)
+            writer = cv2.VideoWriter(
+                str(self.record_path), cv2.VideoWriter_fourcc(*"mp4v"),
+                self.record_fps, (width, height))
+            if not writer.isOpened():
+                logger.error("Could not open %s for recording (codec or path problem); "
+                             "continuing without a recording.", self.record_path)
+                self.record_path = None
+                return
+            self._writer = writer
+            self._record_size = (width, height)
+            logger.info("Recording the debug view to %s (%dx%d @ %.1f fps)",
+                        self.record_path, width, height, self.record_fps)
+
+        if (width, height) != self._record_size:
+            # A mid-run size change (source resolution switch) would be written as
+            # garbage by VideoWriter, so drop the frame and say so once.
+            if not self._record_size_warned:
+                logger.warning("Display size changed from %s to %s; those frames are "
+                               "left out of the recording.", self._record_size, (width, height))
+                self._record_size_warned = True
+            return
+        self._writer.write(display)
 
     def _draw_overlay(
         self,
@@ -270,7 +343,11 @@ class DebugView:
         maxlen = self._progress_history.maxlen or 1
 
         if y_range is None:
-            values = [v for values, _color, _label in series for v in values]
+            # Finite values only: one NaN sample would otherwise make lo/hi NaN and
+            # poison every point in the panel, including the healthy series drawn
+            # beside it.
+            values = [v for values, _color, _label in series for v in values
+                      if np.isfinite(v)]
             if values:
                 lo, hi = min(values), max(values)
                 margin = max((hi - lo) * 0.1, 0.05)
@@ -289,8 +366,24 @@ class DebugView:
             n = len(values)
             if n < 2:
                 continue
-            points = [to_point(i, v, n) for i, v in enumerate(values)]
-            cv2.polylines(canvas, [np.array(points, dtype=np.int32)], False, color, 1, cv2.LINE_AA)
+            # A non-finite sample BREAKS the line rather than being dropped from it.
+            # int(round(nan)) raises ValueError ("cannot convert float NaN to
+            # integer"), which is how a frame with nothing detected used to take the
+            # whole run down from inside the debug window; and joining across the gap
+            # would draw a straight line through frames the model never produced a
+            # number for, which reads as data that does not exist.
+            segment: list[tuple[int, int]] = []
+            for i, value in enumerate(values):
+                if not np.isfinite(value):
+                    if len(segment) >= 2:
+                        cv2.polylines(canvas, [np.array(segment, dtype=np.int32)],
+                                      False, color, 1, cv2.LINE_AA)
+                    segment = []
+                    continue
+                segment.append(to_point(i, value, n))
+            if len(segment) >= 2:
+                cv2.polylines(canvas, [np.array(segment, dtype=np.int32)], False,
+                              color, 1, cv2.LINE_AA)
 
         legend = f"{title}  [" + ", ".join(label for _v, _c, label in series) + f"]  y:[{y_lo:.2f},{y_hi:.2f}]"
         cv2.putText(canvas, legend, (6, row0 + 14), cv2.FONT_HERSHEY_SIMPLEX,
@@ -301,8 +394,14 @@ class DebugView:
     # -- teardown ----------------------------------------------------------
 
     def close(self) -> None:
-        """Destroy both windows if they were ever opened."""
-        if not self.enabled or self._cv2 is None:
+        """Finalise the recording and destroy both windows if they were opened."""
+        if self._writer is not None:
+            # Without this the container is left without its index and the file is
+            # unplayable, so it runs before the early return below.
+            self._writer.release()
+            self._writer = None
+            logger.info("Recording written to %s", self.record_path)
+        if not self.show_windows or self._cv2 is None:
             return
         for window_name in (self.window_name, self.plot_window_name):
             try:

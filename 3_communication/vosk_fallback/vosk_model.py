@@ -44,9 +44,18 @@ def _find_input_device(name: str | None):
         if device["max_input_channels"] > 0
         and name.casefold() in device["name"].casefold()
     ]
-    if len(matches) != 1:
-        raise RuntimeError(f"Expected one input device matching {name!r}, found {len(matches)}")
-    return matches[0]
+    if not matches:
+        raise RuntimeError(f"Expected one input device matching {name!r}, found 0")
+    if len(matches) == 1:
+        return matches[0]
+    # Windows exposes the same physical mic once per host API (MME,
+    # DirectSound, WASAPI, ...), so a name match is often ambiguous.
+    hostapis = sd.query_hostapis()
+    wasapi_matches = [
+        index for index in matches
+        if hostapis[sd.query_devices()[index]["hostapi"]]["name"] == "Windows WASAPI"
+    ]
+    return wasapi_matches[0] if wasapi_matches else matches[0]
 
 def vosk_stt(device_name: str | None, timeout: float) -> None:
     device = _find_input_device(device_name)

@@ -49,20 +49,29 @@ def draw_2d_skeleton(frame, keypoints_2d, keypoints_conf, conf_threshold=0.3, di
     r3d_skeleton_utils.py), NaN/None entries skipped. Purely a preview
     annotation -- has no effect on the returned skeleton data."""
     out = frame.copy()
+    # A joint is drawable only if BOTH its pixel position and its confidence are
+    # finite. A NaN confidence compares False against conf_threshold, so it would
+    # otherwise slip past the threshold test and then raise ValueError ("cannot
+    # convert float NaN to integer") at the int() below; a NaN coordinate survives
+    # .astype(int) silently and draws a line off to INT_MIN instead.
+    drawable = (np.isfinite(keypoints_2d).all(axis=-1)
+                & np.isfinite(keypoints_conf)
+                & (keypoints_conf >= conf_threshold))
     for i, j in COCO_SKELETON_EDGES:
-        if keypoints_conf[i] < conf_threshold or keypoints_conf[j] < conf_threshold:
+        if not (drawable[i] and drawable[j]):
             continue
         p1 = tuple(keypoints_2d[i].astype(int))
         p2 = tuple(keypoints_2d[j].astype(int))
         cv2.line(out, p1, p2, (0, 255, 0), 2)
     for k in range(keypoints_2d.shape[0]):
+        if not drawable[k]:
+            continue
         conf = float(np.clip(keypoints_conf[k], 0.0, 1.0))
         color = (0, int(255 * conf), int(255 * (1.0 - conf)))
         radius = 2 + int(round(3 * conf))
         center = tuple(keypoints_2d[k].astype(int))
         cv2.circle(out, center, radius, color, -1, cv2.LINE_AA)
-        if (distances is not None and keypoints_conf[k] >= conf_threshold
-                and np.isfinite(distances[k])):
+        if distances is not None and np.isfinite(distances[k]):
             label = f"{distances[k]:.2f}m"
             text_pos = (center[0] + radius + 3, center[1] - radius - 3)
             cv2.putText(out, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4,
