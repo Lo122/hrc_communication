@@ -43,10 +43,13 @@ SAFE_RETURN_JOINT_RANGES = [
     (-3, 3),  # joint 6
 ]
 
-HUMAN_PULL_CABLES = 0
-HUMAN_SCREW_DONE = 3
-HUMAN_CONNECT_PIPES = 4
-HUMAN_CLAMP_TOOL = 5
+# Human task step ids, as the recognition model's step head numbers them (STEP_NAMES
+# order). Looked up by name so a reordered head can't silently shift them -- the old
+# literals (3/4/5) were ELAN annotation ids and pointed at the wrong model classes.
+HUMAN_PULL_CABLES = STEP_NAMES.index("Pull Cables")
+HUMAN_SCREW_DONE = STEP_NAMES.index("Screw")
+HUMAN_CONNECT_PIPES = STEP_NAMES.index("Connect Cables")
+HUMAN_CLAMP_TOOL = STEP_NAMES.index("Clamp Coupling")
 
 TASK_LIFT_PANEL = 1
 TASK_LEAVE = 2
@@ -54,23 +57,33 @@ TASK_BRING_CONNECTOR = 3
 TASK_BRING_CLAMPING_TOOL = 4
 TASK_RETURN_CLAMPING_TOOL = 5
 
-TRIGGER_RULES = {
-    HUMAN_PULL_CABLES: {
-        "task_id": TASK_LIFT_PANEL,
-        "progress_threshold": 0.1,
-        "min_confidence": 0.1,
-    },
-    HUMAN_CONNECT_PIPES: {
-        "task_id": TASK_BRING_CLAMPING_TOOL,
-        "progress_threshold": 0.1,
-        "min_confidence": 0.1,
-    },
-    HUMAN_CLAMP_TOOL: {
-        "task_id": TASK_RETURN_CLAMPING_TOOL,
-        "progress_threshold": 0.1,
-        "min_confidence": 0.1,
-    },
+# When robot tasks are offered is no longer configured here: the task database's
+# "Robot task trigger info" drives it (2_decision_making/robot_trigger_policy.py).
+TASK_DATABASE_PATH = "2_decision_making/task_database/task_database.json"
+# P(next task | current task) from 2_decision_making/src/task_sequence_analysis.py,
+# the variant that keeps Lift (the model head and the database both have it).
+TASK_TRANSITION_TABLE_PATH = "2_decision_making/results/task_sequence_lift/transition_probabilities.csv"
+
+# Tracked (database) task -> the robot task that performs it. Tasks the database lets
+# the robot do but that have no entry here (Pull Cables, Place) are never dispatched.
+TRACKED_TO_ROBOT_TASK = {
+    "Lift": TASK_LIFT_PANEL,
+    "Bring Tool": TASK_BRING_CLAMPING_TOOL,
+    "Bring Connector": TASK_BRING_CONNECTOR,
+    "Bring back Tool": TASK_RETURN_CLAMPING_TOOL,
 }
+
+# A not-done recognized task is pending when P(task | reference task) reaches this.
+PENDING_MIN_PROBABILITY = 0.05
+# The recognition stabilizer only switches to a task this likely after the current one...
+RECOGNITION_FILTER_MIN_PROBABILITY = 0.02
+# ...unless the candidate holds for confirmation_count * this many frames anyway.
+RECOGNITION_FILTER_OVERRIDE_FACTOR = 4
+# The progress head's raw output divided by this gives 0-1 (the database's "Progress"
+# thresholds are 0-1). Check against a replay: training labels ran 0-100.
+RECOGNITION_PROGRESS_SCALE = 1.0
+# Recognition re-publishes a task update once progress has moved this much (0-1 scale).
+RECOGNITION_PROGRESS_PUBLISH_DELTA = 0.05
 
 PERMISSION_MESSAGES = {
     TASK_LIFT_PANEL: "Would you like me to lift the panel? Say yes, no, or later after the beep, or type your reply.",

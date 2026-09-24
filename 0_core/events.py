@@ -37,11 +37,29 @@ class RobotTaskState(Enum):
     R_DONE = auto()
 
 
+class TaskStatus(Enum):
+    """Status of one assembly task (piece x task) in the task database."""
+
+    NOT_DONE = auto()
+    PENDING = auto()
+    WORKING = auto()
+    DONE = auto()
+
+
 class EventType(Enum):
     """Instantaneous human, system, recognition, and robot feedback events."""
 
+    # Legacy recognition event; handled exactly like HUMAN_TASK_UPDATE.
     RECOGNITION_TRIGGER = auto()
+    # What the human is doing now: step_id (model head index) and progress (0-1).
+    HUMAN_TASK_UPDATE = auto()
     HUMAN_LOCATION_UPDATE = auto()
+
+    # Human confirms a task finished (payload task_name; none = current working task).
+    H_TASK_DONE = auto()
+    # Human asks the robot for a task (payload task_name), bypassing trigger rules.
+    H_REQUEST_ROBOT_TASK = auto()
+    H_NEXT_PIECE = auto()
 
     H_ACCEPT = auto()
     H_REFUSE = auto()

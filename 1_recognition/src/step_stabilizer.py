@@ -1,6 +1,9 @@
+import logging
 from collections import deque
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class StepIdStabilizer:
@@ -12,6 +15,7 @@ class StepIdStabilizer:
         min_confidence=0.6,
         min_margin=0.15,
         allowed_transitions=None,
+        override_factor=None,
     ):
         self.num_steps = int(num_steps)
         self.prob_history = deque(maxlen=int(smoothing_window))
@@ -19,6 +23,11 @@ class StepIdStabilizer:
         self.min_confidence = float(min_confidence)
         self.min_margin = float(min_margin)
         self.allowed_transitions = allowed_transitions or self._default_transitions(self.num_steps)
+        # A disallowed step change is still accepted once its candidate has held for
+        # confirmation_count * override_factor frames, so a rare-but-real transition
+        # can't lock recognition on the wrong step. None: never override.
+        self.override_factor = override_factor
+        self.override_count = 0
 
         self.stable_step_id = None
         self.pending_step_id = None
@@ -56,7 +65,12 @@ class StepIdStabilizer:
             return self.stable_step_id
 
         if not self._is_allowed_transition(candidate):
-            self._clear_pending()
+            if self._override_due(candidate):
+                logger.info("Accepting unlikely step change %s -> %s after %d frames.",
+                            self.stable_step_id, candidate, self.pending_count)
+                self.override_count += 1
+                self.stable_step_id = candidate
+                self._clear_pending()
             return self.stable_step_id
 
         if candidate == self.stable_step_id:
@@ -68,6 +82,11 @@ class StepIdStabilizer:
             self._clear_pending()
 
         return self.stable_step_id
+
+    def _override_due(self, candidate):
+        return (self.override_factor is not None
+                and candidate == self.pending_step_id
+                and self.pending_count >= self.confirmation_count * self.override_factor)
 
     def _is_confident(self, averaged_probs, candidate):
         sorted_probs = np.sort(averaged_probs)

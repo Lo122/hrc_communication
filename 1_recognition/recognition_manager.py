@@ -24,6 +24,8 @@ import numpy as np
 import sys
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 sys.path.append(str(Path(__file__).resolve().parents[1] / "0_core"))
+# For task_sequence_model (the transition table the stabilizer filters with).
+sys.path.append(str(Path(__file__).resolve().parents[1] / "2_decision_making"))
 # src/ holds this layer's internals, on the path here so the collaborators below
 # import at module level like everything else.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
@@ -495,7 +497,8 @@ class RecognitionManager:
         return result
 
     def _load_required_steps_per_round(self) -> set[int]:
-        return {int(step_id) for step_id in config.TRIGGER_RULES}
+        # Informational only: the decision layer's TaskTracker owns which piece is current.
+        return {config.HUMAN_PULL_CABLES, config.HUMAN_CONNECT_PIPES, config.HUMAN_CLAMP_TOOL}
 
     def _record_step_and_advance_round(self, step_id) -> None:
         if step_id is None:
@@ -597,7 +600,26 @@ class RecognitionManager:
             confirmation_count=STEP_CONFIRMATION_COUNT,
             min_confidence=STEP_MIN_CONFIDENCE,
             min_margin=STEP_MIN_MARGIN,
+            allowed_transitions=self._observed_transitions(),
+            override_factor=config.RECOGNITION_FILTER_OVERRIDE_FACTOR,
         )
+
+    def _observed_transitions(self) -> dict[int, list[int]] | None:
+        """Step changes the annotated task sequences make plausible (see
+        2_decision_making/task_sequence_model.py). None -> the stabilizer's default."""
+        if self.num_steps != len(config.STEP_NAMES):
+            logger.warning("Model has %s steps but config.STEP_NAMES has %s; "
+                           "step transitions are not filtered.", self.num_steps, len(config.STEP_NAMES))
+            return None
+        from task_sequence_model import TransitionModel
+
+        table_path = Path(__file__).resolve().parents[1] / config.TASK_TRANSITION_TABLE_PATH
+        try:
+            model = TransitionModel.from_csv(table_path)
+        except OSError:
+            logger.warning("Transition table %s not found; step transitions are not filtered.", table_path)
+            return None
+        return model.allowed_transitions(config.STEP_NAMES, config.RECOGNITION_FILTER_MIN_PROBABILITY)
 
     def _stable_step_id(self, probabilities):
         if self.step_stabilizer is None:

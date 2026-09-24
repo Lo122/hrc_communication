@@ -29,6 +29,7 @@ from pending_task import PendingTaskPool
 from ros_communication import ROSCommunication
 from state_machine import StateMachine
 from task_manager import TaskManager
+from task_tracker import build_task_tracking
 from timer_manager import TimerManager
 from udp_sender import UDPSender
 
@@ -48,7 +49,7 @@ class HRCSystem:
             self.voice = VoiceInterface(
                 model_path=ROOT / config.VOICE_MODEL_PATH,
                 gpt_enabled=config.VOICE_GPT_ENABLED,
-                phrases=CommandParser._ALIASES,
+                phrases=CommandParser.phrases(),
                 device_name=config.VOICE_INPUT_DEVICE_NAME,
                 output_device_name=config.VOICE_OUTPUT_DEVICE_NAME,
                 timeout=config.VOICE_LISTEN_TIMEOUT_SECONDS,
@@ -80,6 +81,7 @@ class HRCSystem:
         self.timer_manager = TimerManager(event_callback=self.event_queue.put)
         self.pending_pool = PendingTaskPool()
         self.state_machine = StateMachine()
+        self.task_tracker, self.trigger_policy = build_task_tracking(ROOT, logger=self.logger)
         self.task_manager = TaskManager(
             state_machine=self.state_machine,
             pending_pool=self.pending_pool,
@@ -89,6 +91,9 @@ class HRCSystem:
             gh_dispatcher=self.gh_dispatcher,
             ros_communication=self.ros,
             logger=self.logger,
+            task_tracker=self.task_tracker,
+            trigger_policy=self.trigger_policy,
+            status_callback=lambda line: print(line, flush=True),
         )
 
         self.system_running = False

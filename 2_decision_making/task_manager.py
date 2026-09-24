@@ -4,8 +4,30 @@ import time
 from collections import deque
 
 import config
-from events import Event, EventType, RobotTaskState
+from events import Event, EventType, RobotTaskState, TaskStatus
 from models import RobotTask
+from task_database import HUMAN, ROBOT
+
+S = RobotTaskState
+
+# How a robot task's state shows up on the tracked task it performs.
+ROBOT_STATE_TO_TASK_STATUS = {
+    S.R_WAITING_RESPONSE: TaskStatus.PENDING,
+    S.R_REFUSED: TaskStatus.PENDING,
+    S.R_PENDING: TaskStatus.PENDING,
+    S.R_CANCELED: TaskStatus.PENDING,
+    S.R_ACCEPTED: TaskStatus.WORKING,
+    S.R_DEFER: TaskStatus.WORKING,
+    S.R_EXECUTING: TaskStatus.WORKING,
+    S.R_PAUSED: TaskStatus.WORKING,
+    S.R_REDO: TaskStatus.WORKING,
+    S.R_DONE: TaskStatus.DONE,
+}
+# The lift itself is over once the robot reports success; free drive and holding
+# belong to Place and Screw.
+LIFT_FINISHED_STATES = {S.R_WAITING_FREE_DRIVE, S.R_FREE_DRIVE, S.R_HOLDING, S.R_DONE}
+ROBOT_TASK_TO_TRACKED = {task_id: name for name, task_id in config.TRACKED_TO_ROBOT_TASK.items()}
+
 
 class TaskManager:
     """Owns active task state, pending tasks, and all valid transitions."""
@@ -20,6 +42,9 @@ class TaskManager:
         gh_dispatcher,
         ros_communication,
         logger,
+        task_tracker=None,
+        trigger_policy=None,
+        status_callback=None,
     ):
         self.state_machine = state_machine
         self.pending_pool = pending_pool
@@ -29,11 +54,19 @@ class TaskManager:
         self.gh_dispatcher = gh_dispatcher
         self.ros = ros_communication
         self.logger = logger
+        # Assembly-task tracking (task database + transition table). Without them no
+        # robot task is offered automatically; human requests and follow-ups still work.
+        self.tracker = task_tracker
+        self.policy = trigger_policy
+        self.status_callback = status_callback
 
         self.active_task: RobotTask | None = None
+        # Robot offers waiting for the active task to finish:
+        # {"task_name", "piece_id", "requested"}.
         self.waiting_triggers = deque()
-        self.received_trigger_keys = set()
         self._task_instance_counts = {}
+        self._round_id = 0
+        self._last_status_line = None
 
         self.ros.publish_speed(config.DEFAULT_SPEED)
         print({"Initialize the speed to:": config.DEFAULT_SPEED})
@@ -43,8 +76,12 @@ class TaskManager:
         self.logger.log_event(event)
 
         handlers = {
-            EventType.RECOGNITION_TRIGGER: self._handle_recognition_trigger,
+            EventType.RECOGNITION_TRIGGER: self._handle_human_task_update,
+            EventType.HUMAN_TASK_UPDATE: self._handle_human_task_update,
             EventType.HUMAN_LOCATION_UPDATE: self._handle_human_location_update,
+            EventType.H_TASK_DONE: self._handle_task_done,
+            EventType.H_REQUEST_ROBOT_TASK: self._handle_robot_request,
+            EventType.H_NEXT_PIECE: self._handle_next_piece,
             EventType.H_ACCEPT: self._handle_accept,
             EventType.H_REFUSE: self._handle_refuse,
             EventType.H_DEFER: self._handle_defer,
@@ -74,32 +111,193 @@ class TaskManager:
             return
 
         handler(event)
-        if self.active_task is None and self.waiting_triggers:
-            # A pending leave task still owns the held panel.
-            if not any(task.task_id == config.TASK_LEAVE for task in self.pending_pool.list_all()):
-                next_event = self.waiting_triggers.popleft()
-                task_id = config.TRIGGER_RULES[next_event.payload["step_id"]]["task_id"]
-                self._propose_task(next_event.payload, task_id)
+        self._start_next_waiting()
+        self._report_status()
 
-    def _handle_recognition_trigger(self, event: Event) -> None:
-        """Create a task and ask the human for permission."""
-        rule = config.TRIGGER_RULES.get(event.payload["step_id"])
-        if rule is None:
-            self.logger.log_message("No robot task configured for this human step.", event.payload)
-            return
-        key = (event.payload["round_id"], rule["task_id"], event.payload["piece_id"])
-        if key in self.received_trigger_keys:
-            return
-        self.received_trigger_keys.add(key)
-        if self.active_task is not None or any(
-            task.task_id == config.TASK_LEAVE for task in self.pending_pool.list_all()
-        ):
-            self.waiting_triggers.append(event)
-            self.logger.log_message("Queued trigger until the current task is released.", event.payload)
-            return
-        self._propose_task(event.payload, rule["task_id"])
+    # -- assembly-task tracking ----------------------------------------------
 
-    def _propose_task(self, context: dict, task_id: int) -> None:
+    def _handle_human_task_update(self, event: Event) -> None:
+        """Recognition reports the human's current task; offer what it unlocks."""
+        step_id = event.payload.get("step_id")
+        if not isinstance(step_id, int) or not 0 <= step_id < len(config.STEP_NAMES):
+            self.logger.log_message("Human task update with unknown step id.", event.payload)
+            return
+        self._round_id = int(event.payload.get("round_id", self._round_id))
+        if self.tracker is None:
+            self.logger.log_message("No task tracker; human task update not tracked.", event.payload)
+            return
+        self.tracker.on_task_recognized(config.STEP_NAMES[step_id], float(event.payload.get("progress", 0.0)))
+        self._offer_triggered_tasks()
+
+    def _offer_triggered_tasks(self) -> None:
+        """Offer (or queue) every robot task the trigger rules allow right now."""
+        if self.policy is None:
+            return
+        for task_name, piece_id in self.policy.candidates():
+            self.policy.mark_offered(task_name, piece_id)
+            if self.active_task is not None or self.waiting_triggers or self._leave_pending():
+                self.waiting_triggers.append({"task_name": task_name, "piece_id": piece_id, "requested": False})
+                self.logger.log_message("Queued robot offer until the current task is released.",
+                                        {"task_name": task_name, "piece_id": piece_id})
+                continue
+            self._start_robot_task(task_name, piece_id, requested=False)
+
+    def _start_next_waiting(self) -> None:
+        while self.active_task is None and self.waiting_triggers and not self._leave_pending():
+            entry = self.waiting_triggers.popleft()
+            task_name, piece_id = entry["task_name"], entry["piece_id"]
+            if not self._tracked_task_open(task_name, piece_id):
+                self.logger.log_message("Dropped queued robot offer: task no longer open.",
+                                        {"task_name": task_name, "piece_id": piece_id})
+                continue
+            pooled = self._pooled_task(task_name, piece_id)
+            if entry["requested"] and pooled is not None:
+                self._execute_pooled(pooled, "Requested pending task dispatched.")
+            else:
+                self._start_robot_task(task_name, piece_id, requested=entry["requested"])
+
+    def _start_robot_task(self, task_name: str, piece_id: int, requested: bool) -> None:
+        task_id = config.TRACKED_TO_ROBOT_TASK[task_name]
+        if self.policy is not None:
+            self.policy.mark_offered(task_name, piece_id)
+        reference = self.tracker.reference_task if self.tracker is not None else None
+        context = {
+            "step_id": config.STEP_NAMES.index(reference) if reference in config.STEP_NAMES else -1,
+            "piece_id": piece_id,
+            "round_id": self._round_id,
+            "progress": self.tracker.reference_progress if self.tracker is not None else 0.0,
+        }
+        if not requested:
+            self._propose_task(context, task_id)
+            return
+        # The human asked for it: that request is the permission.
+        self._propose_task(context, task_id, ask_permission=False)
+        self._handle_accept(Event(EventType.H_ACCEPT, "human_request",
+                                  task_instance_id=self.active_task.task_instance_id))
+
+    def _handle_robot_request(self, event: Event) -> None:
+        """Human asks the robot for a task: no trigger rule, no permission question."""
+        task_name = event.payload.get("task_name")
+        if task_name not in config.TRACKED_TO_ROBOT_TASK or (
+                self.tracker is not None and not self.tracker.database.can_execute(task_name, ROBOT)):
+            self.cli.show_message(f"Sorry, I cannot do {task_name or 'that task'}.",
+                                  speech="Sorry, I cannot do that.")
+            return
+        piece_id = self._request_piece(task_name)
+        if piece_id is None:
+            self.cli.show_message(f"{task_name} is already done or in progress.",
+                                  speech=f"{task_name} is already done or in progress.")
+            return
+        if self.active_task is not None or self._leave_pending():
+            self.waiting_triggers.appendleft({"task_name": task_name, "piece_id": piece_id, "requested": True})
+            self.cli.show_message(f"Okay, I will do {task_name} after the current task.",
+                                  speech=f"I will do {task_name} next.")
+            return
+        pooled = self._pooled_task(task_name, piece_id)
+        if pooled is not None:
+            self._execute_pooled(pooled, "Human requested the pending task; dispatched.")
+            return
+        self.logger.log_message("Human requested robot task.", {"task_name": task_name, "piece_id": piece_id})
+        self._start_robot_task(task_name, piece_id, requested=True)
+
+    def _request_piece(self, task_name: str) -> int | None:
+        if self.tracker is None:
+            return self.active_task.piece_id if self.active_task is not None else 0
+        piece_id = self.tracker.first_open_piece_for(task_name)
+        if piece_id is None or not self._tracked_task_open(task_name, piece_id):
+            return None
+        return piece_id
+
+    def _handle_task_done(self, event: Event) -> None:
+        """Human confirms a task (or, with no task name, the one being worked on)."""
+        if self.tracker is None:
+            self._log_invalid(event, "No task tracker to confirm tasks with.")
+            return
+        task = self.tracker.confirm_done(event.payload.get("task_name"), HUMAN)
+        if task is None:
+            name = event.payload.get("task_name") or "working task"
+            self.cli.show_message(f"There is no open {name} to mark done.", speech="Nothing to mark done.")
+            return
+        self._withdraw_finished_offers()
+        self.cli.show_message(f"Okay, {task.task_name} is done.", speech=f"{task.task_name} done.")
+        self._offer_triggered_tasks()
+
+    def _handle_next_piece(self, event: Event) -> None:
+        if self.tracker is None:
+            self._log_invalid(event, "No task tracker.")
+            return
+        piece_id = self.tracker.advance_piece()
+        text = "All pieces are done." if piece_id is None else f"Moving on to piece {piece_id}."
+        self.cli.show_message(text, speech=text)
+
+    def _withdraw_finished_offers(self) -> None:
+        """Drop robot offers for tasks that are done now (by the human, or inferred)."""
+        if self.tracker is None:
+            return
+        for task in self.pending_pool.list_all():
+            name = ROBOT_TASK_TO_TRACKED.get(task.task_id)
+            if name is not None and not self._tracked_task_open(name, task.piece_id, allow_working=True):
+                self.pending_pool.remove(task.task_instance_id)
+                self.logger.log_message("Removed pending robot task: task already done.",
+                                        {"task_instance_id": task.task_instance_id})
+        task = self.active_task
+        name = ROBOT_TASK_TO_TRACKED.get(task.task_id) if task is not None else None
+        if (name is not None and task.state == S.R_WAITING_RESPONSE
+                and not self._tracked_task_open(name, task.piece_id, allow_working=True)):
+            self.timer.cancel_response_timer()
+            self._transition(task, S.R_CANCELED,
+                             Event(EventType.H_TASK_DONE, "task_manager", task.task_instance_id),
+                             "Offer withdrawn: the human already did the task.")
+            self.active_task = None
+
+    def _tracked_task_open(self, task_name: str, piece_id: int, allow_working=False) -> bool:
+        if self.tracker is None:
+            return True
+        task = self.tracker.get(task_name, piece_id)
+        if task is None:
+            return False
+        return task.status != TaskStatus.DONE and (allow_working or task.status != TaskStatus.WORKING)
+
+    def _pooled_task(self, task_name: str, piece_id: int) -> RobotTask | None:
+        task_id = config.TRACKED_TO_ROBOT_TASK.get(task_name)
+        for task in self.pending_pool.list_all():
+            if task.task_id == task_id and task.piece_id == piece_id:
+                return task
+        return None
+
+    def _leave_pending(self) -> bool:
+        # A pending leave task still owns the held panel.
+        return any(task.task_id == config.TASK_LEAVE for task in self.pending_pool.list_all())
+
+    def _sync_tracker(self, task: RobotTask, event: Event) -> None:
+        """Mirror a robot task's state onto the tracked task it performs."""
+        name = ROBOT_TASK_TO_TRACKED.get(task.task_id)
+        if self.tracker is None or name is None:
+            return
+        if task.task_id == config.TASK_LIFT_PANEL and task.state in LIFT_FINISHED_STATES:
+            self.tracker.set_robot_status(name, task.piece_id, TaskStatus.DONE)
+            if task.state == S.R_HOLDING:
+                # Adjusted by the human in free drive, or left where the robot put it.
+                executor = HUMAN if event.event_type == EventType.H_DONE else ROBOT
+                self.tracker.confirm_done("Place", executor, task.piece_id)
+            return
+        status = ROBOT_STATE_TO_TASK_STATUS.get(task.state)
+        if status is not None:
+            self.tracker.set_robot_status(name, task.piece_id, status)
+
+    def _report_status(self) -> None:
+        if self.tracker is None:
+            return
+        line = self.tracker.status_line()
+        if line != self._last_status_line:
+            self._last_status_line = line
+            self.logger.log_message("Task status.", {"line": line})
+            if self.status_callback is not None:
+                self.status_callback(line)
+
+    # -- robot tasks ------------------------------------------------------------
+
+    def _propose_task(self, context: dict, task_id: int, ask_permission: bool = True) -> None:
         """Ask permission for one robot action, retaining its human context."""
         step_id = context["step_id"]
         piece_id = context["piece_id"]
@@ -119,6 +317,10 @@ class TaskManager:
             updated_at=now,
         )
         self.active_task = task
+        self._sync_tracker(task, Event(EventType.HUMAN_TASK_UPDATE, "task_manager"))
+        self.logger.log_message("Task entered R_WAITING_RESPONSE.", {"task_instance_id": task.task_instance_id})
+        if not ask_permission:
+            return
 
         message = self.message_manager.get_permission_message(task.task_id)
         self.cli.show_permission_request(
@@ -126,12 +328,22 @@ class TaskManager:
         )
         duration = self._task_duration(task, "response_timeout_seconds", config.RESPONSE_TIMEOUT_SECONDS)
         self.timer.start_response_timer(task.task_instance_id, duration)
-        self.logger.log_message("Task entered R_WAITING_RESPONSE.", {"task_instance_id": task.task_instance_id})
 
     def _task_duration(self, task: RobotTask, key: str, default: float) -> float:
         return config.TASK_TIMINGS.get(task.task_id, {}).get(key, default)
 
     def _propose_followup(self, task: RobotTask, task_id: int) -> None:
+        name = ROBOT_TASK_TO_TRACKED.get(task_id)
+        if name is not None:
+            if not self._tracked_task_open(name, task.piece_id):
+                self.logger.log_message("Skipped follow-up: task no longer open.",
+                                        {"task_name": name, "piece_id": task.piece_id})
+                return
+            if self.policy is not None:
+                self.policy.mark_offered(name, task.piece_id)
+            self.waiting_triggers = deque(
+                entry for entry in self.waiting_triggers
+                if (entry["task_name"], entry["piece_id"]) != (name, task.piece_id))
         self._propose_task({
             "step_id": config.HUMAN_SCREW_DONE,
             "piece_id": task.piece_id,
@@ -254,10 +466,17 @@ class TaskManager:
             self._log_invalid(event, "Execute the pending leave task before starting another task.")
             return
 
-        task = self.pending_pool.remove(event.task_instance_id)
+        self._execute_pooled(self.pending_pool.get(event.task_instance_id),
+                             "Pending task dispatched; waiting for robot running status.", event)
+
+    def _execute_pooled(self, task: RobotTask, message: str, event: Event | None = None) -> None:
+        """Dispatch a refused/timed-out robot task from the pending pool."""
+        if event is None:
+            event = Event(EventType.H_EXECUTE_PENDING_TASK, "task_manager", task.task_instance_id)
+        self.pending_pool.remove(task.task_instance_id)
         self.active_task = task
         self.gh_dispatcher.dispatch_task(task)
-        self._transition(task, RobotTaskState.R_ACCEPTED, event, "Pending task dispatched; waiting for robot running status.")
+        self._transition(task, RobotTaskState.R_ACCEPTED, event, message)
 
     def _handle_pause(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
@@ -505,6 +724,10 @@ class TaskManager:
         )
 
     def _handle_human_done(self, event: Event) -> None:
+        if self.active_task is None and self.tracker is not None:
+            # No robot task to report to: "done" confirms the human's own task.
+            self._handle_task_done(Event(EventType.H_TASK_DONE, event.source))
+            return
         task = self._require_active_in(
             event,
             {
@@ -547,7 +770,12 @@ class TaskManager:
         if task is None:
             return
         self._transition(task, RobotTaskState.R_DONE, event, "Screwing finished; proposing leave action.")
+        if self.tracker is not None:
+            self.tracker.confirm_done("Screw", HUMAN, task.piece_id)
+            self._withdraw_finished_offers()
         self._propose_followup(task, config.TASK_LEAVE)
+        # Screw done can unlock support tasks; they queue behind the leave action.
+        self._offer_triggered_tasks()
 
     def _handle_robot_running(self, event: Event) -> None:
         # time.sleep(config.RECOVERY_STOP_DELAY_SECONDS)
@@ -652,6 +880,7 @@ class TaskManager:
         task.state = new_state
         task.updated_at = time.time()
         self.logger.log_transition(task, event, old_state, new_state, message)
+        self._sync_tracker(task, event)
 
     def _build_task_instance_id(self, round_id: int, task_id: int, piece_id: int) -> str:
         base = f"round_{round_id}_task_{task_id}_piece_{piece_id}"

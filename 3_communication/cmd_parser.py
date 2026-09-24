@@ -38,7 +38,46 @@ class CommandParser:
         "screw done": EventType.H_SCREW_DONE,
         "screwing done": EventType.H_SCREW_DONE,
         "finished screwing": EventType.H_SCREW_DONE,
+        "next piece": EventType.H_NEXT_PIECE,
     }
+
+    # Human confirms a task is finished -> H_TASK_DONE {task_name} (task database names).
+    # "screw done" stays H_SCREW_DONE above: while the robot holds the panel it also
+    # releases it, and the tracker marks Screw done either way.
+    _TASK_DONE_ALIASES = {
+        "cables pulled": "Pull Cables",
+        "pull cables done": "Pull Cables",
+        "lift done": "Lift",
+        "lifted": "Lift",
+        "place done": "Place",
+        "placed": "Place",
+        "align done": "Align",
+        "aligned": "Align",
+        "cables connected": "Connect Cables",
+        "connect done": "Connect Cables",
+        "clamp done": "Clamp Coupling",
+        "clamped": "Clamp Coupling",
+        "tool brought": "Bring Tool",
+        "connector brought": "Bring Connector",
+        "tool returned": "Bring back Tool",
+    }
+
+    # Human asks the robot for a task -> H_REQUEST_ROBOT_TASK {task_name}; no permission
+    # question follows, since the request is the permission.
+    _ROBOT_REQUEST_ALIASES = {
+        "lift the panel": "Lift",
+        "bring the tool": "Bring Tool",
+        "bring tool": "Bring Tool",
+        "bring the connector": "Bring Connector",
+        "bring connector": "Bring Connector",
+        "take the tool back": "Bring back Tool",
+        "bring back tool": "Bring back Tool",
+    }
+
+    @classmethod
+    def phrases(cls) -> list[str]:
+        """Every command phrase, for the voice recognizer's grammar."""
+        return [*cls._ALIASES, *cls._TASK_DONE_ALIASES, *cls._ROBOT_REQUEST_ALIASES]
 
     def parse(self, raw_text: str, source: str = "human_cli") -> Event | None:
         text = raw_text.strip().lower()
@@ -52,6 +91,12 @@ class CommandParser:
                 source=source,
                 task_instance_id=task_instance_id,
             )
+
+        if text in self._TASK_DONE_ALIASES:
+            return Event(EventType.H_TASK_DONE, source, payload={"task_name": self._TASK_DONE_ALIASES[text]})
+        if text in self._ROBOT_REQUEST_ALIASES:
+            return Event(EventType.H_REQUEST_ROBOT_TASK, source,
+                         payload={"task_name": self._ROBOT_REQUEST_ALIASES[text]})
 
         event_type = self._ALIASES.get(text)
         if event_type is None:

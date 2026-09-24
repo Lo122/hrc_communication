@@ -1,8 +1,8 @@
 """Run realtime recognition in its own process and publish trigger events.
 
 Reads frames from a camera, an iPhone (Record3D) or a recorded file, runs them
-through RecognitionManager, and sends RECOGNITION_TRIGGER and
-HUMAN_LOCATION_UPDATE events to the communication layer over UDP.
+through RecognitionManager, and sends HUMAN_TASK_UPDATE (what the human is doing)
+and HUMAN_LOCATION_UPDATE events to the communication layer over UDP.
 
 This repo's venv lives outside the project tree, so point uv at it first:
     $env:UV_PROJECT_ENVIRONMENT = "C:\\Users\\Owner\\.venvs\\hrc_communication"
@@ -12,7 +12,7 @@ Four modes:
   full pipeline       vision + LSTM step classification (the default)
   --fake-recognition  vision runs for real, step classification is typed in
                       -- no LSTM, so no norm-stats file needed
-  --manual-trigger    no camera/video/model at all; type trigger events to
+  --manual-trigger    no camera/video/model at all; type task updates to
                       time how fast the communication layer reacts
   --realtime-playback a recorded file played against the wall clock, so it
                       drops frames the way a live camera does
@@ -78,8 +78,8 @@ Usage:
     uv run python run_recognition.py --iphone --iphone-rotate 270 --show-probabilities `
         --extrinsics-file iphone_extrinsics_synthetic.json
 
-In both trigger-typing modes the prompt takes:
-    step_id[,piece_id[,round_id[,progress]]]
+In both typing modes the prompt takes:
+    step_id[,progress]      (step_id = config.STEP_NAMES index, progress 0-1)
 
 A live camera is opened at the resolution its intrinsics were calibrated at,
 since K only holds at that size and nothing negotiates it for us -- Windows
@@ -108,7 +108,7 @@ from events import Event, EventType
 from logging_setup import configure_logging, get_logger
 from recognition_manager import DEFAULT_MODEL_DIR, RecognitionManager
 from step_probability_plot import StepProbabilityPlot
-from trigger_manager import TriggerManager
+from trigger_manager import TaskUpdatePublisher, task_update_event
 from vision_model.vision_config import VisionConfig
 
 # iPhone/Record3D defaults. The rotation and the calibration files must agree: these
@@ -119,8 +119,6 @@ IPHONE_CAPTURE_ROTATE90 = 90
 IPHONE_INTRINSICS_FILE = "iphone_intrinsics.json"
 IPHONE_EXTRINSICS_FILE = "iphone_extrinsics.json"
 
-DEFAULT_MANUAL_PIECE_ID = 1
-DEFAULT_MANUAL_ROUND_ID = 0
 DEFAULT_MANUAL_PROGRESS = 1.0
 
 logger = get_logger(__name__)
@@ -256,12 +254,12 @@ def _parse_args() -> argparse.Namespace:
                          help="Run the real vision pipeline (YOLO 2D pose + MotionBERT 3D lift) "
                               "with live skeleton display, plots and HUMAN_LOCATION_UPDATE "
                               "streaming, but skip the LSTM step classifier -- so no norm-stats "
-                              "file is needed. RECOGNITION_TRIGGER events are typed in instead, "
+                              "file is needed. HUMAN_TASK_UPDATE events are typed in instead, "
                               "same syntax as --manual-trigger.")
     parser.add_argument("--manual-trigger", action="store_true",
                          help="Skip the camera/video/model pipeline entirely. Instead, prompt on the "
-                              "terminal for step_id[,piece_id[,round_id[,progress]]] and send that "
-                              "RECOGNITION_TRIGGER event over the real UDP path on Enter -- for timing "
+                              "terminal for step_id[,progress] and send that "
+                              "HUMAN_TASK_UPDATE event over the real UDP path on Enter -- for timing "
                               "how fast the communication layer reacts without needing real model output.")
     parser.add_argument("--loop-hz", type=float, default=LOOP_HZ,
                          help="Target recognition loop rate (Hz). Each iteration sleeps only "
@@ -343,69 +341,56 @@ def _build_run_logger(args: argparse.Namespace, source):
     })
 
 
-def _parse_manual_trigger_line(line: str) -> tuple[int, int, int, float] | None:
-    """Parse "step_id[,piece_id[,round_id[,progress]]]" typed at the prompt.
+def _parse_manual_trigger_line(line: str) -> tuple[int, float] | None:
+    """Parse "step_id[,progress]" typed at the prompt.
 
-    Missing fields fall back to DEFAULT_MANUAL_*. Returns None for a blank or
-    unparseable line, so the caller re-prompts instead of crashing the loop.
+    A missing progress falls back to DEFAULT_MANUAL_PROGRESS. Returns None for a
+    blank or unparseable line, so the caller re-prompts instead of crashing the loop.
     """
     parts = [p.strip() for p in line.split(",")]
     if not parts or not parts[0]:
         return None
     try:
         step_id = int(parts[0])
-        piece_id = int(parts[1]) if len(parts) > 1 and parts[1] else DEFAULT_MANUAL_PIECE_ID
-        round_id = int(parts[2]) if len(parts) > 2 and parts[2] else DEFAULT_MANUAL_ROUND_ID
-        progress = float(parts[3]) if len(parts) > 3 and parts[3] else DEFAULT_MANUAL_PROGRESS
+        progress = float(parts[1]) if len(parts) > 1 and parts[1] else DEFAULT_MANUAL_PROGRESS
     except ValueError:
-        print(f"Could not parse '{line}' as step_id[,piece_id[,round_id[,progress]]] -- try again.")
+        print(f"Could not parse '{line}' as step_id[,progress] -- try again.")
         return None
-    return step_id, piece_id, round_id, progress
+    return step_id, progress
 
 
-def _configured_steps_text() -> str:
-    return ", ".join(str(step) for step in sorted(config.TRIGGER_RULES))
+def _steps_text() -> str:
+    return ", ".join(f"{index}={name}" for index, name in enumerate(config.STEP_NAMES))
 
 
 def _send_manual_trigger(sender: UDPEventSender, line: str) -> None:
-    """Parse one typed line and, if valid, publish it as a RECOGNITION_TRIGGER."""
+    """Parse one typed line and, if valid, publish it as a HUMAN_TASK_UPDATE."""
     parsed = _parse_manual_trigger_line(line)
     if parsed is None:
         return
-    step_id, piece_id, round_id, progress = parsed
-    if step_id not in config.TRIGGER_RULES:
-        print(f"Step {step_id} has no recognition trigger configured. "
-              f"Configured human steps: {_configured_steps_text()}.")
+    step_id, progress = parsed
+    if not 0 <= step_id < len(config.STEP_NAMES):
+        print(f"Unknown step {step_id}. Steps: {_steps_text()}.")
         return
 
-    event = Event(
-        event_type=EventType.RECOGNITION_TRIGGER,
-        source="manual_recognition",
-        payload={
-            "step_id": step_id,
-            "piece_id": piece_id,
-            "round_id": round_id,
-            "progress": progress,
-        },
-    )
+    event = task_update_event(step_id, progress, source="manual_recognition")
     send_time = time.time()
     sender.send(event)
-    print(f"[manual trigger] sent step_id={step_id} piece_id={piece_id} "
-          f"round_id={round_id} progress={progress} at t={send_time:.6f}", flush=True)
+    print(f"[manual task update] sent step_id={step_id} ({config.STEP_NAMES[step_id]}) "
+          f"progress={progress} at t={send_time:.6f}", flush=True)
 
 
 def _print_manual_trigger_help(host: str, port: int) -> None:
-    print(f"Manual triggers -- sending RECOGNITION_TRIGGER events to {host}:{port}")
-    print(f"Configured human steps: {_configured_steps_text()}")
-    print(f"Defaults when omitted: piece_id={DEFAULT_MANUAL_PIECE_ID}, "
-          f"round_id={DEFAULT_MANUAL_ROUND_ID}, progress={DEFAULT_MANUAL_PROGRESS}")
-    print("Enter: step_id[,piece_id[,round_id[,progress]]]  (Ctrl+C or 'q' to quit)")
+    print(f"Manual task updates -- sending HUMAN_TASK_UPDATE events to {host}:{port}")
+    print(f"Steps: {_steps_text()}")
+    print(f"Default progress when omitted: {DEFAULT_MANUAL_PROGRESS}")
+    print("Enter: step_id[,progress]  (Ctrl+C or 'q' to quit)")
 
 
 def _run_manual_trigger_loop(sender: UDPEventSender, host: str, port: int) -> None:
     """Prompt for trigger events and send them over the real UDP path.
 
-    Bypasses RecognitionManager and TriggerManager entirely, so the communication
+    Bypasses RecognitionManager and TaskUpdatePublisher entirely, so the communication
     layer's reaction time can be measured without recognition inference in the way.
     """
     _print_manual_trigger_help(host, port)
@@ -466,7 +451,7 @@ if __name__ == "__main__":
         record_path=args.record,
         record_fps=args.record_fps if args.record_fps is not None else args.loop_hz,
         vision_config=_build_vision_config(args))
-    trigger_manager = TriggerManager()
+    task_updates = TaskUpdatePublisher()
     probability_plot: StepProbabilityPlot | None = None
     last_plotted_probabilities_timestamp = None
     last_mistake_id = None  # so the mistake verdict is printed only when it changes
@@ -511,7 +496,7 @@ if __name__ == "__main__":
                 run_logger.log_frame(recognition_manager, update_s=update_s)
 
             if result is not None:
-                for event in trigger_manager.update(result):
+                for event in task_updates.update(result):
                     print(f"[recognition event] sending {event.event_type.name} {event.payload}", flush=True)
                     sender.send(event)
                     if run_logger is not None:

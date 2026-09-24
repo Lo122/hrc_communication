@@ -1,0 +1,9 @@
+current,Pull Cables,Lift,Place,Align,Screw,Connect Cables,Clamp Coupling,END
+START,17,0,12,0,4,0,0,0
+Pull Cables,0,0,52,2,10,23,2,4
+Lift,0,0,0,0,0,0,0,0
+Place,2,0,0,96,3,0,0,0
+Align,10,0,7,0,80,8,0,0
+Screw,32,0,6,7,0,58,2,1
+Connect Cables,3,0,3,0,0,0,89,1
+Clamp Coupling,29,0,21,0,9,7,0,27

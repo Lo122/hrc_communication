@@ -120,6 +120,7 @@ class VoicePolicyTests(unittest.TestCase):
         from pending_task import PendingTaskPool
         from state_machine import StateMachine
         from task_manager import TaskManager
+        from task_tracker import build_task_tracking
 
         system = HRCSystem.__new__(HRCSystem)
         system.event_queue = EventQueue()
@@ -128,11 +129,13 @@ class VoicePolicyTests(unittest.TestCase):
         system.task_manager = TaskManager(
             StateMachine(), PendingTaskPool(), timer, MessageManager(),
             self.comm, Mock(), Mock(), Mock(),
+            *build_task_tracking(ROOT),
         )
         self.comm.state_provider = system._current_state
         self.comm.event_sink = system.event_queue.put
+        # Pull Cables past the database's 0.5 -> the robot offers to lift the panel.
         system.event_queue.put(Event(EventType.RECOGNITION_TRIGGER, "test", payload={
-            "step_id": 0, "round_id": 0, "piece_id": 0,
+            "step_id": 0, "round_id": 0, "piece_id": 0, "progress": 1.0,
         }))
         system.process_events()
         task_id = system.task_manager.active_task.task_instance_id

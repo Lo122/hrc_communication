@@ -12,21 +12,21 @@ from run_communication import _parse_args
 
 
 class DebugArgumentTests(unittest.TestCase):
-    def test_configured_human_steps_are_accepted(self):
-        for step in (0, 4, 5):
+    def test_every_model_step_is_accepted(self):
+        for step in range(7):
             with self.subTest(step=step), patch.object(
                 sys, "argv", ["run_communication.py", "--debug-trigger", "--debug-step-id", str(step)]
             ):
                 self.assertEqual(_parse_args().debug_step_id, step)
 
-    def test_human_step_three_explains_command_only_workflow(self):
+    def test_unknown_step_lists_the_steps(self):
         error = io.StringIO()
-        with patch.object(sys, "argv", ["run_communication.py", "--debug-trigger", "--debug-step-id", "3"]):
+        with patch.object(sys, "argv", ["run_communication.py", "--debug-trigger", "--debug-step-id", "9"]):
             with contextlib.redirect_stderr(error), self.assertRaises(SystemExit) as raised:
                 _parse_args()
         self.assertEqual(raised.exception.code, 2)
-        self.assertIn("Human step 3 has no recognition trigger", error.getvalue())
-        self.assertIn("screw done", error.getvalue())
+        self.assertIn("Human step 9 does not exist", error.getvalue())
+        self.assertIn("4=Screw", error.getvalue())
 
     def test_normal_startup_does_not_require_debug_mapping(self):
         with patch.object(sys, "argv", ["run_communication.py"]):

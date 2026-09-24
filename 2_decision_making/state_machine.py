@@ -12,6 +12,8 @@ class StateMachine:
         (RobotTaskState.R_WAITING_RESPONSE, EventType.H_REFUSE): RobotTaskState.R_REFUSED,
         (RobotTaskState.R_WAITING_RESPONSE, EventType.H_DEFER): RobotTaskState.R_DEFER,
         (RobotTaskState.R_WAITING_RESPONSE, EventType.RESPONSE_TIMEOUT): RobotTaskState.R_PENDING,
+        # The human did the offered task themselves; the offer is withdrawn.
+        (RobotTaskState.R_WAITING_RESPONSE, EventType.H_TASK_DONE): RobotTaskState.R_CANCELED,
         (RobotTaskState.R_REFUSED, EventType.H_EXECUTE_PENDING_TASK): RobotTaskState.R_ACCEPTED,
         (RobotTaskState.R_PENDING, EventType.H_EXECUTE_PENDING_TASK): RobotTaskState.R_ACCEPTED,
         (RobotTaskState.R_DEFER, EventType.DEFER_TIMEOUT): RobotTaskState.R_ACCEPTED,
