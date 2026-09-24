@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <title>HRC Watch</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="watch.css" />
+  </head>
+  <body class="watch-only">
+    <!-- Open this page on a phone strapped to the wrist: http://<laptop-ip>:8765/watch
+         Add ?shape=round for a round Wear OS layout. -->
+    <section id="watch" aria-label="HRC watch"></section>
+    <script src="watch.js"></script>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const el = document.querySelector("#watch");
+      const watch = HRCWatch.mount(el);
+      watch.setShape(params.get("shape") === "round" ? "round" : "rect");
+      // ?skin=clay|plate|sheet and ?mode=light|dark
+      watch.setSkin(params.get("skin") || "clay");
+      watch.setMode(params.get("mode") === "dark" ? "dark" : "light");
+      function fit() {
+        const css = getComputedStyle(document.documentElement);
+        const w = parseFloat(css.getPropertyValue("--screen-w"));
+        const h = parseFloat(css.getPropertyValue("--screen-h"));
+        const scale = Math.min(innerWidth / (w + 14), innerHeight / (h + 14));
+        document.documentElement.style.setProperty("--scale", scale.toFixed(3));
+      }
+      addEventListener("resize", fit);
+      fit();
+      // Audio needs one user gesture on phones.
+      addEventListener("pointerdown", () => watch.setSound(params.get("sound") !== "off"), { once: true });
+    </script>
+  </body>
+</html>
