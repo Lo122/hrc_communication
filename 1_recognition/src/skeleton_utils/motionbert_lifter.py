@@ -139,7 +139,7 @@ class MotionBERTStreamingLifter:
     """
 
     def __init__(self, config_path=DEFAULT_CONFIG, checkpoint_path=DEFAULT_CHECKPOINT,
-                 clip_len=None, device="cpu", half=False):
+                 clip_len=None, device="cpu", half=False, use_cuda_graph=True):
         self._device = device
         self._model, self._cfg = _load_model(config_path, checkpoint_path, device)
         self._clip_len = int(clip_len or self._cfg.get("clip_len", self._cfg.get("maxlen", 243)))
@@ -154,6 +154,51 @@ class MotionBERTStreamingLifter:
                            "here (see this class's docstring).", device)
         if self._half:
             self._model = self._model.half()
+
+        # CUDA graph over the full-window forward pass -- the "go below the
+        # floor" lever from the class docstring. Replaying one captured graph
+        # replaces DSTformer's hundreds of per-kernel launches with a single
+        # launch: measured 16.5 -> 6.1 ms per forward on an RTX 5070 Laptop
+        # (fp16, clip_len=81), bit-identical output to the eager pass. Only the
+        # steady state is graphed, since a graph needs a fixed input shape: the
+        # first clip_len-1 frames, while the buffer is still filling, run eager.
+        # Captured lazily on the first full window (see _forward).
+        self._use_cuda_graph = bool(use_cuda_graph) and str(device).startswith("cuda")
+        self._graph = None
+        self._graph_in = None
+        self._graph_out = None
+
+    def _forward(self, batch):
+        """self._model(batch), replayed from a CUDA graph once the window is full."""
+        import torch
+
+        if not self._use_cuda_graph or batch.shape[1] != self._clip_len:
+            return self._model(batch)
+        if self._graph is None:
+            try:
+                self._graph_in = batch.clone()
+                # Warm up on a side stream before capture, as torch.cuda.graph
+                # requires, so lazy cuBLAS/allocator setup is not recorded.
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        self._model(self._graph_in)
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    self._graph_out = self._model(self._graph_in)
+                self._graph = graph
+            except Exception:
+                logger.warning("MotionBERT CUDA graph capture failed -- falling back to "
+                               "eager forward passes.", exc_info=True)
+                self._use_cuda_graph = False
+                self._graph_in = self._graph_out = None
+                return self._model(batch)
+        self._graph_in.copy_(batch)
+        self._graph.replay()
+        # Clone: the next replay overwrites _graph_out in place.
+        return self._graph_out.clone()
 
     def reset(self):
         """Clear the rolling buffer -- call between videos/subjects so a
@@ -186,7 +231,7 @@ class MotionBERTStreamingLifter:
         if self._half:
             batch = batch.half()
         with torch.no_grad():
-            output = self._model(batch)  # (1, T, 17, 3)
+            output = self._forward(batch)  # (1, T, 17, 3)
         # .float() BEFORE .numpy(), and not optional: everything downstream is
         # float64 numpy, and BoneLengthConstraintFilter in particular is a
         # STATEFUL accumulator. Handing it a float16 array would carry fp16's

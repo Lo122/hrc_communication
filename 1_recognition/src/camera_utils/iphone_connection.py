@@ -254,6 +254,16 @@ class IPhoneCamera:
         # _on_new_frame, which takes _lock on every frame.
         self._connect_lock = threading.Lock()
         self._latest = None  # (rgb, depth, intrinsic_mat, pose)
+        # Every received frame is numbered, never reset across reconnects, so a
+        # consumer can tell how many frames the latest-only _latest slot overwrote
+        # between two of its reads -- the frames a live source drops.
+        self._frame_seq = 0
+        self._latest_seq = None
+        self._latest_at = None  # perf_counter when _latest arrived
+        # Snapshot of the two above for the frame get_latest_frame last returned.
+        # Only the consumer thread reads these.
+        self.last_seq = None
+        self.last_received_at = None
         self._new_frame_event = threading.Event()
         self._connected_event = threading.Event()
         self._stop_event = threading.Event()
@@ -392,8 +402,11 @@ class IPhoneCamera:
             depth = np.array(depth, copy=True)
         with self._lock:
             self._latest = (rgb, depth, intrinsic_mat, pose)
+            self._frame_seq += 1
+            self._latest_seq = self._frame_seq
             # Proof of life for the watchdog -- see _stale_after_sec.
             self._last_frame_at = time.perf_counter()
+            self._latest_at = self._last_frame_at
             # Set under the lock, paired with the clear in get_latest_frame, so a
             # frame arriving mid-handover cannot have its notification dropped.
             self._new_frame_event.set()
@@ -454,6 +467,9 @@ class IPhoneCamera:
             # would discard the notification for any frame that landed in between,
             # so the NEXT call would block for the frame after that one.
             self._new_frame_event.clear()
+            if self._latest is not None:
+                self.last_seq = self._latest_seq
+                self.last_received_at = self._latest_at
             return self._latest
 
 
@@ -489,6 +505,10 @@ class IPhoneVideoCaptureAdapter:
         # put them. Consumers that care read this after each read(); those that don't
         # keep using the calibrated file K and are unaffected.
         self.last_intrinsics = None
+        # Sequence number of the frame the last read() returned (see IPhoneCamera),
+        # and how old it was at that moment -- how live the stream really is.
+        self.last_seq = None
+        self.last_age_s = None
 
     def isOpened(self):
         return True
@@ -503,9 +523,13 @@ class IPhoneVideoCaptureAdapter:
                 rgb, _depth, intrinsic_mat, pose = result
                 self.last_pose = pose
                 self.last_intrinsics = intrinsic_mat
+                self.last_seq = self._cam.last_seq
+                self.last_age_s = time.perf_counter() - self._cam.last_received_at
                 return True, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         self.last_pose = None
         self.last_intrinsics = None
+        self.last_seq = None
+        self.last_age_s = None
         return False, None
 
     def release(self):

@@ -123,6 +123,13 @@ class FrameSource:
         self.frame_index: int | None = None  # source index of the frame just read
         self.dropped_before: int = 0         # frames skipped to reach that one
 
+        # Live sources that number their frames (an iPhone via Record3D). Its capture
+        # keeps only the newest frame, so frames arriving while the loop is busy are
+        # overwritten; the gap in sequence numbers is what makes that visible.
+        self._last_seq: int | None = None
+        self.frame_age_s: float | None = None  # capture-to-read age of the frame just read
+        self.frame_age_sum_s = 0.0
+
         # Set once a RECORDED source runs out. A live source returning no frame is a
         # hiccup to ride out; a file that ends is the end of the run.
         self.exhausted = False
@@ -179,6 +186,8 @@ class FrameSource:
             ok, frame = self._capture.read()
             frame = frame if ok else None
             self._stamp_sequential(frame, live=bool(self.camera.live))
+            if self.camera.live:
+                self._count_live_drops(frame)
 
         if frame is not None and not self._size_verified:
             self._verify_frame_size(frame)
@@ -252,6 +261,26 @@ class FrameSource:
         self.frame_index = index
         self.dropped_before = 0  # frame-by-frame never skips: that is the point
         self.frames_read += 1
+
+    def _count_live_drops(self, frame) -> None:
+        """Fill frames_read / frames_dropped / dropped_before for a live source
+        that reports frame sequence numbers (IPhoneVideoCaptureAdapter.last_seq).
+
+        frame_index stays None: a live frame has no place on a recording's
+        timeline, and run_logger reads a set frame_index as having one."""
+        seq = getattr(self._capture, "last_seq", None)
+        if frame is None or seq is None:
+            self.dropped_before = 0
+            self.frame_age_s = None
+            return
+        dropped = seq - self._last_seq - 1 if self._last_seq is not None else 0
+        self._last_seq = seq
+        self.dropped_before = max(dropped, 0)
+        self.frames_read += 1
+        self.frames_dropped += self.dropped_before
+        self.frame_age_s = getattr(self._capture, "last_age_s", None)
+        if self.frame_age_s is not None:
+            self.frame_age_sum_s += self.frame_age_s
 
     def source_fps(self) -> float:
         """The recording's own frame rate, cached. Falls back to
