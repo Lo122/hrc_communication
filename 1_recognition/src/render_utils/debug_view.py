@@ -63,6 +63,7 @@ class DebugView:
         render_world_skeleton: bool = False,
         record_path: str | Path | None = None,
         record_fps: float = 20.0,
+        step_names: list[str] | tuple[str, ...] | None = None,
     ):
         # Showing the windows and recording the composite are independent reasons to
         # do the compositing work, so neither implies the other: --no-display with a
@@ -87,6 +88,10 @@ class DebugView:
         # the top-down trajectory), so the world skeleton adds nothing to a POSTURE view
         # except the extrinsics' rotation.
         self.render_world_skeleton = render_world_skeleton
+        # Step id -> label for the readout (index == the step head's output column).
+        # Passed in rather than imported so this module stays independent of the root
+        # config; an id with no name falls back to "#<id>".
+        self.step_names = tuple(step_names) if step_names is not None else ()
 
         self._cv2 = None
         self._draw_2d_skeleton = None
@@ -107,6 +112,13 @@ class DebugView:
         without the skeleton overlay or the 3D panel."""
         self._draw_2d_skeleton = draw_2d_skeleton
         self._renderer_3d = renderer_3d
+
+    def _step_label(self, step_id: int | None) -> str:
+        if step_id is None:
+            return "-"
+        if 0 <= step_id < len(self.step_names):
+            return self.step_names[step_id]
+        return f"#{step_id}"
 
     def _ensure_cv2(self):
         if self._cv2 is None:
@@ -263,9 +275,9 @@ class DebugView:
             world_line = "World XYZ: --"
 
         if raw_step_id is not None:
-            stable_text = str(stable_step_id) if stable_step_id is not None else "-"
             step_lines = [
-                f"Raw step: {raw_step_id}  Stable step: {stable_text}",
+                f"Raw step: {self._step_label(raw_step_id)}",
+                f"Stable step: {self._step_label(stable_step_id)}",
                 f"Progress: {progress:.2f}  Confidence: {confidence:.2f}",
             ]
         else:

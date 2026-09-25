@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HRC Watch Simulator</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="watch.css" />
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color-scheme: light;
+        color: #1d1d1f;
+        background: radial-gradient(circle at 30% 20%, #fff, transparent 40rem), linear-gradient(145deg, #f1f1f4, #d8d8de);
+        font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(360px, 1fr) minmax(320px, 440px);
+        gap: 32px;
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 28px 24px;
+        align-items: start;
+      }
+      @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+      .sim-stage { display: grid; justify-items: center; gap: 18px; position: sticky; top: 28px; }
+      .sim-stage-bar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+      .seg { display: inline-flex; background: #e3e3e8; border-radius: 9px; padding: 2px; }
+      .seg button, .chip {
+        border: 0; background: transparent; padding: 6px 12px; border-radius: 7px;
+        font-size: 13px; cursor: pointer; color: #1d1d1f;
+      }
+      .seg button[aria-pressed="true"] { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+      .state-chip {
+        font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 5px 10px; border-radius: 999px; background: #1d1d1f; color: #fff;
+      }
+      .controls { display: grid; gap: 14px; }
+      .panel { background: rgba(255,255,255,.85); border-radius: 16px; padding: 16px 18px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+      .panel h2 { margin: 0 0 4px; font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: #6e6e73; }
+      .panel p.hint { margin: 0 0 12px; font-size: 13px; color: #6e6e73; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+      .sim-btn {
+        border: 1px solid #d2d2d7; background: #fff; border-radius: 10px; padding: 9px 10px;
+        font-size: 13px; text-align: left; cursor: pointer; line-height: 1.25;
+      }
+      .sim-btn small { display: block; color: #6e6e73; font-size: 11px; }
+      .sim-btn:hover { border-color: #0a84ff; }
+      .toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 14px; padding: 6px 0; }
+      .toggle small { display: block; color: #6e6e73; font-size: 12px; }
+      .toggle input { width: 20px; height: 20px; }
+      dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+      dt { color: #6e6e73; }
+      dd { margin: 0; font-family: ui-monospace, Menlo, monospace; word-break: break-all; }
+      .log { max-height: 260px; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, monospace; margin: 0; padding: 0; list-style: none; }
+      .log li { display: grid; grid-template-columns: 62px 1fr; gap: 8px; border-bottom: 1px solid #eee; padding: 2px 0; }
+      .log time { color: #8e8e93; }
+      .log .err { color: #d70015; }
+      .row-end { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+      .link-btn { border: 0; background: none; color: #0a84ff; cursor: pointer; font-size: 13px; }
+      ol.scenarios { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.5; }
+    </style>
+  </head>
+  <body>
+    <main class="layout">
+      <section class="sim-stage" aria-label="Simulated watch">
+        <div class="sim-stage-bar">
+          <div class="seg" role="group" aria-label="Watch shape">
+            <button type="button" data-shape="rect" aria-pressed="true">Apple Watch</button>
+            <button type="button" data-shape="round" aria-pressed="false">Wear OS (round)</button>
+          </div>
+          <div class="seg" role="group" aria-label="Skin">
+            <button type="button" data-skin="clay" aria-pressed="true">Clay</button>
+            <button type="button" data-skin="plate" aria-pressed="false">Plate</button>
+            <button type="button" data-skin="sheet" aria-pressed="false">Sheet</button>
+          </div>
+          <div class="seg" role="group" aria-label="Mode">
+            <button type="button" data-mode="light" aria-pressed="true">Light</button>
+            <button type="button" data-mode="dark" aria-pressed="false">Dark</button>
+          </div>
+          <div class="seg" role="group" aria-label="Zoom">
+            <button type="button" data-scale="1" aria-pressed="false">1×</button>
+            <button type="button" data-scale="1.6" aria-pressed="true">1.6×</button>
+            <button type="button" data-scale="2.2" aria-pressed="false">2.2×</button>
+          </div>
+        </div>
+        <section id="watch"></section>
+        <span class="state-chip" id="state-chip">—</span>
+      </section>
+
+      <section class="controls">
+        <div class="panel">
+          <h2>1 · Human (recognition)</h2>
+          <p class="hint">Fake an LSTM trigger — the robot then asks on the watch.</p>
+          <div class="grid" id="triggers">
+            <button class="sim-btn" data-step="0">H0 Pull cables<small>→ R: lift panel</small></button>
+            <button class="sim-btn" data-step="4">H4 Connect pipes<small>→ R: bring clamp tool</small></button>
+            <button class="sim-btn" data-step="5">H5 Clamp<small>→ R: return clamp tool</small></button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>2 · Robot</h2>
+          <p class="hint">With auto robot on, the fake UR10e starts, moves (speed-aware) and finishes by itself.</p>
+          <label class="toggle"><span>Auto robot<small>Answer dispatches with running → success</small></span><input type="checkbox" id="auto-robot" checked /></label>
+          <label class="toggle"><span>Safe home zone<small>After Stop: offer “Return home” (else manual recovery)</small></span><input type="checkbox" id="safe-home" checked /></label>
+          <label class="toggle"><span>Sound cues<small>Beep with each haptic</small></span><input type="checkbox" id="sound" /></label>
+          <div class="grid" style="margin-top:8px">
+            <button class="sim-btn" data-robot="ROBOT_RUNNING">Robot running<small>/Task/signal start_job</small></button>
+            <button class="sim-btn" data-robot="ROBOT_SUCCESS">Robot success<small>/Task/signal end_job</small></button>
+            <button class="sim-btn" data-robot="ROBOT_HOMED">Robot homed<small>/Robot/status/physical</small></button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>System state</h2>
+          <dl>
+            <dt>State</dt><dd id="d-state">—</dd>
+            <dt>Task</dt><dd id="d-task">—</dd>
+            <dt>Screen</dt><dd id="d-screen">—</dd>
+            <dt>Speed</dt><dd id="d-speed">—</dd>
+            <dt>Pending</dt><dd id="d-pending">—</dd>
+          </dl>
+        </div>
+
+        <div class="panel">
+          <div class="row-end">
+            <h2>Session log</h2>
+            <button class="link-btn" id="download">Download CSV</button>
+          </div>
+          <ul class="log" id="log"></ul>
+        </div>
+
+        <div class="panel">
+          <h2>Try these flows</h2>
+          <ol class="scenarios">
+            <li>H0 → Yes → watch it lift → “Guide by hand?” Yes → Done → Screwed → release → connector.</li>
+            <li>H0 → wait 20 s (no answer) → task goes pending → “Start now”.</li>
+            <li>H4 → In 5 s → Cancel during the countdown.</li>
+            <li>H0 → Yes → Pause → Resume → faster/slower.</li>
+            <li>H0 → Yes → hold Stop → Return home. Repeat with “Safe home zone” off → manual recovery.</li>
+          </ol>
+        </div>
+      </section>
+    </main>
+
+    <script src="watch.js"></script>
+    <script>
+      const watch = HRCWatch.mount(document.querySelector("#watch"));
+      watch.setShape("rect");
+      const $ = (s) => document.querySelector(s);
+      const rows = [];   // session log for CSV export (useful for user-study notes)
+
+      function log(kind, text, isErr = false) {
+        const t = new Date();
+        rows.push([t.toISOString(), kind, text]);
+        const li = document.createElement("li");
+        li.innerHTML = `<time>${t.toLocaleTimeString([], { hour12: false })}</time><span></span>`;
+        li.lastChild.textContent = `${kind}: ${text}`;
+        if (isErr) li.lastChild.className = "err";
+        $("#log").prepend(li);
+      }
+
+      async function sim(body) {
+        const res = await fetch("/api/sim", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) log("sim", data.detail || res.status, true);
+        return data;
+      }
+
+      let lastState = undefined;
+      watch.onChange((e) => {
+        if (e.type === "command") {
+          log("watch", e.ok ? e.command : `${e.command} rejected (${e.error})`, !e.ok);
+          return;
+        }
+        const s = e.snap;
+        const state = s.state || "IDLE";
+        if (state !== lastState) { log("state", state); lastState = state; }
+        $("#state-chip").textContent = state;
+        $("#d-state").textContent = state;
+        $("#d-task").textContent = s.task ? `${s.task.name} · ${s.task.task_instance_id}` : "—";
+        $("#d-screen").textContent = `${s.screen.screen} (${s.screen.tone})`;
+        $("#d-speed").textContent = s.speed.value.toFixed(2) + (typeof s.progress === "number" ? ` · progress ${Math.round(s.progress * 100)}%` : "");
+        $("#d-pending").textContent = s.pending.map((p) => `${p.name} (${p.reason})`).join(", ") || "—";
+        if (s.sim) {
+          $("#auto-robot").checked = s.sim.auto_robot;
+          $("#safe-home").checked = s.sim.safe_home;
+        } else {
+          $("#state-chip").textContent = state + " · LIVE (sim panel disabled)";
+        }
+      });
+
+      $("#triggers").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-step]");
+        if (!b) return;
+        log("human", b.firstChild.textContent.trim());
+        sim({ event: "RECOGNITION_TRIGGER", step_id: Number(b.dataset.step) });
+      });
+      document.querySelectorAll("[data-robot]").forEach((b) =>
+        b.addEventListener("click", () => { log("robot", b.dataset.robot); sim({ event: b.dataset.robot }); }));
+      $("#auto-robot").addEventListener("change", (e) => sim({ event: "SETTINGS", auto_robot: e.target.checked }));
+      $("#safe-home").addEventListener("change", (e) => sim({ event: "SETTINGS", safe_home: e.target.checked }));
+      $("#sound").addEventListener("change", (e) => watch.setSound(e.target.checked));
+
+      document.querySelectorAll("[data-skin]").forEach((b) => b.addEventListener("click", () => {
+        document.querySelectorAll("[data-skin]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+        watch.setSkin(b.dataset.skin);
+      }));
+      document.querySelectorAll("[data-mode]").forEach((b) => b.addEventListener("click", () => {
+        document.querySelectorAll("[data-mode]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+        watch.setMode(b.dataset.mode);
+      }));
+      document.querySelectorAll("[data-shape]").forEach((b) => b.addEventListener("click", () => {
+        document.querySelectorAll("[data-shape]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+        watch.setShape(b.dataset.shape);
+      }));
+      document.querySelectorAll("[data-scale]").forEach((b) => b.addEventListener("click", () => {
+        document.querySelectorAll("[data-scale]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+        document.documentElement.style.setProperty("--scale", b.dataset.scale);
+      }));
+
+      $("#download").addEventListener("click", () => {
+        const csv = "time,kind,detail\n" + rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+        a.download = `watch_session_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`;
+        a.click();
+      });
+    </script>
+  </body>
+</html>
