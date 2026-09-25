@@ -123,7 +123,8 @@ class RecognitionManager:
             history_len=plot_history_len,
             conf_threshold=self.vision_config.conf_threshold,
             render_world_skeleton=render_world_skeleton,
-            record_path=record_path, record_fps=record_fps)
+            record_path=record_path, record_fps=record_fps,
+            step_names=config.STEP_NAMES)
 
         self.window_size: int | None = None
         self.num_steps: int | None = None
