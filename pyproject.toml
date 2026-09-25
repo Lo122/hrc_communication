@@ -31,10 +31,23 @@ dependencies = [
     # skeleton_utils/plotting (feature/label plots) + skeleton_utils/dataset/labels.py.
     "matplotlib>=3.7",
     "pandas>=2.0,<3.0",
+    # Live iPhone capture (1_recognition/src/camera_utils/iphone_connection.py,
+    # --iphone / VisionConfig.camera.video_source == "iphone"). A regular dependency
+    # rather than an extra: a plain `uv sync` removes extras that are not requested.
+    "record3d>=1.4",
     # -- 4_execution: UR robot arm (rtde_control/rtde_receive) + ROS bridge (roslibpy,
     # graceful no-op fallback if missing -- see ros_communication.py) --
     "ur-rtde>=1.6",
-    "roslibpy>=2.1",
+    # <2.0 because multi-actor-interface requires it. This project only uses Ros/Topic/
+    # Message (run, terminate, is_connected, advertise, publish, subscribe), all in 1.x.
+    "roslibpy>=1.8,<2.0",
+    # ROS robot control library, a sibling checkout (see [tool.uv.sources]). It ships a
+    # top-level `config` package, so scripts must put this repo's root FIRST on
+    # sys.path (insert(0, ...)) or `import config` picks up that package instead.
+    "multi-actor-interface",
+    # -- Interface/ (web UI, Interface/requirements.txt) --
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
     # -- messaging / ML utilities used elsewhere in the project --
     "pika>=1.3",
     "scikit-learn>=1.5",
@@ -45,14 +58,15 @@ dependencies = [
     "dotenv>=0.9.9",
 ]
 
-[project.optional-dependencies]
-# Live iPhone capture (1_recognition/src/camera_utils/iphone_connection.py) -- only
-# needed for --source iphone / VisionConfig.camera.video_source == "iphone".
-iphone = ["record3d"]
-
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
+# Not editable: an editable install is a .pth file holding the library's path, which
+# Python 3.10 reads in the Windows code page -- the "ä" in "Universität" (written as
+# UTF-8) then decodes wrong and the path is silently dropped, so `import core` fails.
+# After changing the library, pick the changes up with:
+#     uv sync --reinstall-package multi-actor-interface
+multi-actor-interface = { path = "../Multi-Actor-Interface-Library" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -67,3 +81,7 @@ environments = ["sys_platform == 'win32'"]
 # os error 396, ERROR_CLOUD_FILE_INCOMPATIBLE_HARDLINKS. Wheels with many small
 # files (pytz's zoneinfo tree) trip it most often.
 link-mode = "copy"
+# The environment itself lives OUTSIDE OneDrive, at C:\uv-venvs\hrc_communication:
+# uv has no pyproject setting for that, so UV_PROJECT_ENVIRONMENT is set per workspace
+# in .vscode/settings.json (terminal.integrated.env.windows). Never set it user-wide --
+# LSTM_HRC uses a different torch build and needs its own environment.

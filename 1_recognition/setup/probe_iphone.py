@@ -27,7 +27,7 @@ find out whether the phone's autofocus is quietly rescaling your intrinsics
 (MetricDepthEstimator's depth is linear in fy, so a 2% swing in fy is a 2%
 error on every world position).
 
-Requires the 'iphone' extra:  uv sync --extra iphone
+Uses record3d, a regular project dependency (installed by uv sync).
 """
 from __future__ import annotations
 

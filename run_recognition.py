@@ -4,9 +4,6 @@ Reads frames from a camera, an iPhone (Record3D) or a recorded file, runs them
 through RecognitionManager, and sends HUMAN_TASK_UPDATE (what the human is doing)
 and HUMAN_LOCATION_UPDATE events to the communication layer over UDP.
 
-This repo's venv lives outside the project tree, so point uv at it first:
-    $env:UV_PROJECT_ENVIRONMENT = "C:\\Users\\Owner\\.venvs\\hrc_communication"
-
 Four modes:
 
   full pipeline       vision + LSTM step classification (the default)
@@ -36,7 +33,8 @@ Usage:
         --extrinsics-file extrinsics_3840x2160_obs.json `
         --body-calibration 1_recognition/calib_data/body_uid-08.json `
         --fp16 `
-        --record 1_recognition/results/recognition_test/detection_test.mp4
+        --record 1_recognition/results/recognition_test/detection_test.mp4 `
+        --record-raw 1_recognition/results/recognition_test/detection_test_raw.mp4
 
     
     uv run python run_recognition.py `
@@ -136,7 +134,7 @@ def _parse_args() -> argparse.Namespace:
                               "enabled in the app). Also selects the iPhone calibration "
                               f"({IPHONE_INTRINSICS_FILE}/{IPHONE_EXTRINSICS_FILE}) and the "
                               f"capture rotation ({IPHONE_CAPTURE_ROTATE90} deg) they were "
-                              "calibrated with. Requires the 'iphone' extra: uv sync --extra iphone")
+                              "calibrated with. Uses record3d (a regular dependency).")
     parser.add_argument("--iphone-dev-idx", type=int, default=0,
                          help="Record3D device index when more than one device is connected.")
     parser.add_argument("--iphone-rotate", type=int, default=IPHONE_CAPTURE_ROTATE90,
@@ -217,10 +215,24 @@ def _parse_args() -> argparse.Namespace:
                               "what the preview window shows -- to this .mp4. Works with "
                               "--no-display for a headless capture. The scrolling debug "
                               "plot is a separate window and is not recorded.")
+    parser.add_argument("--record-raw", default=None, metavar="PATH",
+                         help="Also write the original camera frames, without any drawing, "
+                              "to this .mp4 -- exactly what the model gets (after the iPhone "
+                              "capture rotation, so the same calibration applies when it is "
+                              "replayed with --video-source). One frame per frame processed, "
+                              "so it lines up frame for frame with --record. A sibling "
+                              "<name>.timestamps.csv holds when each frame was taken.")
     parser.add_argument("--record-fps", type=float, default=None,
-                         help="Frame rate stamped into the --record file. Defaults to "
-                              "--loop-hz, which is the rate frames are actually rendered "
-                              "at, so the recording plays back at wall-clock speed.")
+                         help="Frame rate stamped into the --record/--record-raw files. "
+                              "Defaults to --loop-hz, which is the rate frames are actually "
+                              "processed at, so the recordings play back at wall-clock speed "
+                              "as long as the loop keeps up (see the timestamps CSV).")
+    parser.add_argument("--world-view-range", type=float, default=3.0,
+                         help="Half-width/height in metres of the preview's top-down world "
+                              "location panel (same as eval/pose_detection_live.py's flag).")
+    parser.add_argument("--trajectory-frames", type=int, default=200,
+                         help="How many past positions the world location panel draws as a "
+                              "fading trail.")
     parser.add_argument("--show-probabilities", action="store_true",
                          help="Show a live line-graph preview window of each task step's "
                               "softmax probability and the progress value over time -- see "
@@ -450,6 +462,9 @@ if __name__ == "__main__":
         render_world_skeleton=args.render_world_skeleton,
         record_path=args.record,
         record_fps=args.record_fps if args.record_fps is not None else args.loop_hz,
+        raw_record_path=args.record_raw,
+        world_view_range_m=args.world_view_range,
+        trajectory_frames=args.trajectory_frames,
         vision_config=_build_vision_config(args))
     task_updates = TaskUpdatePublisher()
     probability_plot: StepProbabilityPlot | None = None
@@ -460,6 +475,8 @@ if __name__ == "__main__":
     print(f"Publishing recognition events to {args.host}:{args.port}")
     if args.record:
         print(f"Recording the render screen to {args.record}")
+    if args.record_raw:
+        print(f"Recording the original camera video to {args.record_raw}")
 
     if args.fake_recognition:
         # Vision runs for real; only step classification comes from stdin.
@@ -561,6 +578,8 @@ if __name__ == "__main__":
                         payload={
                             "x": world_xyz[0], "y": world_xyz[1], "z": world_xyz[2],
                             "timestamp": recognition_manager.last_location_timestamp,
+                            # World-frame m/s from the position Kalman filter; None if off.
+                            "velocity": recognition_manager.last_world_velocity,
                             # Posture only: a pelvis-relative H36M-17 skeleton, separate
                             # from the world-frame x/y/z above.
                             "keypoints": recognition_manager.get_last_keypoints(),

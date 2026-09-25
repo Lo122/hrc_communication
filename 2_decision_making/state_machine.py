@@ -14,8 +14,9 @@ class StateMachine:
         (RobotTaskState.R_WAITING_RESPONSE, EventType.RESPONSE_TIMEOUT): RobotTaskState.R_PENDING,
         # The human did the offered task themselves; the offer is withdrawn.
         (RobotTaskState.R_WAITING_RESPONSE, EventType.H_TASK_DONE): RobotTaskState.R_CANCELED,
-        (RobotTaskState.R_REFUSED, EventType.H_EXECUTE_PENDING_TASK): RobotTaskState.R_ACCEPTED,
-        (RobotTaskState.R_PENDING, EventType.H_EXECUTE_PENDING_TASK): RobotTaskState.R_ACCEPTED,
+        # A pending task is offered again, never dispatched without a fresh H_ACCEPT.
+        (RobotTaskState.R_REFUSED, EventType.H_EXECUTE_PENDING_TASK): RobotTaskState.R_WAITING_RESPONSE,
+        (RobotTaskState.R_PENDING, EventType.H_EXECUTE_PENDING_TASK): RobotTaskState.R_WAITING_RESPONSE,
         (RobotTaskState.R_DEFER, EventType.DEFER_TIMEOUT): RobotTaskState.R_ACCEPTED,
         (RobotTaskState.R_DEFER, EventType.H_CANCEL): RobotTaskState.R_CANCELED,
         (RobotTaskState.R_ACCEPTED, EventType.H_CANCEL): RobotTaskState.R_RECOVERY_EVALUATING,

@@ -136,6 +136,7 @@ class ROSCommunication:
         xyz: tuple[float, float, float],
         timestamp: float | None = None,
         keypoints: dict[str, dict[str, float]] | None = None,
+        velocity: tuple[float, float, float] | None = None,
     ) -> None:
         """Publish the human's world-frame position (see
         1_recognition/src/skeleton3d_pipeline.py's world_root_xyz -- same
@@ -146,6 +147,8 @@ class ROSCommunication:
         included and always exactly (0,0,0), everything else relative to
         it) for consumers that need body shape, not just root position.
         keypoints is None when no valid 3D lift has been seen yet.
+        velocity is the world-frame m/s from recognition's position Kalman
+        filter (dt from real timestamps); null when the filter is off.
 
         Published as std_msgs/String, JSON-encoded: A single JSON string keeps position+keypoints as one
         message on one topic without needing a custom .msg package."""
@@ -157,6 +160,8 @@ class ROSCommunication:
             },
             "point": {"x": float(xyz[0]), "y": float(xyz[1]), "z": float(xyz[2])},
             "keypoints": keypoints if keypoints is not None else {},
+            "velocity": (None if velocity is None else
+                         {"x": float(velocity[0]), "y": float(velocity[1]), "z": float(velocity[2])}),
         }
         self._publish("human_position", {"data": json.dumps(body)})
 

@@ -15,6 +15,15 @@ STEP_NAMES = [
     "Screw",
     "Connect Cables",
     "Clamp Coupling",
+    "Non Related Task"
+]
+
+# The LSTM mistake head's output class names, in output-index order (only models
+# trained with config.json's "num_mistakes", e.g. best_model/3d_skeleton_01). Class 0
+# is "no mistake" -- RecognitionManager's mistake score is 1 - P(class 0).
+MISTAKE_NAMES = [
+    "OK",
+    "Mistake",
 ]
 
 RESPONSE_TIMEOUT_SECONDS = 20.0
@@ -58,7 +67,7 @@ TASK_BRING_CLAMPING_TOOL = 4
 TASK_RETURN_CLAMPING_TOOL = 5
 
 # When robot tasks are offered is no longer configured here: the task database's
-# "Robot task trigger info" drives it (2_decision_making/robot_trigger_policy.py).
+# "Robot task trigger info" drives it (2_decision_making/src/robot_trigger_policy.py).
 TASK_DATABASE_PATH = "2_decision_making/task_database/task_database.json"
 # P(next task | current task) from 2_decision_making/src/task_sequence_analysis.py,
 # the variant that keeps Lift (the model head and the database both have it).
@@ -68,6 +77,8 @@ TASK_TRANSITION_TABLE_PATH = "2_decision_making/results/task_sequence_lift/trans
 # the robot do but that have no entry here (Pull Cables, Place) are never dispatched.
 TRACKED_TO_ROBOT_TASK = {
     "Lift": TASK_LIFT_PANEL,
+    # Offered only for a panel the robot is holding (TaskManager checks that).
+    "Leave from the panel": TASK_LEAVE,
     "Bring Tool": TASK_BRING_CLAMPING_TOOL,
     "Bring Connector": TASK_BRING_CONNECTOR,
     "Bring back Tool": TASK_RETURN_CLAMPING_TOOL,
@@ -83,12 +94,15 @@ RECOGNITION_FILTER_OVERRIDE_FACTOR = 4
 # thresholds are 0-1). Check against a replay: training labels ran 0-100.
 RECOGNITION_PROGRESS_SCALE = 1.0
 # Recognition re-publishes a task update once progress has moved this much (0-1 scale).
-RECOGNITION_PROGRESS_PUBLISH_DELTA = 0.05
+RECOGNITION_PROGRESS_PUBLISH_DELTA = 0.02
 
 PERMISSION_MESSAGES = {
     TASK_LIFT_PANEL: "Would you like me to lift the panel? Say yes, no, or later after the beep, or type your reply.",
     TASK_LEAVE: "Screwing is finished. Would you like me to release the panel and move away? Say yes, no, or later after the beep, or type your reply.",
-    TASK_BRING_CONNECTOR: "I have moved away from the panel. Would you like me to bring the pipe connector? Say yes, no, or later after the beep, or type your reply.",
+    # No "I have moved away from the panel" here: it is said on its own after a leave
+    # (MessageManager.get_left_panel_message), and this offer also comes from the
+    # database rule when the robot never held the panel.
+    TASK_BRING_CONNECTOR: "Would you like me to bring the pipe connector? Say yes, no, or later after the beep, or type your reply.",
     TASK_BRING_CLAMPING_TOOL: "Would you like me to bring the clamping tool? Say yes, no, or later after the beep, or type your reply.",
     TASK_RETURN_CLAMPING_TOOL: "Would you like me to take the clamping tool back? Say yes, no, or later after the beep, or type your reply.",
 }
@@ -164,7 +178,7 @@ VOICE_ENABLED = True
 
 VOICE_GPT_ENABLED = False
 
-# List audio devices: .venv\Scripts\python.exe -m sounddevice
+# List audio devices: uv run python -m sounddevice
 VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-0.15"
 # Left at None, sounddevice falls back to the OS default input, which on this
 # laptop is a virtual NDI webcam audio device (no real signal) rather than the

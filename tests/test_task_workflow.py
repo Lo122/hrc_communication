@@ -3,7 +3,7 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -130,9 +130,7 @@ class WorkflowTests(unittest.TestCase):
         comm.poll()
         self.assertEqual(self.output.show_permission_request.call_count, 2)
 
-    def test_done_does_not_release_and_screw_done_is_only_valid_while_holding(self):
-        self.reply("screw done")
-        self.assertIsNone(self.manager.active_task)
+    def test_done_does_not_release_and_screw_done_releases_only_while_holding(self):
         self.trigger()
         self.reply("screw done")
         self.assertEqual(self.manager.active_task.task_id, 1)
@@ -144,6 +142,28 @@ class WorkflowTests(unittest.TestCase):
         self.reply("no")
         self.reply("done")
         self.assertEqual(self.manager.active_task.state, S.R_HOLDING)
+
+    def test_screw_done_without_held_panel_confirms_screw_and_offers_no_leave(self):
+        self.reply("screw done")
+        self.assertEqual(self.status("Screw"), T.DONE)
+        # Screw done unlocks Bring Tool as usual, but there is no panel to leave.
+        self.assertEqual(self.manager.active_task.task_id, config.TASK_BRING_CLAMPING_TOOL)
+        self.assertNotIn(config.TASK_LEAVE, [config.TRACKED_TO_ROBOT_TASK[entry["task_name"]]
+                                             for entry in self.manager.waiting_triggers])
+
+    def test_leave_goes_first_even_when_recognition_moved_on_before_screw_done(self):
+        self.hold()
+        self.trigger(SCREW)
+        self.trigger(CONNECT)  # Queues Bring Tool / Bring Connector / next Lift behind holding.
+        self.assertTrue(self.manager.waiting_triggers)
+        self.reply("screw done")
+        leave = self.manager.active_task
+        self.assertEqual((leave.task_id, leave.piece_id, leave.state),
+                         (config.TASK_LEAVE, 1, S.R_WAITING_RESPONSE))
+        self.reply("yes")
+        self.complete_robot()
+        self.assertTrue(any("moved away" in call.args[0] for call in self.output.show_message.call_args_list))
+        self.assertEqual(self.manager.active_task.task_id, config.TASK_BRING_CONNECTOR)
 
     def test_refusal_and_timeout_keep_leave_pending_without_proposing_connector(self):
         for event_type in (E.H_REFUSE, E.RESPONSE_TIMEOUT):
@@ -161,6 +181,9 @@ class WorkflowTests(unittest.TestCase):
                 self.trigger(CONNECT)
                 self.assertIsNone(self.manager.active_task)
                 self.reply(f"execute {leave.task_instance_id}")
+                self.assertEqual(leave.state, S.R_WAITING_RESPONSE)
+                self.assertEqual(self.udp.send.call_count, 1)
+                self.reply("yes")
                 self.complete_robot()
                 self.assertEqual(self.manager.active_task.task_id, 3)
                 # Bring Tool (from screw done) and piece 2's Lift (Connect Cables is a
@@ -207,8 +230,8 @@ class WorkflowTests(unittest.TestCase):
         old_id = self.manager.active_task.task_instance_id
         self.reply("later")
         self.reply("cancel")
-        # Bring Tool and Bring Connector, queued once when Screw passed 50%.
-        self.assertEqual(len(self.manager.waiting_triggers), 2)
+        # Bring Tool, queued once when Screw passed 50% (Bring Connector waits for the leave).
+        self.assertEqual(len(self.manager.waiting_triggers), 1)
         self.reply("screw done")
         retry = self.manager.active_task
         self.assertNotEqual(retry.task_instance_id, old_id)
@@ -367,6 +390,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.udp.send.call_count, 2)
         self.assertEqual(self.status("Bring Connector"), T.PENDING)
         self.reply(f"execute {connector_id}")
+        # Executing a pending task asks permission again rather than dispatching.
+        self.assertEqual(self.manager.active_task.state, S.R_WAITING_RESPONSE)
+        self.assertEqual(self.udp.send.call_count, 2)
+        self.assertEqual(self.status("Bring Connector"), T.PENDING)
+        self.reply("yes")
         self.assertEqual(self.udp.send.call_args.args[0]["step_id"], 3)
         self.assertEqual(self.status("Bring Connector"), T.WORKING)
 
@@ -389,12 +417,17 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(self.status(name), T.DONE, name)
         self.assertTrue(self.tracker.get("Align", 1).inferred)
 
-    def test_human_request_dispatches_without_trigger_or_permission(self):
+    def test_human_request_skips_trigger_but_still_asks_permission(self):
         self.reply("bring the tool")
         task = self.manager.active_task
-        self.assertEqual((task.task_id, task.state, task.piece_id), (config.TASK_BRING_CLAMPING_TOOL, S.R_ACCEPTED, 1))
-        self.output.show_permission_request.assert_not_called()
-        self.timer.start_response_timer.assert_not_called()
+        self.assertEqual((task.task_id, task.state, task.piece_id),
+                         (config.TASK_BRING_CLAMPING_TOOL, S.R_WAITING_RESPONSE, 1))
+        self.output.show_permission_request.assert_called_once()
+        self.timer.start_response_timer.assert_called_once_with(task.task_instance_id, ANY)
+        self.udp.send.assert_not_called()
+        self.assertEqual(self.status("Bring Tool"), T.PENDING)
+        self.reply("yes")
+        self.assertEqual(task.state, S.R_ACCEPTED)
         self.assertEqual(self.udp.send.call_args.args[0]["suggested_action"], "bring_clamping_tool")
         self.assertEqual(self.status("Bring Tool"), T.WORKING)
         self.complete_robot()
@@ -402,14 +435,34 @@ class WorkflowTests(unittest.TestCase):
         self.reply("bring the tool")  # Already done for piece 1 -> piece 2's.
         self.assertEqual(self.manager.active_task.piece_id, 2)
 
-    def test_human_request_while_busy_runs_next(self):
+    def test_refused_human_request_is_pooled_not_dispatched(self):
+        self.reply("bring the tool")
+        task = self.manager.active_task
+        self.reply("no")
+        self.assertIsNone(self.manager.active_task)
+        self.assertTrue(self.manager.pending_pool.contains(task.task_instance_id))
+        self.udp.send.assert_not_called()
+        # Asking again re-offers the pooled task -- it still needs a yes.
+        self.reply("bring the tool")
+        self.assertIs(self.manager.active_task, task)
+        self.assertEqual(task.state, S.R_WAITING_RESPONSE)
+        self.assertEqual(self.output.show_permission_request.call_count, 2)
+        self.udp.send.assert_not_called()
+        self.reply("yes")
+        self.assertEqual(task.state, S.R_ACCEPTED)
+        self.assertEqual(self.udp.send.call_count, 1)
+
+    def test_human_request_while_busy_is_asked_next(self):
         self.trigger()
         self.reply("bring the connector")
         self.assertEqual(self.manager.active_task.task_id, config.TASK_LIFT_PANEL)
         self.assertTrue(self.manager.waiting_triggers[0]["requested"])
-        self.reply("no")  # Lift refused -> pooled, so the request runs now.
+        self.reply("no")  # Lift refused -> pooled, so the request is offered now.
         task = self.manager.active_task
-        self.assertEqual((task.task_id, task.state), (config.TASK_BRING_CONNECTOR, S.R_ACCEPTED))
+        self.assertEqual((task.task_id, task.state), (config.TASK_BRING_CONNECTOR, S.R_WAITING_RESPONSE))
+        self.udp.send.assert_not_called()
+        self.reply("yes")
+        self.assertEqual(task.state, S.R_ACCEPTED)
 
     def test_robot_cannot_be_asked_for_human_only_or_unconfigured_task(self):
         self.manager.handle_event(Event(E.H_REQUEST_ROBOT_TASK, "test", payload={"task_name": "Screw"}))
@@ -424,7 +477,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(offer.state, S.R_CANCELED)
         self.timer.cancel_response_timer.assert_called()
         self.assertEqual((self.status("Bring Tool"), self.tracker.get("Bring Tool", 1).executor), (T.DONE, "Human"))
-        # The queued Bring Connector offer takes its place.
+        self.assertIsNone(self.manager.active_task)
+        self.reply("lifted")  # The human lifted this panel, so Connect Cables offers the connector.
+        self.trigger(CONNECT)
         self.assertEqual(self.manager.active_task.task_id, config.TASK_BRING_CONNECTOR)
         self.reply("no")
         self.assertEqual(len(self.manager.pending_pool.list_all()), 1)

@@ -8,16 +8,13 @@ The R1 permission question supports `H_ACCEPT`, `H_REFUSE`, and `H_DEFER`.
 
 ![Current Human Step 0 permission UI](./ui-preview.png)
 
-Install the backend dependencies from the repository root:
-
-```powershell
-uv pip install --python .venv\Scripts\python.exe -r Interface\requirements.txt
-```
+The backend dependencies (fastapi, uvicorn) are part of the project's
+`pyproject.toml`, so `uv sync` from the repository root installs them.
 
 Start the integrated FastAPI and HRC communication runtime:
 
 ```powershell
-.venv\Scripts\python.exe -B Interface\server.py
+uv run python -B Interface\server.py
 ```
 
 Run this command instead of `run_communication.py`, because both programs would
@@ -26,7 +23,7 @@ arrive through the existing configured event transport. For an H0 test without
 the recognition process, start with:
 
 ```powershell
-.venv\Scripts\python.exe -B Interface\server.py --debug-trigger
+uv run python -B Interface\server.py --debug-trigger
 ```
 
 Then open `http://127.0.0.1:8765`. The page polls `GET /api/permission` and only
@@ -62,7 +59,7 @@ is on screen (`watch_screens.py`), the page only renders it. See
 Run without robot, ROS, Grasshopper or microphone:
 
 ```powershell
-.venv\Scripts\python.exe -B Interface\server.py --simulate
+uv run python -B Interface\server.py --simulate
 ```
 
 Open `http://127.0.0.1:8765/sim`. The left side is the watch (Apple Watch or
@@ -84,5 +81,5 @@ phone vibrates on new questions (Android; iOS Safari has no vibration API).
 Tests:
 
 ```powershell
-.venv\Scripts\python.exe -m unittest Interface.test_watch Interface.test_server
+uv run python -m unittest Interface.test_watch Interface.test_server
 ```

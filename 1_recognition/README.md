@@ -158,11 +158,10 @@ packages for this part of the pipeline:
   import). **Not** installed: `mmcv`/`mmpose`/`mmdet` — this pipeline only
   needs YOLO 2D + MotionBERT, not any of mmpose's own models.
 - `matplotlib`, `pandas` (run comparison plots, `eval/analyse_runs.py`)
-- optional extra `iphone` → `record3d` (only needed for `video_source="iphone"`, see [iPhone (Record3D) capture](#iphone-record3d-capture))
+- `record3d` (for `video_source="iphone"`, see [iPhone (Record3D) capture](#iphone-record3d-capture))
 
 ```powershell
-uv sync                    # base deps
-uv sync --extra iphone     # + Record3D iPhone capture
+uv sync                    # everything, incl. Record3D iPhone capture
 ```
 
 ### MotionBERT setup
@@ -250,7 +249,7 @@ Live iPhone capture goes through Apple's USB video stream via the
 [Record3D](https://record3d.app/) app (paid, USB streaming mode), **not**
 DroidCam/Wi-Fi — see `src/camera_utils/iphone_connection.py`.
 
-1. Install the `iphone` extra: `uv sync --extra iphone`.
+1. `uv sync` (record3d is a regular dependency).
 2. Install Record3D on the iPhone, connect it to the PC over USB, enable
    "USB Streaming" mode in the app.
 3. Set `video_source="iphone"` (`RecognitionManager(video_source="iphone")`

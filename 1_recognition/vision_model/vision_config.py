@@ -117,6 +117,14 @@ class VisionConfig:
     beta: float = 0.007
     d_cutoff: float = 1.0
 
+    # PositionKalmanFilter on the world-frame root position (constant-velocity
+    # model, dt from real timestamps) -- see skeleton_utils/position_kalman_filter.py.
+    # Also provides the world-frame velocity published with the location.
+    use_position_kalman: bool = True
+    position_measurement_std_m: float = 0.08   # per-axis noise of one raw position
+    position_accel_std_mps2: float = 2.0       # higher = follows turns faster, smooths less
+    position_max_gap_s: float = 1.0            # longer gap -> re-initialise
+
     # BoneLengthConstraintFilter -- rescales each bone to a slowly-adapting
     # per-subject target, countering the frame-to-frame shrink/stretch a
     # monocular lifter produces from depth ambiguity. ON by default because

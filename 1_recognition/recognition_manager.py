@@ -25,7 +25,7 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 sys.path.append(str(Path(__file__).resolve().parents[1] / "0_core"))
 # For task_sequence_model (the transition table the stabilizer filters with).
-sys.path.append(str(Path(__file__).resolve().parents[1] / "2_decision_making"))
+sys.path.append(str(Path(__file__).resolve().parents[1] / "2_decision_making" / "src"))
 # src/ holds this layer's internals, on the path here so the collaborators below
 # import at module level like everything else.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
@@ -36,6 +36,7 @@ from vision_model.vision_config import VisionConfig
 from camera_utils.frame_source import FrameSource
 from logging_setup import get_logger
 from render_utils.debug_view import DebugView
+from render_utils.video_recorder import VideoRecorder
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
@@ -76,12 +77,15 @@ class RecognitionManager:
         display_window_name: str = "HRC Recognition",
         display_panel_size: tuple[int, int] = (480, 480),
         plot_window_name: str = "HRC Debug Plot",
-        plot_panel_size: tuple[int, int] = (480, 320),
+        plot_panel_size: tuple[int, int] = (600, 640),
         plot_history_len: int = 300,
+        world_view_range_m: float = 3.0,
+        trajectory_frames: int = 200,
         enable_step_model: bool = True,
         render_world_skeleton: bool = False,
         record_path: str | Path | None = None,
         record_fps: float = 20.0,
+        raw_record_path: str | Path | None = None,
         vision_config: VisionConfig | None = None,
     ):
         self.step_stabilizer = step_stabilizer
@@ -106,6 +110,7 @@ class RecognitionManager:
         self.device_name = device
         self.show_video = show_video
         self.display_panel_size = display_panel_size
+        self.world_view_range_m = world_view_range_m
 
         # Every knob for the vision pipeline. The video_source kwarg, if given, overrides
         # whatever the config carries.
@@ -126,7 +131,16 @@ class RecognitionManager:
             conf_threshold=self.vision_config.conf_threshold,
             render_world_skeleton=render_world_skeleton,
             record_path=record_path, record_fps=record_fps,
-            step_names=config.STEP_NAMES)
+            step_names=config.STEP_NAMES, mistake_names=config.MISTAKE_NAMES,
+            trajectory_len=trajectory_frames)
+        # The unrendered camera frames, as the model gets them (after any capture
+        # rotation), one per frame read -- so frame N here is frame N of record_path.
+        # The timestamps CSV beside it says when each was taken, since the loop rate
+        # the .mp4's fps assumes is not always the rate it actually ran at.
+        self._raw_recorder = (
+            VideoRecorder(raw_record_path, record_fps, label="raw camera video",
+                          write_timestamps=True)
+            if raw_record_path is not None else None)
 
         self.window_size: int | None = None
         self.num_steps: int | None = None
@@ -149,6 +163,9 @@ class RecognitionManager:
         # with no detection; None until the first valid one.
         self.last_world_xyz: tuple[float, float, float] | None = None
         self.last_location_timestamp: float | None = None
+        # World-frame velocity (m/s) from the position Kalman filter, refreshed together
+        # with last_world_xyz. None when the filter is off or before the first position.
+        self.last_world_velocity: tuple[float, float, float] | None = None
 
         # Posture only: a pelvis-relative H36M-17 skeleton, not fused with world position.
         # Same hold-last-valid policy as last_world_xyz. Joint names are resolved in
@@ -238,6 +255,10 @@ class RecognitionManager:
             frame = self._frames.read()
             if frame is None:
                 return None
+            if self._raw_recorder is not None:
+                # Before any processing, so nothing drawn later can end up in it.
+                frame_time = self._frames.last_timestamp
+                self._raw_recorder.write(frame, time.time() if frame_time is None else frame_time)
             # last_timestamp is the frame's place on the recording's timeline, None for a
             # live source -- update_from_frame then falls back to time.time().
             # last_intrinsics is this frame's K for sources that report one (iPhone),
@@ -308,6 +329,10 @@ class RecognitionManager:
         if world_xyz is not None and not np.isnan(world_xyz).any():
             self.last_world_xyz = (float(world_xyz[0]), float(world_xyz[1]), float(world_xyz[2]))
             self.last_location_timestamp = frame_timestamp
+            velocity = pipeline_out.get("world_root_velocity")
+            self.last_world_velocity = (
+                (float(velocity[0]), float(velocity[1]), float(velocity[2]))
+                if velocity is not None and np.isfinite(velocity).all() else None)
             self._view.record_world(self.last_world_xyz)
             record["world_xyz"] = self.last_world_xyz
         # DEBUG, not INFO: fires every frame (~20/s) and would bury everything else.
@@ -408,7 +433,9 @@ class RecognitionManager:
         self.last_step_probabilities_timestamp = frame_timestamp
         stable_step_id = self._stable_step_id(probabilities)
         self.last_raw_step_id = raw_step_id
-        self._view.record_prediction(progress, confidence)
+        self._view.record_prediction(progress, confidence, raw_step_id=raw_step_id,
+                                     stable_step_id=stable_step_id,
+                                     mistake_id=self.last_mistake_id)
 
         record.update(warmup=False, raw_step_id=raw_step_id, confidence=confidence,
                       progress=progress, stable_step_id=stable_step_id,
@@ -468,8 +495,10 @@ class RecognitionManager:
         self.vision_config.camera.live = live
 
     def release(self) -> None:
-        """Release the capture and close the debug windows."""
+        """Release the capture, finish the recordings and close the debug windows."""
         self._frames.release()
+        if self._raw_recorder is not None:
+            self._raw_recorder.close()
         self._view.close()
 
     # -- debug display -----------------------------------------------------
@@ -588,12 +617,19 @@ class RecognitionManager:
         self._skeleton_pipeline = RealtimeSkeleton3DPipeline(self.vision_config)
 
         renderer_3d = None
+        world_renderer = None
         if self.show_video:
             # Four-view (oblique/front/side/top) orthographic panel of the skeleton,
-            # shown beside the 2D overlay.
+            # shown beside the 2D overlay, then the top-down world location.
             from render_utils.skeleton_video import FastSkeleton3DRenderer
+            from render_utils.world_trajectory import WorldTrajectoryRenderer
             renderer_3d = FastSkeleton3DRenderer(self.display_panel_size)
-        self._view.attach_renderers(draw_2d_skeleton, renderer_3d)
+            if self._skeleton_pipeline.have_extrinsics:
+                T = self._skeleton_pipeline.T_world_from_camera
+                world_renderer = WorldTrajectoryRenderer(
+                    self.display_panel_size, view_range_m=self.world_view_range_m,
+                    camera_xy_world=(float(T[0, 3]), float(T[1, 3])))
+        self._view.attach_renderers(draw_2d_skeleton, renderer_3d, world_renderer)
 
         self._pipeline_ready = True
 
@@ -615,7 +651,7 @@ class RecognitionManager:
 
     def _observed_transitions(self) -> dict[int, list[int]] | None:
         """Step changes the annotated task sequences make plausible (see
-        2_decision_making/task_sequence_model.py). None -> the stabilizer's default."""
+        2_decision_making/src/task_sequence_model.py). None -> the stabilizer's default."""
         if self.num_steps != len(config.STEP_NAMES):
             logger.warning("Model has %s steps but config.STEP_NAMES has %s; "
                            "step transitions are not filtered.", self.num_steps, len(config.STEP_NAMES))

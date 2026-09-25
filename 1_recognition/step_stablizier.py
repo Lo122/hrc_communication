@@ -55,9 +55,9 @@ class StepIdStabilizer:
             self.pending_count = 0
             return self.stable_step_id
 
-        # if not self._is_allowed_transition(candidate):
-        #     self._clear_pending()
-        #     return self.stable_step_id
+        if not self._is_allowed_transition(candidate):
+            self._clear_pending()
+            return self.stable_step_id
 
         if candidate == self.stable_step_id:
             self._clear_pending()

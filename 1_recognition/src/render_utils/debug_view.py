@@ -5,18 +5,21 @@ Two OpenCV windows, both optional (with `show_video=False` and no `record_path`
 every call here is a no-op):
 
   - **preview**: the 2D keypoint overlay, optionally side by side with a
-    four-view orthographic 3D posture panel, with the model's current output
+    four-view orthographic 3D posture panel and a top-down world-location
+    panel (same layout as eval/pose_detection_live.py), with the model's current output
     burned into the top-left corner as text. Having the numbers ON the frame
     is the point -- otherwise debugging means correlating a separate console
     stream against the video by eye.
-  - **plot**: progress/confidence and world x/y/z scrolling against sample
-    index. A single-frame text overlay cannot show a trend, and the trend is
+  - **plot**: the step over time (raw and stable, labelled by step name),
+    progress/confidence, the mistake head's label and world x/y/z scrolling
+    against sample index. A single-frame text overlay cannot show a trend, and the trend is
     usually what is wrong.
 
 The preview can also be written to an .mp4 (`record_path`), which is the
 composited frame the preview window shows -- overlay, 3D panel and burned-in
-readout -- not the raw camera feed. Recording is independent of display, so a
-headless run can capture the same view it would have shown.
+readout -- not the raw camera feed (RecognitionManager's raw_record_path records
+that). Recording is independent of display, so a headless run can capture the
+same view it would have shown.
 
 Extracted from RecognitionManager because none of this is recognition: it
 reads the manager's output and owns nothing the manager needs back. Keeping
@@ -36,8 +39,17 @@ from pathlib import Path
 import numpy as np
 
 from logging_setup import get_logger
+from render_utils.video_recorder import VideoRecorder
 
 logger = get_logger(__name__)
+
+# Plot layout: every row leaves this many pixels on the left for the step row's
+# name labels, so all rows share one time axis.
+PLOT_LABEL_GUTTER = 110
+PLOT_LABEL_CHARS = 16
+PLOT_HEADER_H = 18
+# Relative heights of the plot rows: step, progress/confidence, mistake, world.
+PLOT_ROW_WEIGHTS = (0.34, 0.24, 0.16, 0.26)
 
 
 class DebugView:
@@ -64,6 +76,8 @@ class DebugView:
         record_path: str | Path | None = None,
         record_fps: float = 20.0,
         step_names: list[str] | tuple[str, ...] | None = None,
+        mistake_names: list[str] | tuple[str, ...] | None = None,
+        trajectory_len: int = 200,
     ):
         # Showing the windows and recording the composite are independent reasons to
         # do the compositing work, so neither implies the other: --no-display with a
@@ -92,26 +106,40 @@ class DebugView:
         # Passed in rather than imported so this module stays independent of the root
         # config; an id with no name falls back to "#<id>".
         self.step_names = tuple(step_names) if step_names is not None else ()
+        # Same for the mistake head (index 0 == no mistake).
+        self.mistake_names = tuple(mistake_names) if mistake_names is not None else ()
 
         self._cv2 = None
         self._draw_2d_skeleton = None
         self._renderer_3d = None
-        self._writer = None
-        self._record_size: tuple[int, int] | None = None
-        self._record_size_warned = False
+        self._world_renderer = None
+        self._recorder = (VideoRecorder(self.record_path, self.record_fps, label="debug view")
+                          if self.record_path is not None else None)
 
         self._progress_history: deque[float] = deque(maxlen=history_len)
         self._confidence_history: deque[float] = deque(maxlen=history_len)
         self._world_xyz_history: deque[tuple[float, float, float]] = deque(maxlen=history_len)
+        # Recorded alongside progress/confidence, so the step plot shares their x axis.
+        # NaN stands for "no step yet" (stable is None until the stabilizer commits).
+        self._raw_step_history: deque[float] = deque(maxlen=history_len)
+        self._stable_step_history: deque[float] = deque(maxlen=history_len)
+        self._mistake_history: deque[float] = deque(maxlen=history_len)
+        # World XY trail for the top-down location panel.
+        self._trajectory: deque[tuple[float, float]] = deque(maxlen=trajectory_len)
 
     # -- wiring ------------------------------------------------------------
 
-    def attach_renderers(self, draw_2d_skeleton, renderer_3d=None) -> None:
+    def attach_renderers(self, draw_2d_skeleton, renderer_3d=None, world_renderer=None) -> None:
         """Hand over the drawing callables once the realtime pipeline has
         imported them. Until this is called the preview still works, just
-        without the skeleton overlay or the 3D panel."""
+        without the skeleton overlay or the 3D panel.
+
+        world_renderer is a WorldTrajectoryRenderer, or None when there are no
+        extrinsics -- the location panel then says so instead of drawing an empty
+        map, since without extrinsics there is no world origin to place anyone in."""
         self._draw_2d_skeleton = draw_2d_skeleton
         self._renderer_3d = renderer_3d
+        self._world_renderer = world_renderer
 
     def _step_label(self, step_id: int | None) -> str:
         if step_id is None:
@@ -130,10 +158,18 @@ class DebugView:
 
     def record_world(self, world_xyz: tuple[float, float, float]) -> None:
         self._world_xyz_history.append(world_xyz)
+        self._trajectory.append((world_xyz[0], world_xyz[1]))
 
-    def record_prediction(self, progress: float, confidence: float) -> None:
+    def record_prediction(self, progress: float, confidence: float,
+                          raw_step_id: int | None = None,
+                          stable_step_id: int | None = None,
+                          mistake_id: int | None = None) -> None:
         self._progress_history.append(progress)
         self._confidence_history.append(confidence)
+        self._raw_step_history.append(float(raw_step_id) if raw_step_id is not None else np.nan)
+        self._stable_step_history.append(
+            float(stable_step_id) if stable_step_id is not None else np.nan)
+        self._mistake_history.append(float(mistake_id) if mistake_id is not None else np.nan)
 
     # -- drawing -----------------------------------------------------------
 
@@ -176,12 +212,13 @@ class DebugView:
         panel_w, panel_h = self.panel_size
         display = overlay
         if self._renderer_3d is not None:
-            # Side-by-side: 2D overlay | 3D posture (oblique/front/side/top),
-            # same layout as eval/pose_detection_live.py's preview window.
+            # Side-by-side: 2D overlay | 3D posture (oblique/front/side/top) | world
+            # location (top-down), same layout as eval/pose_detection_live.py's preview.
             panel_3d = self._renderer_3d.render(skeleton)
             display = cv2.hconcat([
                 cv2.resize(overlay, (panel_w, panel_h)),
                 cv2.resize(panel_3d, (panel_w, panel_h)),
+                cv2.resize(self._render_world_panel(world_xyz), (panel_w, panel_h)),
             ])
 
         display = self._draw_overlay(
@@ -201,49 +238,26 @@ class DebugView:
         if cv2.waitKey(1) & 0xFF == ord("q"):
             raise KeyboardInterrupt
 
+    def _render_world_panel(self, world_xyz):
+        cv2 = self._cv2
+        if self._world_renderer is None:
+            panel_w, panel_h = self.panel_size
+            panel = np.full((panel_h, panel_w, 3), 255, dtype=np.uint8)
+            for i, text in enumerate(("no calibrated extrinsics", "(no world location)")):
+                cv2.putText(panel, text, (10, panel_h // 2 + 22 * i),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 200), 1, cv2.LINE_AA)
+            return panel
+        current_xy = (world_xyz[0], world_xyz[1]) if world_xyz is not None else None
+        return self._world_renderer.render(list(self._trajectory), current_xy=current_xy)
+
     # -- recording ---------------------------------------------------------
 
     def _write_frame(self, display) -> None:
-        """Append one composited frame to the recording, opening the writer on the
-        first call.
-
-        The writer's frame size comes from that first frame rather than from
-        panel_size, because what is recorded is the finished composite -- 2D overlay
-        beside the 3D panel, model readout burned in -- which is wider than one panel
-        and is exactly what the preview window shows.
-
-        A writer that will not open (missing codec, unwritable path) disables
-        recording and logs once, rather than raising: losing the recording should not
-        take the recognition run down with it."""
-        if self.record_path is None:
-            return
-        cv2 = self._ensure_cv2()
-        height, width = display.shape[:2]
-
-        if self._writer is None:
-            self.record_path.parent.mkdir(parents=True, exist_ok=True)
-            writer = cv2.VideoWriter(
-                str(self.record_path), cv2.VideoWriter_fourcc(*"mp4v"),
-                self.record_fps, (width, height))
-            if not writer.isOpened():
-                logger.error("Could not open %s for recording (codec or path problem); "
-                             "continuing without a recording.", self.record_path)
-                self.record_path = None
-                return
-            self._writer = writer
-            self._record_size = (width, height)
-            logger.info("Recording the debug view to %s (%dx%d @ %.1f fps)",
-                        self.record_path, width, height, self.record_fps)
-
-        if (width, height) != self._record_size:
-            # A mid-run size change (source resolution switch) would be written as
-            # garbage by VideoWriter, so drop the frame and say so once.
-            if not self._record_size_warned:
-                logger.warning("Display size changed from %s to %s; those frames are "
-                               "left out of the recording.", self._record_size, (width, height))
-                self._record_size_warned = True
-            return
-        self._writer.write(display)
+        """Append one composited frame to the recording -- the finished composite
+        (2D overlay beside the 3D and location panels, model readout burned in),
+        exactly what the preview window shows."""
+        if self._recorder is not None:
+            self._recorder.write(display)
 
     def _draw_overlay(
         self,
@@ -309,22 +323,32 @@ class DebugView:
 
     def _draw_plot(self) -> None:
         """Scrolling time-series window (separate from the skeleton/overlay
-        window) of step progress/confidence and world x/y/z -- the trend
-        over time that a single-frame text overlay can't show."""
+        window) of the step, progress/confidence, mistake and world x/y/z -- the
+        trend over time that a single-frame text overlay can't show.
+
+        Every row leaves the same left gutter (the lane rows' name labels), so the
+        step, progress and mistake rows -- all one sample per LSTM prediction --
+        line up in time sample for sample."""
         panel_w, panel_h = self.plot_panel_size
         canvas = np.full((panel_h, panel_w, 3), 255, dtype=np.uint8)
-        top_h = panel_h // 2
+        # Row boundaries from PLOT_ROW_WEIGHTS: step, progress/confidence, mistake, world.
+        edges = np.round(np.cumsum([0.0, *PLOT_ROW_WEIGHTS]) / sum(PLOT_ROW_WEIGHTS)
+                         * panel_h).astype(int)
+        step_rows, progress_rows, mistake_rows, world_rows = (
+            (int(edges[i]), int(edges[i + 1])) for i in range(4))
 
+        self._draw_step_series(canvas, row_range=step_rows)
         self._draw_series(
-            canvas, row_range=(0, top_h), y_range=(0.0, 1.0), title="Progress / Confidence",
+            canvas, row_range=progress_rows, y_range=(0.0, 1.0), title="Progress / Confidence",
             series=[
                 (list(self._progress_history), (0, 150, 0), "progress"),
                 (list(self._confidence_history), (200, 0, 0), "confidence"),
             ],
         )
+        self._draw_mistake_series(canvas, row_range=mistake_rows)
         world = list(self._world_xyz_history)
         self._draw_series(
-            canvas, row_range=(top_h, panel_h), y_range=None, title="World position (m)",
+            canvas, row_range=world_rows, y_range=None, title="World position (m)",
             series=[
                 ([p[0] for p in world], (255, 0, 0), "x"),
                 ([p[1] for p in world], (0, 150, 150), "y"),
@@ -351,8 +375,6 @@ class DebugView:
         cv2 = self._cv2
         row0, row1 = row_range
         height = row1 - row0
-        width = canvas.shape[1]
-        maxlen = self._progress_history.maxlen or 1
 
         if y_range is None:
             # Finite values only: one NaN sample would otherwise make lo/hi NaN and
@@ -370,9 +392,8 @@ class DebugView:
         y_span = (y_hi - y_lo) or 1.0
 
         def to_point(index: int, value: float, n: int) -> tuple[int, int]:
-            x = int(round((width - 1) * (maxlen - n + index) / max(maxlen - 1, 1)))
             y = row0 + int(round((1.0 - (value - y_lo) / y_span) * (height - 1)))
-            return x, y
+            return self._plot_x(canvas, index, n), y
 
         for values, color, _label in series:
             n = len(values)
@@ -398,21 +419,117 @@ class DebugView:
                               color, 1, cv2.LINE_AA)
 
         legend = f"{title}  [" + ", ".join(label for _v, _c, label in series) + f"]  y:[{y_lo:.2f},{y_hi:.2f}]"
+        self._draw_row_frame(canvas, row_range, legend)
+
+    def _plot_x(self, canvas: np.ndarray, index: int, n: int) -> int:
+        """x pixel of sample `index` of an n-long series: newest at the right edge,
+        in deque-maxlen-relative position right of the label gutter."""
+        maxlen = self._progress_history.maxlen or 1
+        span = canvas.shape[1] - 1 - PLOT_LABEL_GUTTER
+        return PLOT_LABEL_GUTTER + int(round(span * (maxlen - n + index) / max(maxlen - 1, 1)))
+
+    def _draw_row_frame(self, canvas: np.ndarray, row_range: tuple[int, int], legend: str) -> None:
+        cv2 = self._cv2
+        row0, row1 = row_range
         cv2.putText(canvas, legend, (6, row0 + 14), cv2.FONT_HERSHEY_SIMPLEX,
                     0.4, (40, 40, 40), 1, cv2.LINE_AA)
+        cv2.line(canvas, (PLOT_LABEL_GUTTER, row0 + PLOT_HEADER_H), (PLOT_LABEL_GUTTER, row1),
+                 (220, 220, 220), 1)
         if row0 > 0:
-            cv2.line(canvas, (0, row0), (width, row0), (210, 210, 210), 1)
+            cv2.line(canvas, (0, row0), (canvas.shape[1], row0), (210, 210, 210), 1)
+
+    def _draw_step_series(self, canvas: np.ndarray, *, row_range: tuple[int, int]) -> None:
+        """Step over time: the stable step as a thick line and the raw argmax as
+        dots -- so a flickering raw prediction the stabilizer is holding back shows
+        as dots leaving the line."""
+        self._draw_lanes(
+            canvas, row_range=row_range, title="Step  [stable = line, raw = dots]",
+            lane_names=self.step_names, line_values=list(self._stable_step_history),
+            dot_values=list(self._raw_step_history))
+
+    def _draw_mistake_series(self, canvas: np.ndarray, *, row_range: tuple[int, int]) -> None:
+        """Mistake head's argmax over time, red while it says anything but class 0
+        ("no mistake"). A model without a mistake head only ever records NaN, and
+        the row says so rather than looking like a run with no mistakes."""
+        values = list(self._mistake_history)
+        title = "Mistake  [argmax of mistake head]"
+        if values and not any(np.isfinite(v) for v in values):
+            title = "Mistake  [model has no mistake head]"
+        lane_colors = [(200, 90, 0)] + [(0, 0, 220)] * max(len(self.mistake_names) - 1, 1)
+        self._draw_lanes(
+            canvas, row_range=row_range, title=title, lane_names=self.mistake_names,
+            line_values=values, lane_colors=lane_colors)
+
+    def _draw_lanes(
+        self,
+        canvas: np.ndarray,
+        *,
+        row_range: tuple[int, int],
+        title: str,
+        lane_names: tuple[str, ...],
+        line_values: list[float],
+        dot_values: list[float] | None = None,
+        lane_colors: list[tuple[int, int, int]] | None = None,
+    ) -> None:
+        """Label over time: one horizontal lane per class id, named in the left
+        gutter; line_values drawn as a thick step line, dot_values as dots.
+        lane_colors colours each flat stretch of the line by the lane it is in
+        (default: one colour for all). NaN breaks the line (no value yet)."""
+        cv2 = self._cv2
+        row0, row1 = row_range
+        dots = dot_values or []
+        seen = [v for v in line_values + dots if np.isfinite(v)]
+        num_lanes = max(len(lane_names), int(max(seen)) + 1 if seen else 1)
+
+        top = row0 + PLOT_HEADER_H
+        lane_h = (row1 - top) / num_lanes
+
+        def lane_y(lane: float) -> int:
+            return int(round(top + (lane + 0.5) * lane_h))
+
+        def lane_color(lane: float) -> tuple[int, int, int]:
+            if lane_colors and 0 <= int(lane) < len(lane_colors):
+                return lane_colors[int(lane)]
+            return (200, 90, 0)
+
+        for lane in range(num_lanes):
+            y = lane_y(lane)
+            cv2.line(canvas, (PLOT_LABEL_GUTTER, y), (canvas.shape[1], y), (238, 238, 238), 1)
+            label = lane_names[lane] if lane < len(lane_names) else f"#{lane}"
+            cv2.putText(canvas, label[:PLOT_LABEL_CHARS], (6, y + 4), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35, (80, 80, 80), 1, cv2.LINE_AA)
+
+        n = len(dots)
+        for i, value in enumerate(dots):
+            if np.isfinite(value):
+                cv2.circle(canvas, (self._plot_x(canvas, i, n), lane_y(value)), 2,
+                           (110, 110, 110), -1)
+
+        # Step-function line: hold the previous value until the sample where it
+        # changes, then jump -- a sloped line would suggest classes in between.
+        n = len(line_values)
+        previous: tuple[int, int, float] | None = None  # (x, y, value)
+        for i, value in enumerate(line_values):
+            if not np.isfinite(value):
+                previous = None
+                continue
+            x, y = self._plot_x(canvas, i, n), lane_y(value)
+            if previous is not None:
+                px, py, pvalue = previous
+                cv2.line(canvas, (px, py), (x, py), lane_color(pvalue), 2, cv2.LINE_AA)
+                if py != y:
+                    cv2.line(canvas, (x, py), (x, y), (160, 160, 160), 1, cv2.LINE_AA)
+            previous = (x, y, value)
+
+        self._draw_row_frame(canvas, row_range, title)
 
     # -- teardown ----------------------------------------------------------
 
     def close(self) -> None:
         """Finalise the recording and destroy both windows if they were opened."""
-        if self._writer is not None:
-            # Without this the container is left without its index and the file is
-            # unplayable, so it runs before the early return below.
-            self._writer.release()
-            self._writer = None
-            logger.info("Recording written to %s", self.record_path)
+        # Before the early return below: an unfinalised .mp4 is unplayable.
+        if self._recorder is not None:
+            self._recorder.close()
         if not self.show_windows or self._cv2 is None:
             return
         for window_name in (self.window_name, self.plot_window_name):

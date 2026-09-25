@@ -19,7 +19,8 @@ Implementation notes:
     - Consecutive entries of the same task (e.g. six Screw spans in a row) are merged into
       one "block" for the task-order table; the raw table keeps them as self-transitions.
 
-Outputs (CSV + PNG) go to 2_decision_making/task_sequence/:
+Outputs (CSV + PNG) go to 2_decision_making/task_sequence_lift/ by default (--out-dir to change;
+the committed tables live under 2_decision_making/results/):
     task_sequences.csv                 every task entry per take, in order
     transition_counts[_raw].csv        START/task -> task/END counts
     transition_probabilities[_raw].csv same, row-normalised (P(next | current))

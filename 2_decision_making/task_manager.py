@@ -1,7 +1,12 @@
 """Central HRC task state-management skeleton."""
 
+import sys
 import time
 from collections import deque
+from pathlib import Path
+
+# src/ holds this layer's helpers (task database, transition table, trigger policy).
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 import config
 from events import Event, EventType, RobotTaskState, TaskStatus
@@ -64,6 +69,9 @@ class TaskManager:
         # Robot offers waiting for the active task to finish:
         # {"task_name", "piece_id", "requested"}.
         self.waiting_triggers = deque()
+        # Piece whose panel the robot is holding, from the lift's holding state until
+        # the leave succeeds or recovery takes over. Only this panel can be left.
+        self._held_piece_id: int | None = None
         self._task_instance_counts = {}
         self._round_id = 0
         self._last_status_line = None
@@ -130,17 +138,34 @@ class TaskManager:
         self._offer_triggered_tasks()
 
     def _offer_triggered_tasks(self) -> None:
-        """Offer (or queue) every robot task the trigger rules allow right now."""
+        """Offer (or queue) every robot task the trigger rules allow right now.
+
+        Leaving a held panel goes first, ahead of anything already queued: until the
+        robot lets go of it, it can do nothing else."""
         if self.policy is None:
             return
-        for task_name, piece_id in self.policy.candidates():
+        candidates = sorted(self.policy.candidates(), key=lambda item: not self._releases_panel(item[0]))
+        for task_name, piece_id in candidates:
+            releases_panel = self._releases_panel(task_name)
+            if releases_panel and piece_id != self._held_piece_id:
+                # Not marked offered: the rule is checked again once a panel is held.
+                continue
             self.policy.mark_offered(task_name, piece_id)
-            if self.active_task is not None or self.waiting_triggers or self._leave_pending():
-                self.waiting_triggers.append({"task_name": task_name, "piece_id": piece_id, "requested": False})
+            if (self.active_task is not None or self._leave_pending()
+                    or (self.waiting_triggers and not releases_panel)):
+                entry = {"task_name": task_name, "piece_id": piece_id, "requested": False}
+                if releases_panel:
+                    self.waiting_triggers.appendleft(entry)
+                else:
+                    self.waiting_triggers.append(entry)
                 self.logger.log_message("Queued robot offer until the current task is released.",
                                         {"task_name": task_name, "piece_id": piece_id})
                 continue
-            self._start_robot_task(task_name, piece_id, requested=False)
+            self._start_robot_task(task_name, piece_id)
+
+    @staticmethod
+    def _releases_panel(task_name: str) -> bool:
+        return config.TRACKED_TO_ROBOT_TASK.get(task_name) == config.TASK_LEAVE
 
     def _start_next_waiting(self) -> None:
         while self.active_task is None and self.waiting_triggers and not self._leave_pending():
@@ -152,11 +177,13 @@ class TaskManager:
                 continue
             pooled = self._pooled_task(task_name, piece_id)
             if entry["requested"] and pooled is not None:
-                self._execute_pooled(pooled, "Requested pending task dispatched.")
+                self._reoffer_pooled(pooled, "Requested pending task offered again.")
             else:
-                self._start_robot_task(task_name, piece_id, requested=entry["requested"])
+                self._start_robot_task(task_name, piece_id)
 
-    def _start_robot_task(self, task_name: str, piece_id: int, requested: bool) -> None:
+    def _start_robot_task(self, task_name: str, piece_id: int) -> None:
+        """Create the robot task and ask the human's permission -- always, whether the
+        trigger rules chose it or the human asked for it."""
         task_id = config.TRACKED_TO_ROBOT_TASK[task_name]
         if self.policy is not None:
             self.policy.mark_offered(task_name, piece_id)
@@ -167,38 +194,39 @@ class TaskManager:
             "round_id": self._round_id,
             "progress": self.tracker.reference_progress if self.tracker is not None else 0.0,
         }
-        if not requested:
-            self._propose_task(context, task_id)
-            return
-        # The human asked for it: that request is the permission.
-        self._propose_task(context, task_id, ask_permission=False)
-        self._handle_accept(Event(EventType.H_ACCEPT, "human_request",
-                                  task_instance_id=self.active_task.task_instance_id))
+        self._propose_task(context, task_id)
 
     def _handle_robot_request(self, event: Event) -> None:
-        """Human asks the robot for a task: no trigger rule, no permission question."""
+        """Human asks the robot for a task: no trigger rule, but the robot still asks
+        permission before executing -- the request selects the task, it does not start it."""
         task_name = event.payload.get("task_name")
         if task_name not in config.TRACKED_TO_ROBOT_TASK or (
                 self.tracker is not None and not self.tracker.database.can_execute(task_name, ROBOT)):
             self.cli.show_message(f"Sorry, I cannot do {task_name or 'that task'}.",
                                   speech="Sorry, I cannot do that.")
             return
-        piece_id = self._request_piece(task_name)
+        if self._releases_panel(task_name):
+            if self._held_piece_id is None:
+                self.cli.show_message("I am not holding a panel.", speech="I am not holding a panel.")
+                return
+            piece_id = self._held_piece_id
+        else:
+            piece_id = self._request_piece(task_name)
         if piece_id is None:
             self.cli.show_message(f"{task_name} is already done or in progress.",
                                   speech=f"{task_name} is already done or in progress.")
             return
         if self.active_task is not None or self._leave_pending():
             self.waiting_triggers.appendleft({"task_name": task_name, "piece_id": piece_id, "requested": True})
-            self.cli.show_message(f"Okay, I will do {task_name} after the current task.",
-                                  speech=f"I will do {task_name} next.")
+            self.cli.show_message(f"Okay, I will ask about {task_name} after the current task.",
+                                  speech=f"I will ask about {task_name} next.")
             return
         pooled = self._pooled_task(task_name, piece_id)
         if pooled is not None:
-            self._execute_pooled(pooled, "Human requested the pending task; dispatched.")
+            self._reoffer_pooled(pooled, "Human requested the pending task; asking permission.")
             return
         self.logger.log_message("Human requested robot task.", {"task_name": task_name, "piece_id": piece_id})
-        self._start_robot_task(task_name, piece_id, requested=True)
+        self._start_robot_task(task_name, piece_id)
 
     def _request_piece(self, task_name: str) -> int | None:
         if self.tracker is None:
@@ -253,6 +281,10 @@ class TaskManager:
     def _tracked_task_open(self, task_name: str, piece_id: int, allow_working=False) -> bool:
         if self.tracker is None:
             return True
+        if not self.tracker.database.in_task_lists(task_name):
+            # Not tracked per piece (Leave from the panel): the pending pool and the
+            # trigger policy's once-per-piece offer are its only state.
+            return True
         task = self.tracker.get(task_name, piece_id)
         if task is None:
             return False
@@ -297,7 +329,7 @@ class TaskManager:
 
     # -- robot tasks ------------------------------------------------------------
 
-    def _propose_task(self, context: dict, task_id: int, ask_permission: bool = True) -> None:
+    def _propose_task(self, context: dict, task_id: int) -> None:
         """Ask permission for one robot action, retaining its human context."""
         step_id = context["step_id"]
         piece_id = context["piece_id"]
@@ -319,9 +351,10 @@ class TaskManager:
         self.active_task = task
         self._sync_tracker(task, Event(EventType.HUMAN_TASK_UPDATE, "task_manager"))
         self.logger.log_message("Task entered R_WAITING_RESPONSE.", {"task_instance_id": task.task_instance_id})
-        if not ask_permission:
-            return
+        self._ask_permission(task)
 
+    def _ask_permission(self, task: RobotTask) -> None:
+        """The only way into execution: every robot task waits here for H_ACCEPT."""
         message = self.message_manager.get_permission_message(task.task_id)
         self.cli.show_permission_request(
             message, speech=self.message_manager.get_permission_message(task.task_id, spoken=True),
@@ -360,10 +393,11 @@ class TaskManager:
         xyz = (event.payload["x"], event.payload["y"], event.payload["z"])
         timestamp = event.payload.get("timestamp")
         keypoints = event.payload.get("keypoints")
+        velocity = event.payload.get("velocity")
         # UDPEventReceiver is message transfer
         # self.gh_dispatcher.dispatch_human_location(xyz, timestamp)
         # ROS message transfer
-        self.ros.publish_human_location(xyz, timestamp, keypoints)
+        self.ros.publish_human_location(xyz, timestamp, keypoints, velocity)
 
     def _handle_accept(self, event: Event) -> None:
         if self.active_task is not None:
@@ -466,17 +500,18 @@ class TaskManager:
             self._log_invalid(event, "Execute the pending leave task before starting another task.")
             return
 
-        self._execute_pooled(self.pending_pool.get(event.task_instance_id),
-                             "Pending task dispatched; waiting for robot running status.", event)
+        self._reoffer_pooled(self.pending_pool.get(event.task_instance_id),
+                             "Pending task offered again; waiting for permission.", event)
 
-    def _execute_pooled(self, task: RobotTask, message: str, event: Event | None = None) -> None:
-        """Dispatch a refused/timed-out robot task from the pending pool."""
+    def _reoffer_pooled(self, task: RobotTask, message: str, event: Event | None = None) -> None:
+        """Bring a refused/timed-out robot task back from the pending pool and ask
+        permission again; it is dispatched only on H_ACCEPT, like any other offer."""
         if event is None:
             event = Event(EventType.H_EXECUTE_PENDING_TASK, "task_manager", task.task_instance_id)
         self.pending_pool.remove(task.task_instance_id)
         self.active_task = task
-        self.gh_dispatcher.dispatch_task(task)
-        self._transition(task, RobotTaskState.R_ACCEPTED, event, message)
+        self._transition(task, RobotTaskState.R_WAITING_RESPONSE, event, message)
+        self._ask_permission(task)
 
     def _handle_pause(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
@@ -718,6 +753,10 @@ class TaskManager:
     def _finish_canceled_task(self, task: RobotTask, event: Event, message: str) -> None:
         self._transition(task, RobotTaskState.R_CANCELED, event, message)
         self.active_task = None
+        if (task.task_id in (config.TASK_LIFT_PANEL, config.TASK_LEAVE)
+                and task.piece_id == self._held_piece_id):
+            # Recovery (homing or manual) has taken the panel out of the robot's hands.
+            self._held_piece_id = None
         self.cli.show_message(
             self.message_manager.get_acknowledgement(EventType.H_CANCEL),
             speech=self.message_manager.get_acknowledgement(EventType.H_CANCEL, spoken=True),
@@ -758,6 +797,7 @@ class TaskManager:
 
     def _enter_holding(self, task: RobotTask, event: Event) -> None:
         self._transition(task, RobotTaskState.R_HOLDING, event, "Panel held; waiting for screw done.")
+        self._held_piece_id = task.piece_id
         message = self.message_manager.get_holding_message()
         speech = self.message_manager.get_holding_message(spoken=True)
         if event.event_type == EventType.H_CANCEL:
@@ -766,16 +806,45 @@ class TaskManager:
         self.cli.show_message(message, speech=speech)
 
     def _handle_screw_done(self, event: Event) -> None:
+        """ "screw done": confirms Screw. While the robot holds the panel, this is also
+        what ends the holding, and the database's "Leave from the panel" rule (previous
+        task Screw, "Done signal") then offers the leave -- ahead of anything else
+        Screw unlocks, such as Bring Tool."""
+        active = self.active_task
+        if active is None or active.state != RobotTaskState.R_HOLDING:
+            if self._held_piece_id is not None or (
+                    active is not None and active.task_id == config.TASK_LIFT_PANEL):
+                # Lifting or adjusting the panel, or the leave is already asked/pending.
+                self._log_invalid(event, "Screw done while the robot is handling the panel.")
+                return
+            # The robot holds no panel: only the human's Screw is confirmed.
+            self._handle_task_done(Event(EventType.H_TASK_DONE, event.source, payload={"task_name": "Screw"}))
+            return
+
         task = self._require_active(event, RobotTaskState.R_HOLDING)
         if task is None:
             return
-        self._transition(task, RobotTaskState.R_DONE, event, "Screwing finished; proposing leave action.")
+        self._transition(task, RobotTaskState.R_DONE, event, "Screwing finished; the panel can be released.")
+        self.active_task = None
         if self.tracker is not None:
             self.tracker.confirm_done("Screw", HUMAN, task.piece_id)
             self._withdraw_finished_offers()
-        self._propose_followup(task, config.TASK_LEAVE)
-        # Screw done can unlock support tasks; they queue behind the leave action.
+        if task.task_id == config.TASK_LEAVE or self.policy is None:
+            # A delayed leave canceled back to holding (its rule already fired for this
+            # piece), or no trigger rules at all: ask about leaving again directly.
+            self._propose_followup(task, config.TASK_LEAVE)
         self._offer_triggered_tasks()
+        if not self._leave_offered(task.piece_id):
+            self.logger.log_message(
+                "Screw done, but no leave was offered; the robot keeps holding the panel. "
+                "Check the 'Leave from the panel' rule in the task database.",
+                {"piece_id": task.piece_id})
+
+    def _leave_offered(self, piece_id: int) -> bool:
+        active = self.active_task
+        return ((active is not None and active.task_id == config.TASK_LEAVE)
+                or any(self._releases_panel(entry["task_name"]) and entry["piece_id"] == piece_id
+                       for entry in self.waiting_triggers))
 
     def _handle_robot_running(self, event: Event) -> None:
         # time.sleep(config.RECOVERY_STOP_DELAY_SECONDS)
@@ -849,6 +918,9 @@ class TaskManager:
         self._transition(task, RobotTaskState.R_DONE, event, "Robot success received.")
         self.active_task = None
         if task.task_id == config.TASK_LEAVE:
+            self._held_piece_id = None
+            self.cli.show_message(self.message_manager.get_left_panel_message(),
+                                  speech=self.message_manager.get_left_panel_message(spoken=True))
             self._propose_followup(task, config.TASK_BRING_CONNECTOR)
             return
         self.cli.show_message(

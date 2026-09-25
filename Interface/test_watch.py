@@ -1,7 +1,7 @@
 """Tests for the state-driven watch screens, watch API and simulator.
 
 Run from the repository root:
-    .venv\\Scripts\\python.exe -m unittest Interface.test_watch
+    uv run python -m unittest Interface.test_watch
 """
 
 from __future__ import annotations

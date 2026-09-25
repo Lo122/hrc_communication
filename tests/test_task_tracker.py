@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 for layer in ("0_core", "1_recognition", "2_decision_making"):
     sys.path.insert(0, str(ROOT / layer))
 sys.path.insert(0, str(ROOT / "1_recognition" / "src"))
+sys.path.insert(0, str(ROOT / "2_decision_making" / "src"))
 
 import config
 from events import TaskStatus as T
@@ -44,7 +45,12 @@ class TaskDatabaseTests(unittest.TestCase):
         self.assertTrue(DATABASE.can_execute("Lift", "Robot"))
         self.assertFalse(DATABASE.can_execute("Screw", "Robot"))
         rule = DATABASE.trigger_rules["Bring Tool"]
-        self.assertEqual((rule.previous_tasks, rule.progress), (("Screw", "Connect Cables"), 0.5))
+        self.assertEqual((rule.previous_tasks, rule.progress, rule.done_signal),
+                         (("Screw", "Connect Cables"), 0.5, False))
+        leave = DATABASE.trigger_rules["Leave from the panel"]
+        self.assertEqual((leave.previous_tasks, leave.done_signal), (("Screw",), True))
+        # A robot action outside the pieces' assembly: never blocks a piece's completion.
+        self.assertFalse(DATABASE.in_task_lists("Leave from the panel"))
 
     def test_rejects_unknown_task_names(self):
         with self.assertRaises(ValueError):
@@ -170,18 +176,29 @@ class RobotTriggerPolicyTests(unittest.TestCase):
         self.tracker.on_task_recognized("Align", 0.9)
         self.assertEqual(self.names(), [])
         self.tracker.on_task_recognized("Screw", 0.5)
-        self.assertEqual(self.policy.candidates(), [("Bring Tool", 1), ("Bring Connector", 1)])
+        self.assertEqual(self.policy.candidates(), [("Bring Tool", 1)])
 
     def test_confirmed_previous_task_counts_as_full_progress(self):
         self.tracker.on_task_recognized("Screw", 0.1)
         self.tracker.confirm_done("Screw")
         self.assertIn("Bring Tool", self.names())
 
+    def test_done_signal_rule_needs_confirmation_not_recognized_progress(self):
+        self.tracker.on_task_recognized("Screw", 1.0)
+        self.assertNotIn("Leave from the panel", self.names())
+        # Recognition has moved on by the time "screw done" arrives: still counts.
+        self.tracker.on_task_recognized("Connect Cables", 0.2)
+        self.tracker.confirm_done("Screw")
+        self.assertIn(("Leave from the panel", 1), self.policy.candidates())
+        self.policy.mark_offered("Leave from the panel", 1)
+        self.assertNotIn("Leave from the panel", self.names())
+
     def test_each_task_is_offered_once_per_piece(self):
         self.tracker.on_task_recognized("Screw", 0.9)
+        self.assertEqual(self.names(), ["Bring Tool"])
         self.policy.mark_offered("Bring Tool", 1)
         self.assertEqual(self.tracker.get("Bring Tool", 1).status, T.PENDING)
-        self.assertEqual(self.names(), ["Bring Connector"])
+        self.assertEqual(self.names(), [])
 
     def test_done_or_working_tasks_are_not_offered(self):
         self.tracker.confirm_done("Bring Tool", "Human")

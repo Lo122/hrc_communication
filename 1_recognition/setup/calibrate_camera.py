@@ -90,7 +90,6 @@ Record3D / iPhone:
         --marker-id 0 --marker-length-mm 200 --ground-z -0.70
 
     # both back to back (add --use-reported-intrinsics to skip the board)
-    $env:UV_PROJECT_ENVIRONMENT = "C:\\Users\\Owner\\.venvs\\hrc_communication"
     uv run python 1_recognition/setup/calibrate_camera.py iphone-full `
         --capture-rotate90 270 `
         --use-reported-intrinsics --num-samples 60 `

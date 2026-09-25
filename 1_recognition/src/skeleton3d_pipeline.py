@@ -49,6 +49,7 @@ from skeleton_utils.coco_h36m import coco_to_h36m_xy  # noqa: E402
 from skeleton_utils.keypoint_filter import KeypointOutlierHoldFilter  # noqa: E402
 from skeleton_utils.metric_depth_estimator import MetricDepthEstimator  # noqa: E402
 from skeleton_utils.person_selection import select_tracked_person_keypoints  # noqa: E402
+from skeleton_utils.position_kalman_filter import PositionKalmanFilter  # noqa: E402
 from feature_utils.h36m_features import (  # noqa: E402
     FEATURE_JOINTS, L_SHOULDER, R_SHOULDER, compute_distance_from_center_ratio,
     compute_joint_angles, compute_polar, compute_ratios,
@@ -239,6 +240,13 @@ class RealtimeSkeleton3DPipeline:
             focal_length_y=fy, min_cutoff=config.min_cutoff, beta=config.beta,
             d_cutoff=config.d_cutoff)
 
+        self.position_filter = None
+        if config.use_position_kalman:
+            self.position_filter = PositionKalmanFilter(
+                measurement_std_m=config.position_measurement_std_m,
+                accel_std_mps2=config.position_accel_std_mps2,
+                max_gap_s=config.position_max_gap_s)
+
     def reset(self) -> None:
         """Clear all per-subject state. Call between people.
 
@@ -255,6 +263,8 @@ class RealtimeSkeleton3DPipeline:
             self.bone_filter.reset()
             if self.calibration is not None and self.calibration.bone_lengths:
                 self.bone_filter.seed(self.calibration.bone_lengths)
+        if self.position_filter is not None:
+            self.position_filter.reset()
 
     def process(self, frame, timestamp: float, K=None) -> dict[str, Any]:
         """Run one frame through the pipeline.
@@ -269,7 +279,10 @@ class RealtimeSkeleton3DPipeline:
         Returns a dict with:
             keypoints_2d, keypoints_conf, kp_status  YOLO output, post-filter
             root_relative    camera-frame posture, or None if nothing detected
-            world_root_xyz   (3,), nan-filled when position is unavailable
+            world_root_xyz   (3,), nan-filled when position is unavailable;
+                             Kalman-filtered when use_position_kalman is on
+            world_root_xyz_raw       (3,), the same position before the Kalman filter
+            world_root_velocity      (3,) m/s from the Kalman filter, else nan-filled
             skeleton         world-frame fusion when extrinsics and depth both
                              resolved this frame, else root_relative, else None
         """
@@ -298,6 +311,8 @@ class RealtimeSkeleton3DPipeline:
             "root_relative": None,
             "root_relative_world": None,
             "world_root_xyz": np.full(3, np.nan),
+            "world_root_xyz_raw": np.full(3, np.nan),
+            "world_root_velocity": np.full(3, np.nan),
             "skeleton": None,
         }
         if keypoints_2d is None or not np.any(keypoints_2d):
@@ -326,6 +341,12 @@ class RealtimeSkeleton3DPipeline:
             pelvis_px = coco_to_h36m_xy(keypoints_2d)[H36M_ROOT]
             root_camera_xyz = tf.pixel_depth_to_camera_point(K_frame, pelvis_px, z_filtered)
             world_root_xyz = tf.camera_point_to_world(self.T_world_from_camera, root_camera_xyz)
+            out["world_root_xyz_raw"] = world_root_xyz
+            if self.position_filter is not None:
+                # timestamp is real time (wall clock live, the recording's own timeline
+                # for a file), so dt -- and the velocity -- follow actual frame spacing.
+                world_root_xyz = self.position_filter.update(world_root_xyz, timestamp)
+                out["world_root_velocity"] = self.position_filter.velocity
             out["world_root_xyz"] = world_root_xyz
             # The same posture in three useful forms. root_relative is camera-frame:
             # its axes are the lens's, so it only means anything alongside the camera's

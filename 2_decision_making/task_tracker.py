@@ -20,8 +20,13 @@ repeated step (the annotations show Pull Cables twice per piece) stays on the
 current piece instead of starting the next one.
 """
 
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
+
+# src/ holds this layer's helpers (task database, transition table, trigger policy).
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from events import TaskStatus
 from task_database import HUMAN, ROBOT

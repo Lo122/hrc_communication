@@ -4,12 +4,17 @@ A robot task is offered automatically only when all of these hold:
   1. the database lets the robot do it and a robot action is configured for it;
   2. it is still open (not WORKING, not DONE) and not yet offered for that piece;
   3. the human's reference task (the one being worked on, or the one just
-     confirmed done) is one of the rule's previous tasks, at >= its progress.
+     confirmed done) is one of the rule's previous tasks, at >= its progress --
+     or, for a "Done signal" rule, one of them is confirmed done on that piece.
 
 Support tasks (Bring Tool etc.) belong to the piece the human is on. A task the
 human also does per piece (Lift, Pull Cables) moves on to the next piece once it
 is done on this one, so the robot can prepare the next panel while the human is
-still finishing the current one.
+still finishing the current one. A robot action on no piece's task list (Leave
+from the panel) is offered once for the piece the human is on.
+
+Whether the robot can act at all right now -- it can only leave a panel it is
+holding -- is TaskManager's call, not this module's.
 
 A human asking the robot directly (H_REQUEST_ROBOT_TASK) does not go through here.
 """
@@ -58,6 +63,9 @@ class RobotTriggerPolicy:
 
     def target_piece(self, task_name: str) -> int | None:
         piece_id = self._reference_piece()
+        if not self.database.in_task_lists(task_name):
+            # Not tracked per piece; the offer itself (mark_offered) keeps it to once.
+            return piece_id
         task = self.tracker.get(task_name, piece_id)
         if task is not None and task.status in OPEN_STATUSES:
             return piece_id
@@ -73,8 +81,15 @@ class RobotTriggerPolicy:
         return self.tracker.human_piece_id if piece_id is None else piece_id
 
     def _rule_met(self, rule) -> bool:
-        reference = self.tracker.reference_task
-        return (reference in rule.previous_tasks
+        if rule.done_signal:
+            # Any previous task confirmed done on the piece the human is on -- not only
+            # the reference task, since recognition may already have moved on to the
+            # next step when "screw done" arrives. Recognized progress never counts: it
+            # is clamped to 1.0 near the end of a task and would pass for the signal.
+            piece_id = self._reference_piece()
+            tasks = (self.tracker.get(name, piece_id) for name in rule.previous_tasks)
+            return any(task is not None and task.status == TaskStatus.DONE for task in tasks)
+        return (self.tracker.reference_task in rule.previous_tasks
                 and self.tracker.reference_progress >= rule.progress)
 
     def _robot_action(self, task_name: str) -> bool:

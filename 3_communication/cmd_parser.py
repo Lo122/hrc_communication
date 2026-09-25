@@ -42,8 +42,9 @@ class CommandParser:
     }
 
     # Human confirms a task is finished -> H_TASK_DONE {task_name} (task database names).
-    # "screw done" stays H_SCREW_DONE above: while the robot holds the panel it also
-    # releases it, and the tracker marks Screw done either way.
+    # "screw done" stays H_SCREW_DONE above: it confirms Screw, and while the robot
+    # holds the panel it also ends the holding, after which the task database's
+    # "Leave from the panel" rule offers to release the panel (see TaskManager).
     _TASK_DONE_ALIASES = {
         "cables pulled": "Pull Cables",
         "pull cables done": "Pull Cables",
@@ -62,8 +63,8 @@ class CommandParser:
         "tool returned": "Bring back Tool",
     }
 
-    # Human asks the robot for a task -> H_REQUEST_ROBOT_TASK {task_name}; no permission
-    # question follows, since the request is the permission.
+    # Human asks the robot for a task -> H_REQUEST_ROBOT_TASK {task_name}. It skips the
+    # trigger rules, but the robot still asks permission before executing.
     _ROBOT_REQUEST_ALIASES = {
         "lift the panel": "Lift",
         "bring the tool": "Bring Tool",

@@ -3,6 +3,11 @@ import math
 import sys
 import time
 from collections import deque
+from pathlib import Path
+
+# Repo root first: multi-actor-interface installs a top-level `config` package too,
+# which would otherwise shadow this repo's config.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import roslibpy
 from rtde_control import RTDEControlInterface

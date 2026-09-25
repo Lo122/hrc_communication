@@ -41,6 +41,11 @@ class MessageManager:
             return "Panel lifted. Enable free drive for adjustment?"
         return 'The panel is lifted. Would you like free drive for manual adjustment? Say yes or no after the beep, or type your reply. You can also say free drive.'
 
+    def get_left_panel_message(self, *, spoken=False) -> str:
+        if spoken:
+            return "I have moved away from the panel."
+        return "I have released the panel and moved away from it."
+
     def get_holding_message(self, *, spoken=False) -> str:
         if spoken:
             return 'Holding the panel. Say "screw done" when finished.'
@@ -52,7 +57,7 @@ class MessageManager:
             return "Task pending." + holding
         reason = "No reply received." if task.pending_reason == "timeout" else "Okay."
         holding = " I will keep holding the panel." if task.task_id == config.TASK_LEAVE else ""
-        return f'{reason} This task is pending.{holding} To start it when ready, type "execute {task.task_instance_id}".'
+        return f'{reason} This task is pending.{holding} To be asked again when ready, type "execute {task.task_instance_id}".'
 
     def get_defer_message(self, task, duration: float, *, spoken=False) -> str:
         if spoken:
