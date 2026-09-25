@@ -26,10 +26,17 @@ Two read modes, and the difference between them is the point:
 A live source is timestamped with `None` (the caller falls back to
 `time.time()`): its frames really do arrive when they arrive, and it has no
 recording timeline to be placed on.
+
+A recorded file with a sibling <name>.timestamps.csv (written by --record-raw,
+see recorded_take.py) is placed on the timeline those capture times give
+instead of `index / fps`: a live take is written at a nominal fps but was
+captured at whatever rate its loop managed, so `index / fps` would replay it
+too fast.
 """
 
 from __future__ import annotations
 
+import bisect
 import sys
 import time
 from pathlib import Path
@@ -45,6 +52,9 @@ _STREAM_URL_PREFIXES = ("rtsp://", "rtmp://", "http://", "https://", "udp://", "
 
 # Accepted CameraConfig.capture_backend values, also used by setup/video_source.py.
 BACKEND_NAMES = ("auto", "dshow", "msmf", "any")
+
+# Consecutive pixel-identical live frames before the source is reported as frozen.
+FROZEN_FRAME_WARN_AFTER = 10
 
 
 def resolve_backend(name="auto"):
@@ -117,6 +127,9 @@ class FrameSource:
         self._fps: float | None = None
         self._next_index = 0
         self._last_timestamp: float | None = None
+        # Capture times of a recorded file's frames, from its .timestamps.csv; None
+        # means the nominal index / fps.
+        self._recorded_times: list[float] | None = None
 
         self.frames_read = 0
         self.frames_dropped = 0
@@ -129,6 +142,11 @@ class FrameSource:
         self._last_seq: int | None = None
         self.frame_age_s: float | None = None  # capture-to-read age of the frame just read
         self.frame_age_sum_s = 0.0
+        # Consecutive live frames with identical pixels. A real sensor always has some
+        # noise, so a run of these means the source is re-sending a frozen picture (e.g.
+        # the phone app paused) while still looking connected.
+        self._last_signature: bytes | None = None
+        self.identical_frames = 0
 
         # Set once a RECORDED source runs out. A live source returning no frame is a
         # hiccup to ride out; a file that ends is the end of the run.
@@ -188,6 +206,7 @@ class FrameSource:
             self._stamp_sequential(frame, live=bool(self.camera.live))
             if self.camera.live:
                 self._count_live_drops(frame)
+                self._check_frozen(frame)
 
         if frame is not None and not self._size_verified:
             self._verify_frame_size(frame)
@@ -257,7 +276,7 @@ class FrameSource:
 
         index = self._next_index
         self._next_index += 1
-        self._last_timestamp = index / self.source_fps()
+        self._last_timestamp = self._frame_time(index)
         self.frame_index = index
         self.dropped_before = 0  # frame-by-frame never skips: that is the point
         self.frames_read += 1
@@ -282,6 +301,26 @@ class FrameSource:
         if self.frame_age_s is not None:
             self.frame_age_sum_s += self.frame_age_s
 
+    def _check_frozen(self, frame) -> None:
+        """Warn when a live source keeps delivering the same picture."""
+        if frame is None:
+            return
+        signature = np.ascontiguousarray(frame[::16, ::16]).tobytes()
+        if signature != self._last_signature:
+            if self.identical_frames >= FROZEN_FRAME_WARN_AFTER:
+                logger.warning("Live source is delivering new images again after %d "
+                               "identical frames.", self.identical_frames)
+            self._last_signature = signature
+            self.identical_frames = 0
+            return
+        self.identical_frames += 1
+        if self.identical_frames == FROZEN_FRAME_WARN_AFTER:
+            logger.warning(
+                "Live source has delivered %d pixel-identical frames in a row: the picture "
+                "is frozen although frames keep arriving. For an iPhone, check that "
+                "Record3D is in the foreground and the phone is not locked.",
+                self.identical_frames)
+
     def source_fps(self) -> float:
         """The recording's own frame rate, cached. Falls back to
         fallback_fps for a container that doesn't report one."""
@@ -294,6 +333,25 @@ class FrameSource:
                     "fallback fps=%.3f instead.", self.camera.video_source, fps)
             self._fps = float(fps)
         return self._fps
+
+    def _frame_time(self, index: int) -> float:
+        """Position of frame `index` on the recording's timeline."""
+        times = self._recorded_times
+        if times is None:
+            return index / self.source_fps()
+        if index < len(times):
+            return times[index]
+        # Frames past the end of the CSV: continue at the nominal rate.
+        return times[-1] + (index - len(times) + 1) / self.source_fps()
+
+    def _due_index(self, recording_time: float) -> int:
+        """Index of the latest frame captured by recording_time."""
+        times = self._recorded_times
+        if times is None or recording_time > times[-1]:
+            if times is None:
+                return int(recording_time * self.source_fps())
+            return len(times) - 1 + int((recording_time - times[-1]) * self.source_fps())
+        return max(bisect.bisect_right(times, recording_time) - 1, 0)
 
     def _read_on_wall_clock(self):
         """Play a recorded file against the WALL CLOCK instead of frame by
@@ -330,28 +388,31 @@ class FrameSource:
         if speed <= 0.0:
             raise ValueError(f"camera.playback_speed must be > 0, got {self.camera.playback_speed}.")
 
-        fps = self.source_fps()
-
-        # First frame anchors the clock: it is always read in full, and every
-        # later frame's due time is measured from the moment it was handed over.
-        if self._anchor is None:
+        # The first frame is always read in full. The clock is anchored on the SECOND
+        # read, so that frame 1 is due exactly then: processing frame 0 is where the
+        # one-off startup costs land (model loading, CUDA warm-up -- 5-10 s measured),
+        # and anchoring before them would drop that many seconds of the recording as if
+        # the model were that slow on every frame.
+        if self._next_index == 0:
             ok, frame = capture.read()
             if not ok:
                 return None
             self._next_index = 1
-            self._last_timestamp = 0.0
+            self._last_timestamp = self._frame_time(0)
             self.frames_read = 1
             self.frames_dropped = 0
             self.frame_index = 0
             self.dropped_before = 0
-            self._anchor = time.perf_counter()
+            self._anchor = None
             return frame
+        if self._anchor is None:
+            self._anchor = time.perf_counter() - self._frame_time(1) / speed
 
         elapsed = time.perf_counter() - self._anchor
-        due_index = int(elapsed * speed * fps)
+        due_index = self._due_index(elapsed * speed)
 
         if due_index < self._next_index:
-            wait_s = (self._next_index / fps) / speed - elapsed
+            wait_s = self._frame_time(self._next_index) / speed - elapsed
             if wait_s > 0:
                 time.sleep(wait_s)
             due_index = self._next_index
@@ -369,7 +430,7 @@ class FrameSource:
 
         frame_index = self._next_index
         self._next_index += 1
-        self._last_timestamp = frame_index / fps
+        self._last_timestamp = self._frame_time(frame_index)
         self.frames_read += 1
         self.frames_dropped += dropped
         self.frame_index = frame_index
@@ -417,6 +478,8 @@ class FrameSource:
             capture = self._cv2.VideoCapture(source)
             if not capture.isOpened():
                 raise RuntimeError(f"Could not open video source: {self.camera.video_source}")
+            from recorded_take import load_frame_timestamps
+            self._recorded_times = load_frame_timestamps(source)
             return capture
 
         capture = self._cv2.VideoCapture(source, resolve_backend(self.camera.capture_backend))
@@ -491,5 +554,6 @@ class FrameSource:
         self._fps = None
         self._next_index = 0
         self._last_timestamp = None
+        self._recorded_times = None
         self.requested_size = None
         self._size_verified = False

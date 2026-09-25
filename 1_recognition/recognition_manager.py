@@ -49,9 +49,9 @@ logger = get_logger(__name__)
 # per-component stats), then concatenated -- the order training used.
 COMPOSITE_FEATURE_KEYS = {"pol_angles": ("polar_azimuth", "polar_elevation")}
 
-STEP_SMOOTHING_WINDOW = 5
+STEP_SMOOTHING_WINDOW = 7
 STEP_CONFIRMATION_COUNT = 3
-STEP_MIN_CONFIDENCE = 0.2
+STEP_MIN_CONFIDENCE = 0.5
 STEP_MIN_MARGIN = 0.10
 
 # Log one in every N frames that carry non-finite features or predictions -- see the

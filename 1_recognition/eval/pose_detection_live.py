@@ -52,9 +52,26 @@ Usage, recorded video (for testing without a live camera):
     uv run python 1_recognition/eval/pose_detection_live.py --source path/to/clip.mp4 `
         --device cuda:0
 
+Recording a sample to test with later (any live source; iPhone shown):
+    uv run python 1_recognition/eval/pose_detection_live.py --source iphone --dev-idx 0 `
+        --capture-rotate90 270 --device cuda:0 --user-height-m 1.75 --fp16 `
+        --record-raw 1_recognition/results/samples/take01.mp4 `
+        --save-location 1_recognition/results/samples/take01.location.csv
+--record-raw writes the unannotated frames (after --capture-rotate90) plus
+take01.timestamps.csv with when each was captured; --save-location writes one row
+per frame (frame, timestamp_s, world_x/y/z, camera_z; empty when no person or no
+extrinsics). Replay it with the SAME calibration files the live run used -- a
+file --source defaults to intrinsics.json/extrinsics.json, not the iphone_ ones:
+    uv run python 1_recognition/eval/pose_detection_live.py `
+        --source 1_recognition/results/samples/take01.mp4 --device cuda:0 --user-height-m 1.75 `
+        --intrinsics-file iphone_intrinsics.json --extrinsics-file iphone_extrinsics.json
+A replayed clip with a sibling .timestamps.csv uses those timestamps, so the depth
+filter sees the live run's real frame timing rather than the .mp4's nominal fps.
+
 Press Q or ESC in the preview window to stop.
 """
 import argparse
+import csv
 import sys
 import time
 from collections import deque
@@ -73,10 +90,12 @@ from skeleton_utils.coco_h36m import coco_to_h36m_xy
 from skeleton_utils.keypoint_filter import KeypointOutlierHoldFilter
 from skeleton_utils.metric_depth_estimator import MetricDepthEstimator
 from render_utils.skeleton_video import FastSkeleton3DRenderer, draw_2d_skeleton
+from render_utils.video_recorder import VideoRecorder
 from render_utils.world_trajectory import WorldTrajectoryRenderer
 from skeleton3d_pipeline import JOINT_ANGLE_KEYS, RATIO_KEYS, StreamingH36MFeatureExtractor
 from vision_model.vision_config import VisionConfig
 from logging_setup import configure_logging, get_logger
+from recorded_take import load_frame_timestamps
 from video_source import (  # noqa: E402
     BACKEND_NAMES, open_camera, resolve_capture_size, verify_frame_size)
 
@@ -212,6 +231,14 @@ def parse_args():
                          help="If given, writes a 3-panel (2D overlay | 3D posture | world "
                               "trajectory) video here, plus a sibling .npz with per-frame "
                               "world_root_xyz/world_skeleton/timestamps. Not saved by default.")
+    parser.add_argument("--record-raw", type=str, default=None, metavar="PATH",
+                         help="Record the unannotated camera frames to this .mp4, plus a sibling "
+                              "<name>.timestamps.csv of when each frame was captured, so the take "
+                              "can be replayed later as --source without a camera.")
+    parser.add_argument("--save-location", type=str, default=None, metavar="PATH",
+                         help="Write the detected human location to this CSV, one row per frame: "
+                              "frame, timestamp_s, world_x, world_y, world_z (m, calibration "
+                              "origin), camera_z (m from the lens). Empty cells = not detected.")
     parser.add_argument("--max-frames", type=int, default=None,
                          help="Hard cap on frames processed (omit to run until Q/ESC/stream end).")
     parser.add_argument("--no-preview", action="store_true",
@@ -230,6 +257,7 @@ def main():
     )
 
     is_iphone = args.source == "iphone"
+    is_live = is_iphone or args.source.isdigit()
     calib_dir = Path(args.calib_dir)
     intrinsics_file = args.intrinsics_file or ("iphone_intrinsics.json" if is_iphone else "intrinsics.json")
     extrinsics_file = args.extrinsics_file or ("iphone_extrinsics.json" if is_iphone else "extrinsics.json")
@@ -280,6 +308,7 @@ def main():
         if not cap.isOpened():
             raise IOError(f"Could not open video/camera: {args.source}")
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    recorded_timestamps = None if is_live else load_frame_timestamps(args.source)
 
     logger.info("Loading YOLO (%s) on %s...", args.yolo_model, args.device)
     yolo = YOLO(args.yolo_model)
@@ -319,6 +348,18 @@ def main():
         output_path.parent.mkdir(parents=True, exist_ok=True)
         npz_path = output_path.with_suffix(".npz")
 
+    raw_recorder = (VideoRecorder(args.record_raw, fps, label="raw camera video",
+                                  write_timestamps=True)
+                    if args.record_raw else None)
+    location_file = location_csv = None
+    if args.save_location:
+        location_path = Path(args.save_location)
+        location_path.parent.mkdir(parents=True, exist_ok=True)
+        location_file = open(location_path, "w", newline="", encoding="utf-8")
+        location_csv = csv.writer(location_file)
+        location_csv.writerow(["frame", "timestamp_s", "world_x", "world_y", "world_z", "camera_z"])
+        logger.info("Writing the detected human location to %s", location_path)
+
     panel_w, panel_h = args.panel_size
     frame_idx = 0
     size_verified = False
@@ -338,7 +379,15 @@ def main():
                 verify_frame_size(frame, image_size, source_label=str(args.source))
                 size_verified = True
             h, w = frame.shape[:2]
-            timestamp = frame_idx / fps
+            if is_live:
+                # A live loop runs at whatever rate it manages, not the nominal fps.
+                timestamp = time.time() - t0
+            elif recorded_timestamps is not None and frame_idx < len(recorded_timestamps):
+                timestamp = recorded_timestamps[frame_idx]
+            else:
+                timestamp = frame_idx / fps
+            if raw_recorder is not None:
+                raw_recorder.write(frame, timestamp)
 
             keypoints_2d, keypoints_conf = run_yolo_2d(yolo, frame)
             kp_status = None
@@ -353,6 +402,7 @@ def main():
             # at the feature_extractor.update() call below.
             skeleton_for_features = None
             label_lines = []
+            z_filtered = None
 
             if kp_status is not None and kp_status != "accepted":
                 label_lines.append(f"keypoint filter: {kp_status}")
@@ -416,6 +466,13 @@ def main():
 
             draw_bottom_left_labels(overlay, label_lines)
 
+            if location_csv is not None:
+                have_world = not np.isnan(world_root_xyz).any()
+                location_csv.writerow(
+                    [frame_idx, f"{timestamp:.6f}"]
+                    + ([f"{v:.4f}" for v in world_root_xyz] if have_world else ["", "", ""])
+                    + ["" if z_filtered is None else f"{z_filtered:.4f}"])
+
             panel_3d = renderer_3d.render(skeleton_for_render)
             if world_renderer is not None:
                 current_xy = ((world_root_xyz[0], world_root_xyz[1])
@@ -462,6 +519,11 @@ def main():
         cap.release()
         if writer is not None:
             writer.release()
+        if raw_recorder is not None:
+            raw_recorder.close()
+        if location_file is not None:
+            location_file.close()
+            logger.info("Saved: %s", args.save_location)
         if not args.no_preview:
             cv2.destroyAllWindows()
 

@@ -10,13 +10,23 @@
 STEP_NAMES = [
     "Pull Cables",
     "Lift",
-    "Place",
     "Align",
     "Screw",
     "Connect Cables",
     "Clamp Coupling",
-    "Non Related Task"
+    "Place"
 ]
+
+# STEP_NAMES = [
+#     "Pull Cables",
+#     "Lift",
+#     "Place",
+#     "Align",
+#     "Screw",
+#     "Connect Cables",
+#     "Clamp Coupling",
+#     "Non Related Task"
+# ]
 
 # The LSTM mistake head's output class names, in output-index order (only models
 # trained with config.json's "num_mistakes", e.g. best_model/3d_skeleton_01). Class 0
@@ -71,7 +81,7 @@ TASK_RETURN_CLAMPING_TOOL = 5
 TASK_DATABASE_PATH = "2_decision_making/task_database/task_database.json"
 # P(next task | current task) from 2_decision_making/src/task_sequence_analysis.py,
 # the variant that keeps Lift (the model head and the database both have it).
-TASK_TRANSITION_TABLE_PATH = "2_decision_making/results/task_sequence_lift/transition_probabilities.csv"
+TASK_TRANSITION_TABLE_PATH = "2_decision_making/probability_table/transition_probabilities_02.csv"
 
 # Tracked (database) task -> the robot task that performs it. Tasks the database lets
 # the robot do but that have no entry here (Pull Cables, Place) are never dispatched.
@@ -89,7 +99,7 @@ PENDING_MIN_PROBABILITY = 0.05
 # The recognition stabilizer only switches to a task this likely after the current one...
 RECOGNITION_FILTER_MIN_PROBABILITY = 0.02
 # ...unless the candidate holds for confirmation_count * this many frames anyway.
-RECOGNITION_FILTER_OVERRIDE_FACTOR = 4
+RECOGNITION_FILTER_OVERRIDE_FACTOR = 7
 # The progress head's raw output divided by this gives 0-1 (the database's "Progress"
 # thresholds are 0-1). Check against a replay: training labels ran 0-100.
 RECOGNITION_PROGRESS_SCALE = 1.0

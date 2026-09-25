@@ -51,7 +51,7 @@ Usage:
     
     uv run python run_recognition.py `
             --iphone `
-            --model-dir 1_recognition/best_model/3d_skeleton_01 `
+            --model-dir 1_recognition/best_model/3d_skeleton `
             --intrinsics-file iphone_intrinsics.json `
             --extrinsics-file iphone_extrinsics.json `
             --body-calibration 1_recognition/calib_data/body_uid-08.json `
@@ -71,6 +71,21 @@ Usage:
         --fp16 
 
 
+    # replay a take recorded with eval/pose_detection_live.py --record-raw/--save-location
+    # (or run_recognition.py --record-raw): no camera needed. The video's
+    # .timestamps.csv is picked up automatically; --location-file publishes the
+    # location saved live instead of re-estimating it. Use the calibration files
+    # (and --iphone-rotate is not needed -- the frames are already rotated) the take
+    # was recorded with.
+    uv run python run_recognition.py `
+        --video-source 1_recognition/results/samples/take03.mp4 `
+        --location-file 1_recognition/results/samples/take03.location.csv `
+        --model-dir 1_recognition/best_model/3d_skeleton `
+        --intrinsics-file iphone_intrinsics.json `
+        --extrinsics-file iphone_extrinsics.json `
+        --body-calibration 1_recognition/calib_data/body_uid-08.json `
+        --realtime-playback --loop-hz 10 --fp16
+
     # live line graph of every step's softmax probability and the progress value
     uv run python run_recognition.py --loop-hz 10 --show-probabilities
     uv run python run_recognition.py --iphone --iphone-rotate 270 --show-probabilities `
@@ -89,6 +104,7 @@ index can deliver.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import threading
 import time
@@ -104,6 +120,7 @@ import config
 from event_transport import UDPEventSender
 from events import Event, EventType
 from logging_setup import configure_logging, get_logger
+from recorded_take import RecordedLocations
 from recognition_manager import DEFAULT_MODEL_DIR, RecognitionManager
 from step_probability_plot import StepProbabilityPlot
 from trigger_manager import TaskUpdatePublisher, task_update_event
@@ -178,6 +195,14 @@ def _parse_args() -> argparse.Namespace:
                               "to measure how much of the offline/live accuracy gap comes from "
                               "processing time. Pair with a high --loop-hz so the video clock, "
                               "not the loop timer, is what paces the run.")
+    parser.add_argument("--location-file", default=None, metavar="CSV",
+                         help="Recorded --video-source only: publish HUMAN_LOCATION_UPDATE from "
+                              "this CSV (eval/pose_detection_live.py --save-location, row N = "
+                              "frame N of the video) instead of the location estimated now, so "
+                              "downstream layers get exactly what was seen live. Velocity is "
+                              "differenced from the recorded positions; keypoints still come from "
+                              "this run. At the end, the mean gap between the recorded and the "
+                              "re-estimated location is printed as a calibration sanity check.")
     parser.add_argument("--log-dir", default=None,
                          help="Write per-frame results to <LOG_DIR>/<run-name>/ (frames.csv, "
                               "events.csv, run.json) for offline analysis -- see "
@@ -353,6 +378,31 @@ def _build_run_logger(args: argparse.Namespace, source):
     })
 
 
+def _load_recorded_locations(args: argparse.Namespace, source) -> RecordedLocations | None:
+    if not args.location_file:
+        return None
+    if args.iphone or args.camera or str(source).isdigit():
+        raise SystemExit("--location-file needs a recorded --video-source: its rows are "
+                         "matched to the video's frames by index.")
+    return RecordedLocations.from_csv(args.location_file)
+
+
+def _location_event(xyz, timestamp, velocity, keypoints) -> Event:
+    return Event(
+        event_type=EventType.HUMAN_LOCATION_UPDATE,
+        source="recognition",
+        payload={
+            "x": xyz[0], "y": xyz[1], "z": xyz[2],
+            "timestamp": timestamp,
+            # World-frame m/s; None if unavailable.
+            "velocity": velocity,
+            # Posture only: a pelvis-relative H36M-17 skeleton, separate from the
+            # world-frame x/y/z above.
+            "keypoints": keypoints,
+        },
+    )
+
+
 def _parse_manual_trigger_line(line: str) -> tuple[int, float] | None:
     """Parse "step_id[,progress]" typed at the prompt.
 
@@ -456,6 +506,8 @@ if __name__ == "__main__":
         sys.exit(0)
 
     source = _recognition_source(args)
+    recorded_locations = _load_recorded_locations(args, source)
+    location_gaps_m: list[float] = []  # recorded vs re-estimated, same frame
     recognition_manager = RecognitionManager(
         model_dir=args.model_dir, video_source=source, show_video=not args.no_display,
         enable_step_model=not args.fake_recognition,
@@ -477,6 +529,8 @@ if __name__ == "__main__":
         print(f"Recording the render screen to {args.record}")
     if args.record_raw:
         print(f"Recording the original camera video to {args.record_raw}")
+    if recorded_locations is not None:
+        print(f"Publishing recorded human locations from {args.location_file}")
 
     if args.fake_recognition:
         # Vision runs for real; only step classification comes from stdin.
@@ -569,22 +623,28 @@ if __name__ == "__main__":
             if args.max_frames is not None and frame_count >= args.max_frames:
                 print(f"Reached --max-frames ({args.max_frames}).")
                 break
+            recorded = None
+            if recorded_locations is not None:
+                frame_index = recognition_manager.playback_frame_index
+                recorded = recorded_locations.at(frame_index)
+                estimated = (recognition_manager.last_frame_record or {}).get("world_xyz")
+                if recorded is not None and estimated is not None:
+                    location_gaps_m.append(math.dist(recorded[1], estimated))
             if frame_count % config.HUMAN_LOCATION_PUBLISH_EVERY_N_FRAMES == 0:
-                world_xyz = recognition_manager.last_world_xyz
-                if world_xyz is not None:
-                    sender.send(Event(
-                        event_type=EventType.HUMAN_LOCATION_UPDATE,
-                        source="recognition",
-                        payload={
-                            "x": world_xyz[0], "y": world_xyz[1], "z": world_xyz[2],
-                            "timestamp": recognition_manager.last_location_timestamp,
-                            # World-frame m/s from the position Kalman filter; None if off.
-                            "velocity": recognition_manager.last_world_velocity,
-                            # Posture only: a pelvis-relative H36M-17 skeleton, separate
-                            # from the world-frame x/y/z above.
-                            "keypoints": recognition_manager.get_last_keypoints(),
-                        },
-                    ))
+                if recorded_locations is not None:
+                    # Nothing is published for a frame the live run had no location for,
+                    # just as a live run publishes nothing before its first detection.
+                    if recorded is not None:
+                        sender.send(_location_event(
+                            recorded[1], recorded[0], recorded_locations.velocity(frame_index),
+                            recognition_manager.get_last_keypoints()))
+                elif recognition_manager.last_world_xyz is not None:
+                    sender.send(_location_event(
+                        recognition_manager.last_world_xyz,
+                        recognition_manager.last_location_timestamp,
+                        # From the position Kalman filter; None if off.
+                        recognition_manager.last_world_velocity,
+                        recognition_manager.get_last_keypoints()))
 
             next_tick += period_s
             now = time.perf_counter()
@@ -622,6 +682,12 @@ if __name__ == "__main__":
                 age_text = f", mean frame age {age_s * 1000:.0f} ms" if age_s is not None else ""
                 print(f"[iphone] model saw {read}/{total} frames "
                       f"({100.0 * read / total:.1f}%), dropped {dropped} as stale{age_text}.")
+        if location_gaps_m:
+            # A large gap means this run's calibration (intrinsics/extrinsics, body
+            # height) differs from the one the take was recorded with.
+            print(f"[recorded location] recorded vs re-estimated: mean "
+                  f"{sum(location_gaps_m) / len(location_gaps_m):.3f} m, max "
+                  f"{max(location_gaps_m):.3f} m over {len(location_gaps_m)} frames.")
         if run_logger is not None:
             summary = run_logger.close(recognition_manager)
             print(f"[run log] {run_logger.run_dir}")
