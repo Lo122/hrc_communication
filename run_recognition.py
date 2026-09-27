@@ -28,7 +28,7 @@ Usage:
 
     uv run python run_recognition.py `
         --video-source 6 `
-        --model-dir 1_recognition/best_model/3d_skeleton_01 `
+        --model-dir 1_recognition/best_model/3d_skeleton_02 `
         --intrinsics-file intrinsics_640x360_obs.json `
         --extrinsics-file extrinsics_3840x2160_obs.json `
         --body-calibration 1_recognition/calib_data/body_uid-08.json `
@@ -78,13 +78,13 @@ Usage:
     # (and --iphone-rotate is not needed -- the frames are already rotated) the take
     # was recorded with.
     uv run python run_recognition.py `
-        --video-source 1_recognition/results/samples/take03.mp4 `
-        --location-file 1_recognition/results/samples/take03.location.csv `
+        --video-source 1_recognition/results/samples/take04.mp4 `
+        --location-file 1_recognition/results/samples/take04.location.csv `
         --model-dir 1_recognition/best_model/3d_skeleton `
         --intrinsics-file iphone_intrinsics.json `
         --extrinsics-file iphone_extrinsics.json `
         --body-calibration 1_recognition/calib_data/body_uid-08.json `
-        --realtime-playback --loop-hz 10 --fp16
+         --loop-hz 10 --fp16
 
     # live line graph of every step's softmax probability and the progress value
     uv run python run_recognition.py --loop-hz 10 --show-probabilities
@@ -203,11 +203,14 @@ def _parse_args() -> argparse.Namespace:
                               "differenced from the recorded positions; keypoints still come from "
                               "this run. At the end, the mean gap between the recorded and the "
                               "re-estimated location is printed as a calibration sanity check.")
-    parser.add_argument("--log-dir", default=None,
+    parser.add_argument("--log-dir", default=str(ROOT / config.RUN_LOG_DIR),
                          help="Write per-frame results to <LOG_DIR>/<run-name>/ (frames.csv, "
-                              "events.csv, run.json) for offline analysis -- see "
-                              "1_recognition/eval/run_logger.py, and analyse_runs.py for the plots. "
-                              "Default: no logging.")
+                              "events.csv, run.json, run.log), each row with its wall-clock time, "
+                              "for offline analysis -- see 1_recognition/eval/run_logger.py, and "
+                              "analyse_runs.py for the plots. Default: config.RUN_LOG_DIR "
+                              f"({config.RUN_LOG_DIR}).")
+    parser.add_argument("--no-run-log", action="store_true",
+                         help="Do not write the run directory (--log-dir).")
     parser.add_argument("--run-name", default=None,
                          help="Name of the run directory under --log-dir. Defaults to a "
                               "timestamp, so repeated runs never overwrite each other. Give "
@@ -352,12 +355,12 @@ def _build_vision_config(args: argparse.Namespace) -> VisionConfig | None:
 
 
 def _build_run_logger(args: argparse.Namespace, source):
-    """Open per-frame CSV logging, or return None unless --log-dir is given.
+    """Open per-frame CSV logging, or return None with --no-run-log.
 
     The metadata recorded alongside -- source and playback settings above all --
     is what makes two runs comparable afterwards.
     """
-    if not args.log_dir:
+    if args.no_run_log or not args.log_dir:
         return None
 
     # eval/ is offline tooling, so it joins sys.path here next to its only import

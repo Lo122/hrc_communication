@@ -11,6 +11,24 @@ class TimerManager:
         self.event_callback = event_callback
         self.response_timer = None
         self.defer_timer = None
+        self.timers: dict[str, Timer] = {}
+
+    def schedule(self, name: str, duration: float, event: Event) -> None:
+        """Emit event after duration seconds, replacing any timer of the same name."""
+        self.cancel(name)
+        timer = Timer(duration, self._emit_scheduled, args=[name, event])
+        timer.daemon = True
+        self.timers[name] = timer
+        timer.start()
+
+    def cancel(self, name: str) -> None:
+        timer = self.timers.pop(name, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _emit_scheduled(self, name: str, event: Event) -> None:
+        self.timers.pop(name, None)
+        self.event_callback(event)
 
     def start_response_timer(self, task_instance_id: str, duration: float) -> None:
         """Start human response timeout for a waiting task."""

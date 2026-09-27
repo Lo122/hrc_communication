@@ -6,6 +6,10 @@ starts first so its UDP receiver is listening before recognition sends anything.
 
 Arguments:
     --host, --port              event transport, passed to both
+    --demo                      passed to run_communication.py: scripted opening
+    --log-dir, --run-name       both processes log this run to <log-dir>/<run-name>/
+                                (default logs/runs/run_<date>_<time>); --no-run-log
+                                turns it off
     --debug-trigger, --debug-step-id, --debug-progress, --debug-round-id
                                 passed to run_communication.py
     everything else             passed to run_recognition.py unchanged, so every
@@ -13,11 +17,12 @@ Arguments:
 
 Usage:
     uv run python run_system.py --camera
+    uv run python run_system.py --demo --camera
     uv run python run_system.py --video-source clip.mp4 --debug-trigger
 
     uv run python run_system.py `
         --iphone `
-        --model-dir 1_recognition/best_model/3d_skeleton_01 `
+        --model-dir 1_recognition/best_model/3d_skeleton_02 `
         --intrinsics-file iphone_intrinsics.json `
         --extrinsics-file iphone_extrinsics.json `
         --body-calibration 1_recognition/calib_data/body_uid-08.json `
@@ -32,6 +37,22 @@ Usage:
             --extrinsics-file extrinsics_3840x2160_obs.json `
             --body-calibration 1_recognition/calib_data/body_uid-08.json `
             --fp16 `
+
+    uv run python run_system.py --demo `
+                --video-source 6 `
+                --model-dir 1_recognition/best_model/3d_skeleton_02 `
+                --intrinsics-file intrinsics_640x360_obs.json `
+                --extrinsics-file extrinsics_3840x2160_obs.json `
+                --body-calibration 1_recognition/calib_data/body_uid-08.json `
+                --fp16 
+
+One run directory then holds what recognition saw and what communication did about
+it, on one clock:
+    frames.csv, events.csv,     recognition: every processed frame, every task update
+    run.json, run.log           it sent (time / epoch_s columns)
+    communication_events.jsonl  communication: every event, transition and message
+    timeline.csv                the same, readable: when a task update was recognized,
+                                when it arrived, and what followed
 
 Both children run on this same interpreter (sys.executable) rather than through
 `uv run`, so there is one environment sync, not two racing each other.
@@ -52,7 +73,10 @@ import subprocess
 import sys
 import time
 import traceback
+from datetime import datetime
 from pathlib import Path
+
+import config
 
 ROOT = Path(__file__).resolve().parent
 COMMUNICATION_SCRIPT = ROOT / "run_communication.py"
@@ -74,6 +98,8 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--host", default=None, help="Event transport host, for both processes.")
     parser.add_argument("--port", type=int, default=None, help="Event transport port, for both processes.")
     communication = parser.add_argument_group("passed to run_communication.py")
+    communication.add_argument("--demo", action="store_true",
+                               help="Open with the scripted demo dialogue for the first panel.")
     communication.add_argument("--debug-trigger", action="store_true",
                                help="Inject one fake human task update at startup.")
     communication.add_argument("--debug-step-id", type=int, default=None,
@@ -82,7 +108,22 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
                                help="Progress value for --debug-trigger.")
     communication.add_argument("--debug-round-id", type=int, default=None,
                                help="Round id for --debug-trigger.")
-    return parser.parse_known_args()
+    run_log = parser.add_argument_group("run log, passed to both")
+    run_log.add_argument("--log-dir", default=str(ROOT / config.RUN_LOG_DIR),
+                         help="Both processes log this run to <LOG_DIR>/<RUN_NAME>/.")
+    run_log.add_argument("--run-name", default=None,
+                         help="Run directory name; defaults to run_<date>_<time>.")
+    run_log.add_argument("--no-run-log", action="store_true", help="Do not log the run to a directory.")
+    args, recognition_args = parser.parse_known_args()
+    if args.run_name is None:
+        args.run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    return args, recognition_args
+
+
+def _run_log_args(args: argparse.Namespace) -> list[str]:
+    if args.no_run_log:
+        return ["--no-run-log"]
+    return ["--log-dir", args.log_dir, "--run-name", args.run_name]
 
 
 def _transport_args(args: argparse.Namespace) -> list[str]:
@@ -95,7 +136,9 @@ def _transport_args(args: argparse.Namespace) -> list[str]:
 
 
 def _communication_args(args: argparse.Namespace) -> list[str]:
-    result = _transport_args(args)
+    result = _transport_args(args) + _run_log_args(args)
+    if args.demo:
+        result.append("--demo")
     if args.debug_trigger:
         result.append("--debug-trigger")
     # Only what was given, so run_communication.py's own defaults still apply.
@@ -148,11 +191,13 @@ def _run_child(script: str, script_args: list[str]) -> None:
 
 def main() -> None:
     args, recognition_args = _parse_args()
-    recognition_args = _transport_args(args) + recognition_args
+    recognition_args = _transport_args(args) + _run_log_args(args) + recognition_args
 
     print(f"Python: {sys.executable}")
     print(f"Communication: run_communication.py {' '.join(_communication_args(args))}")
     print(f"Recognition:   run_recognition.py {' '.join(recognition_args)}")
+    if not args.no_run_log:
+        print(f"Run log:       {Path(args.log_dir) / args.run_name}")
 
     communication = _open_window(COMMUNICATION_SCRIPT, _communication_args(args))
     time.sleep(COMMUNICATION_STARTUP_S)

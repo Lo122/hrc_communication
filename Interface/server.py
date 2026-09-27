@@ -327,7 +327,8 @@ class HRCBridge:
             speaking = now - last < 5.0
             task = self.system.task_manager.active_task
             listening = not speaking and task is not None and task.state.name in {
-                "R_WAITING_RESPONSE", "R_WAITING_FREE_DRIVE", "R_WAITING_HOME_PERMISSION",
+                "R_WAITING_RESPONSE", "R_WAITING_FREE_DRIVE", "R_WAITING_HANDOVER",
+                "R_WAITING_HOME_PERMISSION",
             }
         return {"speaking": speaking, "listening": listening and not speaking}
 

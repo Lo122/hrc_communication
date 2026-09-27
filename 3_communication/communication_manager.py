@@ -23,6 +23,8 @@ STATE_MODES = {
     RobotTaskState.R_WAITING_FREE_DRIVE: ListeningMode.SINGLE,
     RobotTaskState.R_FREE_DRIVE: ListeningMode.CONTINUOUS,
     RobotTaskState.R_HOLDING: ListeningMode.CONTINUOUS,
+    RobotTaskState.R_WAITING_HANDOVER: ListeningMode.SINGLE,
+    RobotTaskState.R_HOLDING_HANDOVER: ListeningMode.CONTINUOUS,
     RobotTaskState.R_WAITING_HOME_PERMISSION: ListeningMode.SINGLE,
     RobotTaskState.R_MANUAL_RECOVERY: ListeningMode.CONTINUOUS,
 }

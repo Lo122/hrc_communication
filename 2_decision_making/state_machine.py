@@ -42,7 +42,16 @@ class StateMachine:
         (RobotTaskState.R_FREE_DRIVE, EventType.H_DONE): RobotTaskState.R_HOLDING,
         (RobotTaskState.R_FREE_DRIVE, EventType.H_CANCEL): RobotTaskState.R_CANCELED,
         (RobotTaskState.R_HOLDING, EventType.H_SCREW_DONE): RobotTaskState.R_DONE,
+        # A detector says the held panel is secured: the robot may release it.
+        (RobotTaskState.R_HOLDING, EventType.TASK_SIGNAL): RobotTaskState.R_DONE,
         (RobotTaskState.R_HOLDING, EventType.H_CANCEL): RobotTaskState.R_RECOVERY_EVALUATING,
+        # Handing over a brought item: the gripper opens on a yes or when asked for it.
+        (RobotTaskState.R_WAITING_HANDOVER, EventType.H_ACCEPT): RobotTaskState.R_DONE,
+        (RobotTaskState.R_WAITING_HANDOVER, EventType.H_HANDOVER): RobotTaskState.R_DONE,
+        (RobotTaskState.R_WAITING_HANDOVER, EventType.H_REFUSE): RobotTaskState.R_HOLDING_HANDOVER,
+        (RobotTaskState.R_WAITING_HANDOVER, EventType.H_CANCEL): RobotTaskState.R_RECOVERY_EVALUATING,
+        (RobotTaskState.R_HOLDING_HANDOVER, EventType.H_HANDOVER): RobotTaskState.R_DONE,
+        (RobotTaskState.R_HOLDING_HANDOVER, EventType.H_CANCEL): RobotTaskState.R_RECOVERY_EVALUATING,
         (RobotTaskState.R_RECOVERY_EVALUATING, EventType.RECOVERY_HOME_AVAILABLE): RobotTaskState.R_WAITING_HOME_PERMISSION,
         (RobotTaskState.R_RECOVERY_EVALUATING, EventType.RECOVERY_MANUAL_REQUIRED): RobotTaskState.R_MANUAL_RECOVERY,
         (RobotTaskState.R_WAITING_HOME_PERMISSION, EventType.H_RETURN_HOME): RobotTaskState.R_RETURNING_HOME,
@@ -70,10 +79,17 @@ class StateMachine:
         event_type: EventType,
         task_id: int | None = None,
     ) -> RobotTaskState | None:
-        if task_id == config.TASK_LIFT_PANEL and event_type == EventType.ROBOT_SUCCESS:
-            if current_state in {RobotTaskState.R_EXECUTING, RobotTaskState.R_PAUSED}:
-                return RobotTaskState.R_WAITING_FREE_DRIVE
-        if (task_id == config.TASK_LEAVE and current_state == RobotTaskState.R_DEFER
-                and event_type == EventType.H_CANCEL):
-            return RobotTaskState.R_HOLDING
+        if event_type == EventType.ROBOT_SUCCESS and current_state in {RobotTaskState.R_EXECUTING,
+                                                                       RobotTaskState.R_PAUSED}:
+            if task_id == config.TASK_LIFT_PANEL:
+                return (RobotTaskState.R_WAITING_FREE_DRIVE if config.LIFT_ASKS_FREE_DRIVE
+                        else RobotTaskState.R_FREE_DRIVE)
+            if task_id in config.HANDOVER_ITEMS:
+                return RobotTaskState.R_WAITING_HANDOVER
+        if current_state == RobotTaskState.R_DEFER and event_type == EventType.H_CANCEL:
+            if task_id == config.TASK_LEAVE:
+                return RobotTaskState.R_HOLDING
+            if task_id == config.TASK_LEAVE_HANDOVER:
+                # Not leaving after all: the robot stays, as after a no.
+                return RobotTaskState.R_REFUSED
         return self._TRANSITIONS.get((current_state, event_type))

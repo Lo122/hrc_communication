@@ -27,6 +27,10 @@ class RobotTaskState(Enum):
     R_WAITING_FREE_DRIVE = auto()
     R_FREE_DRIVE = auto()
     R_HOLDING = auto()
+    # A brought item (config.HANDOVER_ITEMS): asking to hand it over, then holding it
+    # until the human asks for it.
+    R_WAITING_HANDOVER = auto()
+    R_HOLDING_HANDOVER = auto()
 
     R_RECOVERY_EVALUATING = auto()
     R_WAITING_HOME_PERMISSION = auto()
@@ -54,12 +58,19 @@ class EventType(Enum):
     # What the human is doing now: step_id (model head index) and progress (0-1).
     HUMAN_TASK_UPDATE = auto()
     HUMAN_LOCATION_UPDATE = auto()
+    # A sensor-based detector reports a signal on a task (payload task_name, piece_id,
+    # signal, value) -- see 2_decision_making/task_transition_detector.py.
+    TASK_SIGNAL = auto()
 
     # Human confirms a task finished (payload task_name; none = current working task).
     H_TASK_DONE = auto()
     # Human asks the robot for a task (payload task_name), bypassing trigger rules.
     H_REQUEST_ROBOT_TASK = auto()
     H_NEXT_PIECE = auto()
+    # The demo's scripted opening starts (2_decision_making/demo_opening.py).
+    DEMO_START = auto()
+    # Recognition has run for config.RECOGNITION_ACTIVATION_S: its task updates count.
+    RECOGNITION_ACTIVE = auto()
 
     H_ACCEPT = auto()
     H_REFUSE = auto()
@@ -83,9 +94,13 @@ class EventType(Enum):
 
     H_DONE = auto()
     H_SCREW_DONE = auto()
+    # Human is ready to take the item the robot brought: the gripper opens.
+    H_HANDOVER = auto()
 
     RESPONSE_TIMEOUT = auto()
     DEFER_TIMEOUT = auto()
+    # A robot offer scheduled for now (payload task_name, piece_id): TaskManager.schedule_offer.
+    SCHEDULED_OFFER = auto()
 
     ROBOT_RUNNING = auto()
     ROBOT_SUCCESS = auto()

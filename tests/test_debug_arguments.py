@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import config
 from run_communication import _parse_args
 
 
@@ -26,11 +27,20 @@ class DebugArgumentTests(unittest.TestCase):
                 _parse_args()
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("Human step 9 does not exist", error.getvalue())
-        self.assertIn("4=Screw", error.getvalue())
+        self.assertIn(f"{config.STEP_NAMES.index('Screw')}=Screw", error.getvalue())
 
     def test_normal_startup_does_not_require_debug_mapping(self):
         with patch.object(sys, "argv", ["run_communication.py"]):
             self.assertFalse(_parse_args().debug_trigger)
+
+    def test_demo_flag_reaches_communication_through_the_launcher(self):
+        import run_system
+        with patch.object(sys, "argv", ["run_communication.py", "--demo"]):
+            self.assertTrue(_parse_args().demo)
+        with patch.object(sys, "argv", ["run_system.py", "--demo", "--camera"]):
+            args, recognition_args = run_system._parse_args()
+        self.assertIn("--demo", run_system._communication_args(args))
+        self.assertEqual(recognition_args, ["--camera"])
 
 
 if __name__ == "__main__":

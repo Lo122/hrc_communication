@@ -15,6 +15,8 @@ class MessageManager:
                 config.TASK_BRING_CONNECTOR: "Shall I bring the pipe connector?",
                 config.TASK_BRING_CLAMPING_TOOL: "Shall I bring the clamping tool?",
                 config.TASK_RETURN_CLAMPING_TOOL: "Shall I take the clamping tool back?",
+                config.TASK_PULL_CABLES: "Shall I pull the cables?",
+                config.TASK_LEAVE_HANDOVER: "May I move away now?",
             }[task_id]
         return config.PERMISSION_MESSAGES[task_id]
 
@@ -26,15 +28,57 @@ class MessageManager:
                 config.TASK_BRING_CONNECTOR: "Bringing the pipe connector.",
                 config.TASK_BRING_CLAMPING_TOOL: "Bringing the clamping tool.",
                 config.TASK_RETURN_CLAMPING_TOOL: "Taking the clamping tool back.",
+                config.TASK_PULL_CABLES: "Pulling the cables.",
+                config.TASK_LEAVE_HANDOVER: "Moving away.",
             }[task.task_id]
+        lift_arrival = ("I will ask about manual adjustment when the lift is complete."
+                        if config.LIFT_ASKS_FREE_DRIVE else
+                        "Free drive turns on when the panel is in position, so you can adjust it.")
         messages = {
-            config.TASK_LIFT_PANEL: "I am lifting the panel. I will ask about manual adjustment when the lift is complete.",
+            config.TASK_LIFT_PANEL: "I am lifting the panel. " + lift_arrival,
             config.TASK_LEAVE: "I am releasing the panel and moving away.",
-            config.TASK_BRING_CONNECTOR: "I am bringing the pipe connector.",
-            config.TASK_BRING_CLAMPING_TOOL: "I am bringing the clamping tool.",
+            config.TASK_BRING_CONNECTOR: "I am bringing the pipe connector. I will ask before handing it over.",
+            config.TASK_BRING_CLAMPING_TOOL: "I am bringing the clamping tool. I will ask before handing it over.",
             config.TASK_RETURN_CLAMPING_TOOL: "I am taking the clamping tool back.",
+            config.TASK_PULL_CABLES: "I am pulling the cables.",
+            config.TASK_LEAVE_HANDOVER: "I am moving away from the hand-over position.",
         }
         return messages[task.task_id] + " Say or type pause, cancel, restart, faster, or slower."
+
+    def get_handover_question(self, task, *, spoken=False) -> str:
+        item = config.HANDOVER_ITEMS[task.task_id]
+        if spoken:
+            return f"Can I hand over the {item}?"
+        return (f"Can I hand over the {item}? Yes opens the gripper, so hold it first. "
+                "Say yes or no after the beep, or type your reply.")
+
+    def get_handover_wait_message(self, task, *, spoken=False) -> str:
+        item = config.HANDOVER_ITEMS[task.task_id]
+        if spoken:
+            return f'Okay. Say "give me the {item}" when you are ready.'
+        return (f"Okay, I will keep holding the {item}. Let me know when you are ready to receive it: "
+                f'say or type "give me the {item}".')
+
+    def get_handed_over_message(self, task, leave_in: float | None = None, *, spoken=False) -> str:
+        """leave_in: the robot leaves on its own this many seconds from now."""
+        item = config.HANDOVER_ITEMS[task.task_id]
+        if spoken:
+            leaving = "" if leave_in is None else f" Moving away in {leave_in:g} seconds."
+            return f"Here is the {item}.{leaving}"
+        leaving = ("" if leave_in is None else
+                   f" I will move away in {leave_in:g} seconds. Say or type cancel to keep me here.")
+        return f"Opening the gripper. Here is the {item}.{leaving}"
+
+    def get_left_handover_message(self, *, spoken=False) -> str:
+        if spoken:
+            return "I have moved away."
+        return "I have moved away from the hand-over position."
+
+    def get_free_drive_on_arrival_message(self, *, spoken=False) -> str:
+        if spoken:
+            return 'Panel in position. Free drive on. Adjust it, then say "done".'
+        return ('The panel is in position and free drive is on. Adjust the panel, then say or type "done". '
+                "I will then keep holding the panel while you screw it in place.")
 
     def ask_permission_for_free_drive(self, *, spoken=False) -> str:
         if spoken:
@@ -53,18 +97,40 @@ class MessageManager:
 
     def get_pending_message(self, task, *, spoken=False) -> str:
         if spoken:
-            holding = " Still holding the panel." if task.task_id == config.TASK_LEAVE else ""
-            return "Task pending." + holding
+            staying = {
+                config.TASK_LEAVE: " Still holding the panel.",
+                config.TASK_LEAVE_HANDOVER: " Staying here.",
+            }.get(task.task_id, "")
+            return "Task pending." + staying
         reason = "No reply received." if task.pending_reason == "timeout" else "Okay."
-        holding = " I will keep holding the panel." if task.task_id == config.TASK_LEAVE else ""
-        return f'{reason} This task is pending.{holding} To be asked again when ready, type "execute {task.task_instance_id}".'
+        staying = {
+            config.TASK_LEAVE: " I will keep holding the panel.",
+            config.TASK_LEAVE_HANDOVER: " I will stay at the hand-over position.",
+        }.get(task.task_id, "")
+        return f'{reason} This task is pending.{staying} To be asked again when ready, type "execute {task.task_instance_id}".'
 
     def get_defer_message(self, task, duration: float, *, spoken=False) -> str:
         if spoken:
-            action = "Releasing the panel" if task.task_id == config.TASK_LEAVE else "Starting"
+            action = {
+                config.TASK_LEAVE: "Releasing the panel",
+                config.TASK_LEAVE_HANDOVER: "Moving away",
+            }.get(task.task_id, "Starting")
             return f"{action} in {duration:g} seconds. Say cancel to cancel."
-        holding = " I will keep holding the panel until then." if task.task_id == config.TASK_LEAVE else ""
-        return f"Okay, I will start in {duration:g} seconds.{holding} Say or type cancel to cancel the delayed task."
+        staying = {
+            config.TASK_LEAVE: " I will keep holding the panel until then.",
+            config.TASK_LEAVE_HANDOVER: " I will stay here until then.",
+        }.get(task.task_id, "")
+        return f"Okay, I will start in {duration:g} seconds.{staying} Say or type cancel to cancel the delayed task."
+
+    def get_advance_acknowledgement(self, event_type: EventType, *, spoken=False) -> str:
+        """A yes or later to a task asked while the current one still runs."""
+        later = event_type == EventType.H_DEFER
+        if spoken:
+            return "Okay, a little after this task." if later else "Okay, right after this task."
+        if later:
+            return (f"Okay, I will start {config.DEFER_SECONDS:g} seconds after the current task is finished. "
+                    "Say or type cancel then to cancel it.")
+        return "Okay, I will start as soon as the current task is finished."
 
     def get_return_home_permission_message(self, *, spoken=False) -> str:
         if spoken:

@@ -1,9 +1,10 @@
-"""Task transition probabilities, P(next task | current task).
+"""Task transition probabilities, P(next task | current task), and task durations.
 
 Loaded from the transition_probabilities.csv that
 2_decision_making/src/task_sequence_analysis.py writes: rows are the current task
 (plus START), columns the next task (plus END). Shared by the decision layer (which
 tasks are pending) and the recognition layer (which step changes to believe).
+The same script's duration_stats_*.csv give how long each task usually takes.
 """
 
 import csv
@@ -11,6 +12,16 @@ from pathlib import Path
 
 START = "START"
 END = "END"
+
+
+def load_duration_stat(path: str | Path, stat: str) -> dict[str, float]:
+    """{task name: seconds}: one column (mean, median, p95, max, ...) of a
+    duration_stats_*.csv."""
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if rows and stat not in rows[0]:
+        raise ValueError(f"{path} has no column {stat!r}; it has {', '.join(rows[0])}.")
+    return {row["task_name"]: float(row[stat]) for row in rows}
 
 
 class TransitionModel:

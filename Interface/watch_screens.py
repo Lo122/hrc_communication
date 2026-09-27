@@ -28,6 +28,8 @@ TASK_NAMES = {
     config.TASK_BRING_CONNECTOR: "Bring connector",
     config.TASK_BRING_CLAMPING_TOOL: "Bring clamp tool",
     config.TASK_RETURN_CLAMPING_TOOL: "Return clamp tool",
+    config.TASK_PULL_CABLES: "Pull cables",
+    config.TASK_LEAVE_HANDOVER: "Leave hand-over",
 }
 
 QUESTIONS = {
@@ -36,6 +38,8 @@ QUESTIONS = {
     config.TASK_BRING_CONNECTOR: "Bring connector?",
     config.TASK_BRING_CLAMPING_TOOL: "Bring clamp tool?",
     config.TASK_RETURN_CLAMPING_TOOL: "Take clamp tool back?",
+    config.TASK_PULL_CABLES: "Pull the cables?",
+    config.TASK_LEAVE_HANDOVER: "Move away?",
 }
 
 RUNNING_TITLES = {
@@ -44,6 +48,8 @@ RUNNING_TITLES = {
     config.TASK_BRING_CONNECTOR: "Bringing connector",
     config.TASK_BRING_CLAMPING_TOOL: "Bringing clamp tool",
     config.TASK_RETURN_CLAMPING_TOOL: "Returning clamp tool",
+    config.TASK_PULL_CABLES: "Pulling cables",
+    config.TASK_LEAVE_HANDOVER: "Moving away",
 }
 
 
@@ -129,6 +135,17 @@ _STATE_SCREENS: dict[RobotTaskState, dict[str, Any]] = {
         eyebrow="HOLDING PANEL", title="Screw it in",
         detail="Robot holds until you are done",
         actions=[A("H_SCREW_DONE", "Screwed", "check", "primary"), CANCEL_HOLD],
+    ),
+    RobotTaskState.R_WAITING_HANDOVER: dict(
+        screen="ask-handover", tone="ask", haptic="ask",
+        title="Take it now?", detail="Yes opens the gripper",
+        actions=[A("H_ACCEPT", "Yes", "hand", "primary"),
+                 A("H_REFUSE", "Not yet", "x")],
+    ),
+    RobotTaskState.R_HOLDING_HANDOVER: dict(
+        screen="holding-handover", tone="hand", haptic="tap",
+        title="Ready for it?", detail="Robot holds it until you ask",
+        actions=[A("H_HANDOVER", "Give me", "hand", "primary"), CANCEL_HOLD],
     ),
     RobotTaskState.R_RECOVERY_EVALUATING: dict(
         screen="stopping", tone="alert", haptic="alert",
@@ -221,10 +238,12 @@ def build_screen(task, pending: list, state_machine, now: float,
         total = timings.get("response_timeout_seconds", config.RESPONSE_TIMEOUT_SECONDS)
         screen.countdown_total, screen.countdown_deadline = total, started + total
     elif task.state is RobotTaskState.R_DEFER:
-        total = timings.get("defer_seconds", config.DEFER_SECONDS)
+        total = task.defer_seconds or timings.get("defer_seconds", config.DEFER_SECONDS)
         screen.countdown_total, screen.countdown_deadline = total, started + total
         if task.task_id == config.TASK_LEAVE:
             screen.detail = "Releasing the panel"
+        elif task.task_id == config.TASK_LEAVE_HANDOVER:
+            screen.detail = "Moving away"
     return screen
 
 

@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Decision Layer</title>
+<!-- Served by decision_view.py; reads /state.json twice a second. -->
+<style>
+:root {
+  color-scheme: light;
+  --bg: #fcfcfb;
+  --panel: #f5f4f1;
+  --border: #e2e1dc;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --text-3: #7c7b76;
+  --accent: #2a78d6;
+  --mark-bg: #cde2fb;
+  --pending-bg: #deebfb;
+  --pending-fg: #104281;
+  --working-bg: #2a78d6;
+  --working-fg: #ffffff;
+  --done-bg: #ebeae6;
+  --done-fg: #52514e;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #1a1a19;
+    --panel: #222221;
+    --border: #383835;
+    --text: #ffffff;
+    --text-2: #c3c2b7;
+    --text-3: #8f8e87;
+    --accent: #3987e5;
+    --mark-bg: #184f95;
+    --pending-bg: #16355e;
+    --pending-fg: #b7d3f6;
+    --working-bg: #1c5cab;
+    --working-fg: #ffffff;
+    --done-bg: #2a2a28;
+    --done-fg: #a9a89f;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1a1a19;
+  --panel: #222221;
+  --border: #383835;
+  --text: #ffffff;
+  --text-2: #c3c2b7;
+  --text-3: #8f8e87;
+  --accent: #3987e5;
+  --mark-bg: #184f95;
+  --pending-bg: #16355e;
+  --pending-fg: #b7d3f6;
+  --working-bg: #1c5cab;
+  --working-fg: #ffffff;
+  --done-bg: #2a2a28;
+  --done-fg: #a9a89f;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+header {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+  padding: 10px 16px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+h1 { font-size: 16px; margin: 0; }
+h2 { font-size: 13px; margin: 0 0 8px; color: var(--text-2); font-weight: 600; letter-spacing: .02em; }
+h2 small { font-weight: 400; color: var(--text-3); letter-spacing: 0; }
+.meta { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.spacer { flex: 1; }
+button {
+  font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px; cursor: pointer;
+}
+button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+.conn { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
+.conn::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.conn.live::before { background: var(--good); }
+.conn.stale::before { background: var(--warning); }
+.conn.down::before { background: var(--critical); }
+
+/* minmax(0, 1fr): a wide table scrolls inside its panel instead of widening the page. */
+main { padding: 16px; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+.cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.card, .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; min-width: 0; }
+.split { display: grid; gap: 16px; grid-template-columns: minmax(240px, 1fr) minmax(0, 2.5fr); }
+@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+.big { font-size: 20px; font-weight: 600; }
+.state { display: inline-block; margin-top: 4px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+.muted { color: var(--text-3); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin-top: 8px; font-size: 13px; }
+.kv span { color: var(--text-2); }
+.kv b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+.bar span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+ul.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+ul.list small { color: var(--text-3); display: block; font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+.badge { font-size: 11px; color: var(--text-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 4px; }
+
+.scroll { overflow-x: auto; }
+table { border-collapse: separate; border-spacing: 0; width: 100%; }
+th, td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+thead th { font-size: 12px; color: var(--text-2); font-weight: 600; white-space: nowrap; }
+thead th small, tbody th small { display: block; font-weight: 400; color: var(--text-3); font-size: 11px; }
+thead th.closed { color: var(--text-3); }
+tbody th { font-weight: 600; white-space: nowrap; }
+#tasks td { min-width: 190px; border-left: 3px solid transparent; }
+.cell .chip { display: inline-block; font-size: 12px; font-weight: 600; padding: 0 6px; border-radius: 4px; }
+.cell .who, .cell .num { font-size: 12px; }
+.cell .num { font-variant-numeric: tabular-nums; }
+.cell .flags { font-size: 11px; margin-top: 2px; }
+.st-NOT_DONE { color: var(--text-3); }
+.st-NOT_DONE .chip { border: 1px solid var(--border); }
+.st-PENDING { background: var(--pending-bg); color: var(--pending-fg); }
+.st-PENDING .chip { background: var(--bg); }
+.st-WORKING { background: var(--working-bg); color: var(--working-fg); }
+.st-WORKING .chip { background: rgba(255, 255, 255, .2); }
+.st-DONE { background: var(--done-bg); color: var(--done-fg); }
+td.ref { border-left-color: var(--text) !important; }
+td.robot { box-shadow: inset 0 0 0 2px var(--accent); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: -2px 0 8px; font-size: 12px; color: var(--text-2); }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 4px; border: 1px solid var(--border); }
+
+#rules td { font-size: 13px; }
+#rules tr.offers td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+#rules tr.inactive { color: var(--text-3); }
+mark { background: var(--mark-bg); color: inherit; border-radius: 3px; padding: 0 2px; }
+.yes, .no { font-size: 11px; border-radius: 4px; padding: 0 4px; border: 1px solid var(--border); }
+.yes::before { content: "\2713 "; }
+.no::before { content: "\2717 "; }
+.verdict { font-weight: 600; }
+.sub { display: block; color: var(--text-3); font-size: 12px; }
+
+.filters { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 8px; font-size: 12px; color: var(--text-2); }
+#timeline { list-style: none; margin: 0; padding: 0; max-height: 560px; overflow-y: auto; font-size: 13px; }
+#timeline li { display: grid; grid-template-columns: 88px 84px 1fr; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+#timeline time { color: var(--text-3); font-variant-numeric: tabular-nums; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+#timeline .tagname { font-size: 11px; color: var(--text-2); }
+#timeline small { display: block; color: var(--text-3); font-family: ui-monospace, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; }
+.tag-transition .txt { font-weight: 600; }
+dl.det { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 4px 0 12px; font-size: 13px; }
+dl.det dt { color: var(--text-2); }
+dl.det dd { margin: 0; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Decision layer</h1>
+  <span id="conn" class="conn">connecting</span>
+  <span id="meta" class="meta"></span>
+  <span class="spacer"></span>
+  <button id="pause" type="button" aria-pressed="false">Pause</button>
+</header>
+<main>
+  <section class="cards">
+    <article class="card" id="human"></article>
+    <article class="card" id="robot"></article>
+    <article class="card" id="queue"></article>
+    <article class="card" id="pool"></article>
+  </section>
+
+  <section class="panel">
+    <h2>Task pool <small>each piece's tasks, as the tracker sees them</small></h2>
+    <div class="legend">
+      <span><i style="background:transparent"></i>not done</span>
+      <span><i style="background:var(--pending-bg)"></i>pending</span>
+      <span><i style="background:var(--working-bg)"></i>working</span>
+      <span><i style="background:var(--done-bg)"></i>done</span>
+      <span><i style="border-left:3px solid var(--text)"></i>reference task</span>
+      <span><i style="box-shadow:inset 0 0 0 2px var(--accent)"></i>robot active / queued / pooled</span>
+    </div>
+    <div class="scroll"><table id="tasks"></table></div>
+  </section>
+
+  <section class="panel">
+    <h2>Trigger rules <small>why the robot offers each task, or not, right now</small></h2>
+    <div class="scroll"><table id="rules"></table></div>
+  </section>
+
+  <section class="split">
+    <section class="panel">
+      <h2>Detectors</h2>
+      <div id="detectors"></div>
+    </section>
+    <section class="panel">
+      <h2>Timeline <small>newest first</small></h2>
+      <div class="filters" id="filters"></div>
+      <ol id="timeline"></ol>
+    </section>
+  </section>
+</main>
+
+<script>
+"use strict";
+const STATUS = { NOT_DONE: "not done", PENDING: "pending", WORKING: "working", DONE: "done" };
+const TAGS = [
+  ["recognition", "recognition updates"], ["event", "events"], ["detector", "detector signals"],
+  ["transition", "robot state changes"], ["status", "task status changes"], ["log", "messages"],
+];
+const shown = new Set(TAGS.map(([tag]) => tag));
+let paused = false;
+let latest = null;
+
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const num = (value, digits = 2) => (value == null ? "" : Number(value).toFixed(digits));
+const clock = (t) => {
+  const d = new Date(t * 1000);
+  return d.toLocaleTimeString([], { hour12: false }) + "." + Math.floor(d.getMilliseconds() / 100);
+};
+const offset = (k) => (k === 0 ? "n" : k > 0 ? `n + ${k}` : `n - ${-k}`);
+
+function card(id, title, body) { $(id).innerHTML = `<h2>${esc(title)}</h2>${body}`; }
+
+function renderHuman(s) {
+  const h = s.human;
+  if (!h) return card("human", "Human", `<p class="muted">No task tracker: is the task database loaded?</p>`);
+  const p = Math.max(0, Math.min(1, h.reference_progress || 0));
+  card("human", "Human", `
+    <div class="big">${esc(h.reference_task ?? "nothing yet")}</div>
+    <div class="muted">${h.reference_task ? `reference task, piece ${esc(h.reference_piece_id)}` : "no task recognized or confirmed yet"}</div>
+    <div class="bar" role="img" aria-label="progress ${num(p)}"><span style="width:${p * 100}%"></span></div>
+    <div class="kv">
+      <span>progress</span><b>${num(h.reference_progress)}</b>
+      <span>on it for</span><b>${h.reference_seconds == null ? "-" : `${h.reference_seconds.toFixed(0)} s`}${h.reference_limit_s == null ? "" : ` of ${h.reference_limit_s.toFixed(0)} s${h.reference_seconds > h.reference_limit_s ? " (overran: recognition believed)" : ""}`}</b>
+      <span>ignored</span><b>${esc(h.ignored_task ?? "-")}</b>
+      <span>recognition</span><b>${h.recognition_active ? "active" : "warming up: ignored"}</b>
+      <span>human on piece</span><b>${esc(h.human_piece_id ?? "none")}</b>
+      <span>first open piece</span><b>${esc(h.current_piece_id ?? "all done")}</b>
+    </div>`);
+}
+
+function renderRobot(s) {
+  const r = s.robot, a = r.active;
+  const body = a
+    ? `<div class="big">${esc(a.task)}</div><div class="muted">piece ${esc(a.piece_id)}</div><div class="state">${esc(a.state)}</div>`
+    : `<div class="big muted">idle</div><div class="muted">no active robot task</div>`;
+  card("robot", "Robot", `${body}
+    <div class="kv">
+      <span>holding panel</span><b>${r.held_piece_id != null ? "piece " + esc(r.held_piece_id) : "no"}</b>
+      <span>asked next</span><b>${r.advance ? `${esc(r.advance.task)} (piece ${esc(r.advance.piece_id)}): ${esc(r.advance_answer ?? "no answer yet")}` : "-"}</b>
+      <span>detectors</span><b>${esc(s.detector_mode)}</b>
+      <span>demo opening</span><b>${r.demo_opening ? "running: recognition ignored" : "no"}</b>
+    </div>`);
+  const queue = r.queue.map((e, i) => `<li>${i + 1}. ${esc(e.task_name)} <span class="muted">piece ${esc(e.piece_id)}</span>${e.requested ? '<span class="badge">asked for</span>' : ""}</li>`);
+  card("queue", `Offer queue (${queue.length})`, queue.length
+    ? `<ul class="list">${queue.join("")}</ul>` : `<p class="muted">empty: offers wait here while the robot is busy</p>`);
+  const pool = r.pending_pool.map((t) => `<li>${esc(t.task)} <span class="muted">piece ${esc(t.piece_id)}</span><span class="badge">${esc(t.reason || t.state)}</span><small>${esc(t.instance)}</small></li>`);
+  card("pool", `Pending pool (${pool.length})`, pool.length
+    ? `<ul class="list">${pool.join("")}</ul>` : `<p class="muted">empty: refused or unanswered offers wait here</p>`);
+}
+
+function robotMarks(s) {
+  const marks = {};
+  const add = (task, piece, text) => ((marks[`${task}|${piece}`] ??= []).push(text));
+  const a = s.robot.active;
+  if (a) add(a.task, a.piece_id, `robot ${a.state}`);
+  if (s.robot.advance) add(s.robot.advance.task, s.robot.advance.piece_id, `asked next: ${s.robot.advance_answer ?? "no answer yet"}`);
+  s.robot.queue.forEach((e, i) => add(e.task_name, e.piece_id, `queued #${i + 1}`));
+  s.robot.pending_pool.forEach((t) => add(t.task, t.piece_id, `pooled (${t.reason || t.state})`));
+  return marks;
+}
+
+function renderTasks(s) {
+  const table = $("tasks");
+  if (!s.pieces.length) { table.innerHTML = `<tbody><tr><td class="muted">No pieces.</td></tr></tbody>`; return; }
+  const names = [];
+  s.pieces.forEach((p) => p.tasks.forEach((t) => { if (!names.includes(t.name)) names.push(t.name); }));
+  const byPiece = s.pieces.map((p) => Object.fromEntries(p.tasks.map((t) => [t.name, t])));
+  const h = s.human || {};
+  const marks = robotMarks(s);
+  const head = s.pieces.map((p) => {
+    const notes = [p.location, p.open ? "" : "closed", p.piece_id === h.human_piece_id ? "human here" : ""].filter(Boolean);
+    return `<th class="${p.open ? "" : "closed"}">Piece ${esc(p.piece_id)}<small>${esc(notes.join(" · "))}</small></th>`;
+  }).join("");
+  const rows = names.map((name) => {
+    const first = byPiece.find((tasks) => tasks[name])[name];
+    const kind = [first.recognized ? "recognized" : "support", first.robot_can ? "robot can" : ""].filter(Boolean).join(" · ");
+    const cells = s.pieces.map((p, i) => {
+      const t = byPiece[i][name];
+      if (!t) return `<td class="muted">not on this piece</td>`;
+      const isRef = h.reference_task === name && h.reference_piece_id === p.piece_id;
+      const robot = marks[`${name}|${p.piece_id}`] || [];
+      const flags = [];
+      if (isRef) flags.push("reference");
+      if (t.probability != null) flags.push(`next p ${num(t.probability)}`);
+      if (t.inferred) flags.push("inferred");
+      if (t.robot_offered) flags.push("robot offered");
+      Object.entries(t.signals).forEach(([k, v]) => flags.push(`${k} ${v}`));
+      robot.forEach((m) => flags.push(m));
+      const progress = t.status === "WORKING" && t.executor === "Human" ? ` <span class="num">${num(t.progress)}</span>` : "";
+      return `<td class="cell st-${t.status}${isRef ? " ref" : ""}${robot.length ? " robot" : ""}">
+        <span class="chip">${STATUS[t.status] || esc(t.status)}</span>${t.executor ? ` <span class="who">${esc(t.executor.toLowerCase())}</span>` : ""}${progress}
+        ${flags.length ? `<div class="flags">${esc(flags.join(" · "))}</div>` : ""}</td>`;
+    }).join("");
+    return `<tr><th scope="row">${esc(name)}<small>${esc(kind)}</small></th>${cells}</tr>`;
+  }).join("");
+  table.innerHTML = `<thead><tr><th>Task</th>${head}</tr></thead><tbody>${rows}</tbody>`;
+}
+
+function describeCondition(r) {
+  const tasks = Object.keys(r.conditions);
+  if (!tasks.length) return `<span class="muted">none</span>`;
+  const parts = tasks.map((task) => {
+    const alternatives = r.conditions[task].map((alt) => Object.entries(alt).map(([k, v]) =>
+      k === "Done signal" ? (v ? "done" : "not done") : typeof v === "boolean" ? (v ? k : `no ${k}`) : `${k} ≥ ${v}`
+    ).join(" and ")).join(" or ");
+    const st = r.condition_state[task];
+    const now = st ? [STATUS[st.status], ...Object.entries(st.signals).map(([k, v]) => `${k} ${v}`)].join(", ") : "unknown";
+    return `${esc(task)}: ${esc(alternatives)}<small class="muted"> (now ${esc(now)})</small>`;
+  });
+  return `${parts.join("<br>")} <span class="${r.conditions_met ? "yes" : "no"}">${r.conditions_met ? "met" : "not met"}</span>`;
+}
+
+function describePiece(r) {
+  const entries = Object.entries(r.piece_offsets);
+  const values = [...new Set(entries.map(([, k]) => k))];
+  const text = !entries.length ? "n" : values.length === 1 ? offset(values[0])
+    : entries.map(([task, k]) => `${task}: ${offset(k)}`).join(", ");
+  return `${esc(text)}${r.piece_n != null ? `<small class="muted"> (n = ${esc(r.piece_n)})</small>` : ""}`;
+}
+
+function renderRules(s) {
+  const table = $("rules");
+  if (!s.rules.length) { table.innerHTML = `<tbody><tr><td class="muted">No trigger policy.</td></tr></tbody>`; return; }
+  const rows = s.rules.map((r) => {
+    const previous = r.previous.map((p) => (r.triggering.includes(p) ? `<mark>${esc(p)}</mark>` : esc(p))).join(" / ");
+    const trigger = r.done_signal ? `${previous} done`
+      : r.progress > 0 ? `${previous} ≥ ${r.progress}` : `${previous}, any progress`;
+    const then = r.robot_tasks.slice(1).map(esc).join(" → ") || `<span class="muted">none</span>`;
+    const offered = r.offered.length ? `<span class="sub">offered for piece ${esc(r.offered.join(", "))}</span>` : "";
+    const cls = r.offers.length ? "offers" : r.robot_action ? "" : "inactive";
+    return `<tr class="${cls}">
+      <td><b>${esc(r.task)}</b></td><td>${trigger}</td><td>${describeCondition(r)}</td>
+      <td>${describePiece(r)}</td><td>${then}</td>
+      <td><span class="verdict">${esc(r.verdict)}</span>${offered}</td></tr>`;
+  }).join("");
+  table.innerHTML = `<thead><tr><th>Robot task</th><th>Triggered by</th><th>Condition</th><th>For piece</th><th>Then</th><th>Now</th></tr></thead><tbody>${rows}</tbody>`;
+}
+
+function renderDetectors(s) {
+  const parts = [`<p class="muted">mode: <b>${esc(s.detector_mode)}</b>${s.detector_mode === "log" ? " (signals are logged, not acted on)" : ""}</p>`];
+  if (!s.detectors.length) parts.push(`<p class="muted">No detectors running.</p>`);
+  s.detectors.forEach((d) => {
+    const st = d.status || {};
+    if (st.listening === false) {
+      parts.push(`<b>${esc(d.name)}</b><p class="muted">not listening: the robot holds no panel</p>`);
+      return;
+    }
+    const rows = Object.entries(st).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v ?? "none")}</dd>`).join("");
+    parts.push(`<b>${esc(d.name)}</b><dl class="det">${rows}</dl>`);
+  });
+  $("detectors").innerHTML = parts.join("");
+}
+
+function detailText(detail) {
+  if (!detail) return "";
+  return Object.entries(detail).filter(([, v]) => v !== null && v !== "" && v !== false)
+    .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ");
+}
+
+function renderTimeline(s) {
+  const items = s.timeline.slice().reverse().filter((e) => shown.has(e.tag)).map((e) => {
+    const detail = detailText(e.detail);
+    return `<li class="tag-${esc(e.tag)}"><time>${clock(e.t)}</time><span class="tagname">${esc(e.tag)}</span>
+      <span class="txt">${esc(e.text)}${detail ? `<small>${esc(detail)}</small>` : ""}</span></li>`;
+  });
+  $("timeline").innerHTML = items.join("") || `<li><span></span><span></span><span class="muted">nothing yet</span></li>`;
+}
+
+function render(s) {
+  renderHuman(s);
+  renderRobot(s);
+  renderTasks(s);
+  renderRules(s);
+  renderDetectors(s);
+  renderTimeline(s);
+}
+
+function setConnection(state, text) {
+  const el = $("conn");
+  el.className = "conn " + state;
+  el.textContent = text;
+}
+
+async function poll() {
+  try {
+    const response = await fetch("/state.json", { cache: "no-store" });
+    const s = await response.json();
+    if (s.waiting) {
+      setConnection("", "waiting for the first snapshot");
+    } else {
+      latest = s;
+      const age = Date.now() / 1000 - s.time;
+      if (age < 2) setConnection("live", "live");
+      else setConnection("stale", `no update for ${Math.round(age)} s: is the runtime loop busy?`);
+      $("meta").textContent = `snapshot ${clock(s.time)}`;
+      if (!paused) render(s);
+    }
+  } catch (err) {
+    setConnection("down", "not connected: is the communication runtime running?");
+  }
+  setTimeout(poll, 500);
+}
+
+$("filters").innerHTML = TAGS.map(([tag, label]) =>
+  `<label><input type="checkbox" data-tag="${tag}" checked> ${label}</label>`).join("");
+$("filters").addEventListener("change", (e) => {
+  const tag = e.target.dataset.tag;
+  if (e.target.checked) shown.add(tag); else shown.delete(tag);
+  if (latest) renderTimeline(latest);
+});
+$("pause").addEventListener("click", () => {
+  paused = !paused;
+  $("pause").setAttribute("aria-pressed", String(paused));
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  if (!paused && latest) render(latest);
+});
+poll();
+</script>
+</body>
+</html>

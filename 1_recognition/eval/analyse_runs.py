@@ -5,8 +5,9 @@ miss frames (see RecognitionManager._read_frame_on_wall_clock), do its
 PREDICTIONS change? Run the same recording twice -- once frame by frame, once
 against the wall clock -- and compare:
 
-    uv run python run_recognition.py --video-source take01.mp4 \
-        --log-dir results --run-name baseline --no-display
+    uv run python run_recognition.py --video-source "G:\\My Drive\\University of Stuttgart\\ITECH_Thesis\\Videos\\raw\\cam-06\\video__cam-06_uid-04_take-01.mp4" `
+        --log-dir results --run-name baseline --no-display 
+
     uv run python run_recognition.py --video-source take01.mp4 \
         --realtime-playback --loop-hz 1000 \
         --log-dir results --run-name realtime_1x --no-display

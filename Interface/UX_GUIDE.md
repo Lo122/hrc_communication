@@ -32,6 +32,8 @@ too loud to speak, or check the robot's state at a glance.
 | `R_WAITING_FREE_DRIVE` | ask-free-drive | white | Guide by hand? | **Yes** · No, hold |
 | `R_FREE_DRIVE` | free-drive | white | Move the panel | **Done** · Stop (hold) |
 | `R_HOLDING` | holding | white | Screw it in | **Screwed** · Stop (hold) |
+| `R_WAITING_HANDOVER` | ask-handover | white | Take it now? | **Yes** · Not yet |
+| `R_HOLDING_HANDOVER` | holding-handover | white | Ready for it? | **Give me** · Stop (hold) |
 | `R_RECOVERY_EVALUATING` | stopping | bright red | Stopping… | — |
 | `R_WAITING_HOME_PERMISSION` | ask-home | bright red | Return home? | **Home** · By hand |
 | `R_RETURNING_HOME` | homing | red | Going home… | — |

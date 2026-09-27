@@ -39,6 +39,13 @@ class CommandParser:
         "screwing done": EventType.H_SCREW_DONE,
         "finished screwing": EventType.H_SCREW_DONE,
         "next piece": EventType.H_NEXT_PIECE,
+        # Ready to take the item the robot brought: it opens the gripper.
+        "hand over": EventType.H_HANDOVER,
+        "give me the tool": EventType.H_HANDOVER,
+        "give me the coupling": EventType.H_HANDOVER,
+        "give me the pipe coupling": EventType.H_HANDOVER,
+        "give me the connector": EventType.H_HANDOVER,
+        "give me the pipe connector": EventType.H_HANDOVER,
     }
 
     # Human confirms a task is finished -> H_TASK_DONE {task_name} (task database names).
@@ -66,6 +73,7 @@ class CommandParser:
     # Human asks the robot for a task -> H_REQUEST_ROBOT_TASK {task_name}. It skips the
     # trigger rules, but the robot still asks permission before executing.
     _ROBOT_REQUEST_ALIASES = {
+        "pull the cables": "Pull Cables",
         "lift the panel": "Lift",
         "bring the tool": "Bring Tool",
         "bring tool": "Bring Tool",

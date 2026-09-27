@@ -16,6 +16,10 @@ A run writes one directory:
         run.json     configuration + end-of-run summary
 
 frames.csv columns
+    time, epoch_s      wall-clock time the row was written (local clock / epoch
+                       seconds) -- the clock the communication layer's
+                       communication_events.jsonl and timeline.csv use, so a run
+                       of run_system.py lines up across both processes
     frame_index        index in the SOURCE video (NaN for a live camera)
     video_time_s       position on the recording's timeline (NaN for live) --
                        the x-axis every cross-run comparison is aligned on
@@ -31,6 +35,9 @@ frames.csv columns
     confidence         max step probability
     progress           regression head's progress output
     world_x/y/z        world-frame pelvis position, blank when unavailable
+
+events.csv columns: time, epoch_s, wall_time_s and video_time_s as above, then
+the event sent -- type, task_name, round/step/piece id, confidence, progress.
 
 Rows are flushed as they are written, so a run killed with Ctrl-C still leaves
 a usable CSV behind.
@@ -49,7 +56,7 @@ from pathlib import Path
 from typing import Any
 
 FRAME_COLUMNS = [
-    "frame_index", "video_time_s", "wall_time_s", "dropped_before", "update_ms",
+    "time", "epoch_s", "frame_index", "video_time_s", "wall_time_s", "dropped_before", "update_ms",
     "detected", "warmup", "raw_step_id", "stable_step_id", "confidence", "progress",
     # Blank for a model trained without a mistake head. mistake_score is 1 - P(no
     # mistake), so it stays meaningful if a later model has more than two classes.
@@ -58,8 +65,8 @@ FRAME_COLUMNS = [
 ]
 
 EVENT_COLUMNS = [
-    "wall_time_s", "video_time_s", "event_type", "round_id", "step_id", "piece_id",
-    "confidence", "progress",
+    "time", "epoch_s", "wall_time_s", "video_time_s", "event_type", "task_name", "round_id",
+    "step_id", "piece_id", "confidence", "progress",
 ]
 
 
@@ -129,6 +136,7 @@ class RunLogger:
         self._last_video_time = video_time
 
         self._frames.writerow({
+            **_wall_clock(),
             "frame_index": manager.playback_frame_index,
             "video_time_s": _round(video_time, 4),
             "wall_time_s": round(now - self._wall_origin, 4),
@@ -158,9 +166,11 @@ class RunLogger:
         now = time.perf_counter()
         payload = getattr(event, "payload", None) or {}
         self._events.writerow({
+            **_wall_clock(),
             "wall_time_s": round(now - (self._wall_origin or now), 4),
             "video_time_s": _round(self._last_video_time, 4),
             "event_type": getattr(getattr(event, "event_type", None), "name", str(event)),
+            "task_name": payload.get("task_name"),
             "round_id": payload.get("round_id"),
             "step_id": payload.get("step_id"),
             "piece_id": payload.get("piece_id"),
@@ -210,6 +220,11 @@ class RunLogger:
     def _write_metadata(self) -> None:
         with (self.run_dir / "run.json").open("w", encoding="utf-8") as handle:
             json.dump(self.metadata, handle, indent=2, default=str)
+
+
+def _wall_clock() -> dict[str, Any]:
+    now = time.time()
+    return {"time": datetime.fromtimestamp(now).strftime("%H:%M:%S.%f")[:-3], "epoch_s": round(now, 3)}
 
 
 def _round(value, digits):

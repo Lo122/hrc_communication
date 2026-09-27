@@ -30,6 +30,8 @@ class RobotTask:
     speed: float
     progress: float = 0.0
     pending_reason: str | None = None
+    # The delay of the current delayed start (R_DEFER), for displays.
+    defer_seconds: float | None = None
     free_drive_active: bool = False
     robot_running_received: bool = False
     robot_success_received: bool = False

@@ -31,11 +31,13 @@ The current context replaces any earlier task or stage in the conversation.
 """
 
 TASK_DESCRIPTIONS = {
-    config.TASK_LIFT_PANEL: "lift the panel, offer manual adjustment, then hold it",
+    config.TASK_LIFT_PANEL: "lift the panel, let the human adjust it in free drive, then hold it",
     config.TASK_LEAVE: "release the panel and move away",
-    config.TASK_BRING_CONNECTOR: "bring the pipe connector",
-    config.TASK_BRING_CLAMPING_TOOL: "bring the clamping tool",
+    config.TASK_BRING_CONNECTOR: "bring the pipe connector and hand it over",
+    config.TASK_BRING_CLAMPING_TOOL: "bring the clamping tool and hand it over",
     config.TASK_RETURN_CLAMPING_TOOL: "take the clamping tool back",
+    config.TASK_PULL_CABLES: "pull the cables",
+    config.TASK_LEAVE_HANDOVER: "move away from the hand-over position after handing over an item",
 }
 
 # Each entry defines the meaning of the stage and its canonical output commands.
@@ -66,6 +68,19 @@ STATE_CONTEXTS = {
         "Finishing adjustment alone does not mean screwing is finished. "
         "This command requests a separate permission question before the robot leaves.",
         ("screw done", "cancel"),
+    ),
+    S.R_WAITING_HANDOVER: (
+        "The robot has brought an item and holds it out to the human. It asks "
+        "whether it may hand the item over, which opens its gripper and releases it. "
+        "Agreement or asking for the item means yes; declining, or not being ready "
+        "yet, means no. Only an explicit agreement or request means yes.",
+        ("yes", "no", "cancel"),
+    ),
+    S.R_HOLDING_HANDOVER: (
+        "The robot keeps holding the item it brought until the human is ready to "
+        "receive it. Asking for the item, or saying they are ready for it now, means "
+        "hand over, which opens the gripper. Anything else is not a request to release it.",
+        ("hand over", "cancel"),
     ),
     S.R_WAITING_HOME_PERMISSION: (
         "The robot has stopped and asks permission to return home. Agreement "

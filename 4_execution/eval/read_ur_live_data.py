@@ -80,14 +80,22 @@ compensation using finite-differenced TCP velocity from RTDE (good enough
 for slow/moderate motions; for fast motions prefer letting the controller do
 it via setPayload, which uses the true joint-level dynamics model).
 
-Usage: uv run python 4_execution/read_ur_live_data.py --ip 127.0.0.1 --publish-ros
+Usage: uv run python 4_execution/eval/read_ur_live_data.py --ip 192.168.1.10 --publish-ros
+
+Every run also writes the live samples to
+4_execution/logs/ur_live_data_<YYYYmmdd_HHMMSS>.log (see --log-file, --log-hz,
+--no-log), one line per sample:
+
+    2026-09-25 14:03:12.345, joint angle: [+0.577, ...] rad, tcp position: (-0.6368, -0.6220, +1.3683) m, force: (-0.58, -0.17, +27.90) N, torque: (-0.22, -0.03, +0.08) Nm
 
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import time
+from datetime import datetime
 import sys
 from pathlib import Path
 import numpy as np
@@ -101,10 +109,16 @@ except ImportError as exc:  # pragma: no cover - depends on deployment environme
     ) from exc
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import config
+EXECUTION = Path(__file__).resolve().parents[1]
+ROOT = EXECUTION.parent
+# The repo root last, so it ends up first: multi-actor-interface ships its own
+# top-level `config` package (see pyproject.toml).
+for _path in (EXECUTION / "src", ROOT):
+    sys.path.insert(0, str(_path))
 
-from src.robot_utils import GravityCompensator, Payload, rotvec_to_quaternion
+import config
+import ros_messages
+from robot_utils import GravityCompensator, Payload
 
 try:
     import roslibpy
@@ -133,9 +147,14 @@ ROBOT_IP = "127.0.0.1"  # URSim in Docker: use localhost, since 30001-30004 are
 #   - PRINT_HZ is decimated the same way, so console I/O doesn't do it
 #     either -- printing every RTDE sample at 125Hz would itself become the
 #     bottleneck.
+#   - LOG_HZ likewise, for the data-log file: logging.FileHandler flushes on
+#     every record, so each logged sample costs a disk write.
 RTDE_HZ = 125.0  # RTDE read/loop rate (Hz); matches e-Series' 125-500Hz control loop
 ROS_PUBLISH_HZ = 20.0  # rosbridge publish rate (Hz); decimated from RTDE_HZ
 PRINT_HZ = 10.0  # console print rate (Hz); decimated from RTDE_HZ
+LOG_HZ = 25.0  # data-log file write rate (Hz); decimated from RTDE_HZ
+
+LOG_DIR = EXECUTION / "logs"  # gitignored; src/plot_utils.py reads from here too
 
 
 class LiveDataPublisher:
@@ -197,66 +216,50 @@ class LiveDataPublisher:
         if not self._is_ready():
             return
         self._joint_topic.publish(
-            roslibpy.Message(
-                {
-                    "header": {"stamp": _to_ros_time(timestamp), "frame_id": ""},
-                    "name": self.JOINT_NAMES,
-                    "position": [float(v) for v in q],
-                    "velocity": [],
-                    "effort": [],
-                }
-            )
+            roslibpy.Message(ros_messages.joint_state(timestamp, q, names=self.JOINT_NAMES))
         )
 
     def publish_tcp_position(self, tcp_pose: np.ndarray, timestamp: float) -> None:
         if not self._is_ready():
             return
-        qx, qy, qz, qw = rotvec_to_quaternion(*tcp_pose[3:])
         self._tcp_position_topic.publish(
-            roslibpy.Message(
-                {
-                    "header": {"stamp": _to_ros_time(timestamp), "frame_id": "base"},
-                    "pose": {
-                        "position": {
-                            "x": float(tcp_pose[0]),
-                            "y": float(tcp_pose[1]),
-                            "z": float(tcp_pose[2]),
-                        },
-                        "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
-                    },
-                }
-            )
+            roslibpy.Message(ros_messages.pose_stamped(timestamp, tcp_pose, "base"))
         )
 
     def publish_tcp_force(self, tcp_force: np.ndarray, timestamp: float) -> None:
         if not self._is_ready():
             return
         self._tcp_force_topic.publish(
-            roslibpy.Message(
-                {
-                    "header": {"stamp": _to_ros_time(timestamp), "frame_id": "tool0"},
-                    "wrench": {
-                        "force": {
-                            "x": float(tcp_force[0]),
-                            "y": float(tcp_force[1]),
-                            "z": float(tcp_force[2]),
-                        },
-                        "torque": {
-                            "x": float(tcp_force[3]),
-                            "y": float(tcp_force[4]),
-                            "z": float(tcp_force[5]),
-                        },
-                    },
-                }
-            )
+            roslibpy.Message(ros_messages.wrench_stamped(timestamp, tcp_force, "tool0"))
         )
 
 
-def _to_ros_time(timestamp: float) -> dict:
-    """Convert a float Unix timestamp to a ROS1 time dict ({secs, nsecs})."""
-    secs = int(timestamp)
-    nsecs = int(round((timestamp - secs) * 1e9))
-    return {"secs": secs, "nsecs": nsecs}
+def _open_data_log(path: Path) -> logging.Logger:
+    """File-only logger for the live samples; the timestamp (ms resolution)
+    is prepended by the formatter, the rest of the line by the caller.
+
+    Kept off the root logger (propagate=False) so roslibpy's own logging, or
+    anyone's basicConfig(), neither mixes into this file nor echoes these
+    samples to the console.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s.%(msecs)03d, %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+        )
+    )
+    logger = logging.getLogger("ur_live_data")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.addHandler(handler)
+    return logger
+
+
+def _close_data_log(logger: logging.Logger) -> None:
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def main() -> None:
@@ -281,6 +284,23 @@ def main() -> None:
         default=PRINT_HZ,
         help="console print rate (Hz); decimated from --rtde-hz, never "
         "higher than it",
+    )
+    parser.add_argument(
+        "--log-hz",
+        type=float,
+        default=LOG_HZ,
+        help="data-log file write rate (Hz); decimated from --rtde-hz, never "
+        "higher than it (set equal to --rtde-hz to log every sample)",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="data-log file path (default: "
+        "4_execution/logs/ur_live_data_<YYYYmmdd_HHMMSS>.log)",
+    )
+    parser.add_argument(
+        "--no-log", action="store_true", help="don't write the data-log file"
     )
     parser.add_argument(
         "--set-payload",
@@ -313,8 +333,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.ros_hz > args.rtde_hz or args.print_hz > args.rtde_hz:
-        raise SystemExit("--ros-hz and --print-hz cannot exceed --rtde-hz")
+    if max(args.ros_hz, args.print_hz, args.log_hz) > args.rtde_hz:
+        raise SystemExit("--ros-hz, --print-hz and --log-hz cannot exceed --rtde-hz")
 
     rtde_r = RTDEReceiveInterface(args.ip, frequency=args.rtde_hz)
     print(f"[rtde] connected to receive interface at {args.ip} ({args.rtde_hz:.0f} Hz)")
@@ -342,12 +362,21 @@ def main() -> None:
 
     publisher = LiveDataPublisher() if args.publish_ros else None
 
-    # Decimation: publish/print every Nth RTDE sample rather than every
-    # sample, so neither the rosbridge websocket write nor console I/O can
-    # ever slow down the RTDE read loop's pacing (see the latency-management
-    # note above RTDE_HZ/ROS_PUBLISH_HZ/PRINT_HZ).
+    data_log = None
+    if not args.no_log:
+        log_path = args.log_file or (
+            LOG_DIR / f"ur_live_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        )
+        data_log = _open_data_log(log_path)
+        print(f"[log] writing live data to {log_path} ({args.log_hz:.0f} Hz)")
+
+    # Decimation: publish/print/log every Nth RTDE sample rather than every
+    # sample, so neither the rosbridge websocket write, console I/O, nor the
+    # log file can ever slow down the RTDE read loop's pacing (see the
+    # latency-management note above RTDE_HZ/ROS_PUBLISH_HZ/PRINT_HZ/LOG_HZ).
     publish_every_n = max(1, round(args.rtde_hz / args.ros_hz))
     print_every_n = max(1, round(args.rtde_hz / args.print_hz))
+    log_every_n = max(1, round(args.rtde_hz / args.log_hz))
 
     sample_count = 0
     try:
@@ -368,6 +397,14 @@ def main() -> None:
                     f"rot=({tcp_pose[3]:+.3f},{tcp_pose[4]:+.3f},{tcp_pose[5]:+.3f}) rad  "
                     f"F=({tcp_force[0]:+.2f},{tcp_force[1]:+.2f},{tcp_force[2]:+.2f}) N  "
                     f"T=({tcp_force[3]:+.2f},{tcp_force[4]:+.2f},{tcp_force[5]:+.2f}) Nm"
+                )
+
+            if data_log is not None and sample_count % log_every_n == 0:
+                data_log.info(
+                    f"joint angle: [{', '.join(f'{v:+.3f}' for v in joint_positions)}] rad, "
+                    f"tcp position: ({tcp_pose[0]:+.4f}, {tcp_pose[1]:+.4f}, {tcp_pose[2]:+.4f}) m, "
+                    f"force: ({tcp_force[0]:+.2f}, {tcp_force[1]:+.2f}, {tcp_force[2]:+.2f}) N, "
+                    f"torque: ({tcp_force[3]:+.2f}, {tcp_force[4]:+.2f}, {tcp_force[5]:+.2f}) Nm"
                 )
 
             if publisher is not None and sample_count % publish_every_n == 0:
@@ -397,6 +434,8 @@ def main() -> None:
         print("[rtde] disconnected")
         if publisher is not None:
             publisher.close()
+        if data_log is not None:
+            _close_data_log(data_log)
 
 
 if __name__ == "__main__":
