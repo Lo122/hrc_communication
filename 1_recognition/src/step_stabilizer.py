@@ -16,11 +16,15 @@ class StepIdStabilizer:
         min_margin=0.15,
         allowed_transitions=None,
         override_factor=None,
+        min_confidence_by_step=None,
     ):
         self.num_steps = int(num_steps)
         self.prob_history = deque(maxlen=int(smoothing_window))
         self.confirmation_count = int(confirmation_count)
         self.min_confidence = float(min_confidence)
+        # {step id: min confidence} for steps the model scores lower or higher than the
+        # rest; the others use min_confidence.
+        self.min_confidence_by_step = {int(k): float(v) for k, v in (min_confidence_by_step or {}).items()}
         self.min_margin = float(min_margin)
         self.allowed_transitions = allowed_transitions or self._default_transitions(self.num_steps)
         # A disallowed step change is still accepted once its candidate has held for
@@ -92,7 +96,8 @@ class StepIdStabilizer:
         sorted_probs = np.sort(averaged_probs)
         top_prob = float(averaged_probs[candidate])
         second_prob = float(sorted_probs[-2]) if sorted_probs.size > 1 else 0.0
-        return top_prob >= self.min_confidence and (top_prob - second_prob) >= self.min_margin
+        min_confidence = self.min_confidence_by_step.get(candidate, self.min_confidence)
+        return top_prob >= min_confidence and (top_prob - second_prob) >= self.min_margin
 
     def _is_allowed_transition(self, candidate):
         allowed = self.allowed_transitions.get(self.stable_step_id, [self.stable_step_id])

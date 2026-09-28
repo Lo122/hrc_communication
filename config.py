@@ -131,6 +131,11 @@ TASK_OVERRUN_STAT = "p95"
 RECOGNITION_FILTER_MIN_PROBABILITY = 0.02
 # ...unless the candidate holds for confirmation_count * this many frames anyway.
 RECOGNITION_FILTER_OVERRIDE_FACTOR = 7
+# Steps recognition may switch to from any step, whatever the transition table says --
+# e.g. Screw -> Clamp Coupling is rare in the annotations (0.019) but must not wait for
+# the override. How sure the model must be per step: the task database's "Action
+# Confidence Threshold".
+RECOGNITION_FILTER_OPEN_STEPS = ("Screw", "Clamp Coupling")
 # The progress head's raw output divided by this gives 0-1 (the database's "Progress"
 # thresholds are 0-1). Check against a replay: training labels ran 0-100.
 RECOGNITION_PROGRESS_SCALE = 1.0
@@ -264,8 +269,10 @@ TCP_WEIGHT_CHANGE_N = 5.0
 # load change since the hold began stays within this range (low, high) in N, with no
 # push, for TCP_WEIGHT_STEADY_S in a row: the frame carries the panel. None: only the
 # screw count and the pushes decide.
-# PLACEHOLDER range: tune it on a recorded screwing take (force_logger.py).
-TCP_WEIGHT_RANGE_N = (5.0, 40.0)
+# Still to tune on recorded takes (force_logger.py). The one measurement so far (run
+# 2026-09-28 13:53, piece 1): the panel's weight going over to the frame changed the load
+# by 45 N -- outside the old (5, 40), so the leave was only asked 5 minutes later.
+TCP_WEIGHT_RANGE_N = (5.0, 60.0)
 TCP_WEIGHT_STEADY_S = 10.0
 
 # -- Demo opening (run_communication.py --demo; 2_decision_making/demo_opening.py) --

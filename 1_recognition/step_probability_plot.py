@@ -1,5 +1,7 @@
-"""Live preview window: a rolling line graph of each task step's softmax
-probability plus the progress-head output, both over the last few seconds --
+"""Live preview window: a rolling line graph of each task step's probability (a
+softmax, or a multi-head model's step scores) plus the progress-head output -- one
+line, or one per step for a model with a progress lane per task -- over the last few
+seconds --
 so you can watch the LSTM's raw per-frame output change over time instead of
 only the sparse, debounced RecognitionResult stream (see
 recognition_manager.py's last_step_probabilities/last_progress).
@@ -41,12 +43,14 @@ class StepProbabilityPlot:
         window_name: str = "Step Probabilities & Progress",
         step_labels: list[str] | None = None,
         window_position: tuple[int, int] = (980, 60),
+        probability_title: str = "task step probabilities",
     ):
         self.num_steps = num_steps
         self.history_seconds = history_seconds
         self.size = size
         self.window_name = window_name
         self.step_labels = step_labels or [f"step {i}" for i in range(num_steps)]
+        self.probability_title = probability_title
         self.colors = [_step_color(i, num_steps) for i in range(num_steps)]
 
         # cv2 places new windows at a default top-left position, which lands this one
@@ -56,10 +60,10 @@ class StepProbabilityPlot:
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.moveWindow(self.window_name, *window_position)
 
-        # (timestamp, probabilities array, progress) -- trimmed to history_seconds on
-        # every update rather than a fixed maxlen, so it stays correct regardless of the
-        # actual frame rate.
-        self._history: deque[tuple[float, np.ndarray, float]] = deque()
+        # (timestamp, probabilities array, progress, per-step progress or None) --
+        # trimmed to history_seconds on every update rather than a fixed maxlen, so it
+        # stays correct regardless of the actual frame rate.
+        self._history: deque[tuple[float, np.ndarray, float, np.ndarray | None]] = deque()
 
         # Layout: legend strip on the right, two stacked plots (probabilities/progress)
         # sharing the remaining width.
@@ -73,13 +77,17 @@ class StepProbabilityPlot:
         self._prob_top = 20
         self._progress_top = self._prob_top + self._prob_h + gap
 
-    def update(self, timestamp: float, probabilities: np.ndarray, progress: float) -> np.ndarray:
+    def update(self, timestamp: float, probabilities: np.ndarray, progress: float,
+               step_progress: np.ndarray | None = None) -> np.ndarray:
         """Append one reading, redraw, and show the window. Returns the
         rendered canvas (BGR uint8) in case a caller wants to reuse it
         (e.g. compose into another panel) instead of/in addition to
         cv2.imshow. Raises KeyboardInterrupt on 'q', same convention as
-        RecognitionManager._show_frame."""
-        self._history.append((timestamp, np.asarray(probabilities, dtype=np.float32), float(progress)))
+        RecognitionManager._show_frame. step_progress: one progress per step
+        (multi-head models), drawn per step instead of the single progress line."""
+        lanes = None if step_progress is None else np.asarray(step_progress, dtype=np.float32)
+        self._history.append((timestamp, np.asarray(probabilities, dtype=np.float32),
+                              float(progress), lanes))
         cutoff = timestamp - self.history_seconds
         while self._history and self._history[0][0] < cutoff:
             self._history.popleft()
@@ -101,26 +109,38 @@ class StepProbabilityPlot:
         canvas = np.full((total_h, total_w, 3), 255, dtype=np.uint8)
 
         plot_left = self._margin
+        per_step = self._per_step_progress()
         self._draw_axes(canvas, plot_left, self._prob_top, self._plot_w, self._prob_h,
-                         title="task step probabilities")
+                         title=self.probability_title)
         self._draw_axes(canvas, plot_left, self._progress_top, self._plot_w, self._progress_h,
-                         title="progress")
+                         title="progress per step" if per_step else "progress")
 
         if len(self._history) >= 2:
             latest_t = self._history[-1][0]
-            xs = [latest_t - t for t, _, _ in self._history]  # seconds-ago, newest -> 0
+            xs = [latest_t - t for t, _, _, _ in self._history]  # seconds-ago, newest -> 0
 
             for step_id in range(self.num_steps):
-                ys = [probs[step_id] if step_id < len(probs) else 0.0 for _, probs, _ in self._history]
+                ys = [probs[step_id] if step_id < len(probs) else 0.0 for _, probs, _, _ in self._history]
                 self._draw_line(canvas, plot_left, self._prob_top, self._plot_w, self._prob_h,
                                  xs, ys, self.colors[step_id])
 
-            progress_ys = [p for _, _, p in self._history]
-            self._draw_line(canvas, plot_left, self._progress_top, self._plot_w, self._progress_h,
-                             xs, progress_ys, (60, 60, 60))
+            if per_step:
+                for step_id in range(self.num_steps):
+                    ys = [lanes[step_id] if lanes is not None and step_id < len(lanes) else np.nan
+                          for _, _, _, lanes in self._history]
+                    if np.any(np.nan_to_num(np.abs(ys)) > 0.0):  # a step with no lane stays flat at 0
+                        self._draw_line(canvas, plot_left, self._progress_top, self._plot_w,
+                                         self._progress_h, xs, ys, self.colors[step_id])
+            else:
+                progress_ys = [p for _, _, p, _ in self._history]
+                self._draw_line(canvas, plot_left, self._progress_top, self._plot_w, self._progress_h,
+                                 xs, progress_ys, (60, 60, 60))
 
-        self._draw_legend(canvas, plot_left + self._plot_w + 15, self._prob_top)
+        self._draw_legend(canvas, plot_left + self._plot_w + 15, self._prob_top, per_step)
         return canvas
+
+    def _per_step_progress(self) -> bool:
+        return any(lanes is not None for _, _, _, lanes in self._history)
 
     def _draw_axes(self, canvas, x0, y0, w, h, *, title: str) -> None:
         cv2.rectangle(canvas, (x0, y0), (x0 + w, y0 + h), (200, 200, 200), 1, cv2.LINE_AA)
@@ -153,13 +173,17 @@ class StepProbabilityPlot:
             if a is not None and b is not None:
                 cv2.line(canvas, a, b, color, 2, cv2.LINE_AA)
 
-    def _draw_legend(self, canvas, x0, y0) -> None:
+    def _draw_legend(self, canvas, x0, y0, per_step: bool = False) -> None:
         for i, (label, color) in enumerate(zip(self.step_labels, self.colors)):
             y = y0 + i * 20
             cv2.line(canvas, (x0, y), (x0 + 20, y), color, 3, cv2.LINE_AA)
             cv2.putText(canvas, label, (x0 + 26, y + 4), cv2.FONT_HERSHEY_SIMPLEX,
                         0.42, (30, 30, 30), 1, cv2.LINE_AA)
         y_progress = y0 + self.num_steps * 20 + 12
+        if per_step:  # the progress lines share their step's color
+            cv2.putText(canvas, "progress: step colors", (x0, y_progress + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (30, 30, 30), 1, cv2.LINE_AA)
+            return
         cv2.line(canvas, (x0, y_progress), (x0 + 20, y_progress), (60, 60, 60), 3, cv2.LINE_AA)
         cv2.putText(canvas, "progress", (x0 + 26, y_progress + 4), cv2.FONT_HERSHEY_SIMPLEX,
                     0.42, (30, 30, 30), 1, cv2.LINE_AA)

@@ -74,6 +74,14 @@ class TaskDatabaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TaskDatabase(DATABASE.pieces, {"Lift": ("Robot",)}, {})
 
+    def test_confidence_thresholds_load_and_bad_ones_are_rejected(self):
+        self.assertTrue(DATABASE.confidence_thresholds)
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in DATABASE.confidence_thresholds.values()))
+        with self.assertRaisesRegex(ValueError, "unknown task 'Scrw'"):
+            TaskDatabase(DATABASE.pieces, DATABASE.executors, {}, {"Scrw": 0.4})
+        with self.assertRaisesRegex(ValueError, "not between 0 and 1"):
+            TaskDatabase(DATABASE.pieces, DATABASE.executors, {}, {"Screw": 40.0})
+
     def test_rejects_bad_piece_ids_and_chains(self):
         with self.assertRaisesRegex(ValueError, "Piece id"):
             _parse_piece_ids("m + 1", ("Screw",), "Bring Tool")
@@ -386,6 +394,31 @@ class TransitionFilterTests(unittest.TestCase):
         stabilizer.update(np.eye(2)[0])
         for _ in range(20):
             self.assertEqual(stabilizer.update(np.eye(2)[1]), 0)
+
+    def test_step_with_its_own_confidence_switches_below_the_global_minimum(self):
+        stabilizer = StepIdStabilizer(num_steps=3, smoothing_window=1, confirmation_count=1,
+                                      min_confidence=0.5, min_margin=0.1,
+                                      allowed_transitions={k: [0, 1, 2] for k in range(3)},
+                                      min_confidence_by_step={2: 0.35})
+        self.assertEqual(stabilizer.update([0.8, 0.1, 0.1]), 0)
+        self.assertEqual(stabilizer.update([0.30, 0.45, 0.25]), 0)  # 0.45 < 0.5 for step 1
+        self.assertEqual(stabilizer.update([0.30, 0.25, 0.45]), 2)  # ...but enough for step 2
+
+    def test_recognition_uses_database_confidence_and_open_steps(self):
+        from recognition_manager import RecognitionManager
+
+        manager = RecognitionManager.__new__(RecognitionManager)
+        manager.num_steps = len(RECOGNIZED)
+        by_step = manager._step_confidence_thresholds()
+        for name, value in DATABASE.confidence_thresholds.items():
+            if name in RECOGNIZED:
+                self.assertEqual(by_step[RECOGNIZED.index(name)], value, name)
+        allowed = manager._observed_transitions()
+        screw, clamp = RECOGNIZED.index("Screw"), RECOGNIZED.index("Clamp Coupling")
+        self.assertEqual(TRANSITIONS.probability("Screw", "Clamp Coupling") < 0.02, True)  # the table alone blocks it
+        for step, targets in allowed.items():
+            self.assertIn(screw, targets, RECOGNIZED[step])
+            self.assertIn(clamp, targets, RECOGNIZED[step])
 
 
 if __name__ == "__main__":

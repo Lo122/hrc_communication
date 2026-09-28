@@ -24,6 +24,10 @@ A trigger rule, with n the piece the human is on:
 that task being done; any other name is a signal a detector reported on it
 (task_transition_detector.py): a number passes at or above the value given,
 true/false must match.
+
+"Action Confidence Threshold" gives, per task, how sure recognition's step model must be
+(0-1) before recognition switches to that step. Steps it leaves out use
+STEP_MIN_CONFIDENCE (1_recognition/recognition_manager.py).
 """
 
 import json
@@ -118,10 +122,13 @@ def _parse_conditions(value, rule_name: str) -> dict[str, tuple[dict, ...]]:
 
 class TaskDatabase:
     def __init__(self, pieces: list[Piece], executors: dict[str, tuple[str, ...]],
-                 trigger_rules: dict[str, TriggerRule]):
+                 trigger_rules: dict[str, TriggerRule], confidence_thresholds: dict[str, float] | None = None):
         self.pieces = pieces
         self.executors = executors
         self.trigger_rules = trigger_rules
+        # "Action Confidence Threshold": per task, how sure recognition's step model must
+        # be before it switches to that step (1_recognition/src/step_stabilizer.py).
+        self.confidence_thresholds = dict(confidence_thresholds or {})
         self._validate()
 
     @classmethod
@@ -142,7 +149,8 @@ class TaskDatabase:
                 piece_offsets=_parse_piece_ids(rule.get("Piece id"), previous, name),
                 robot_tasks=tuple(rule.get("robot task", ())) or (name,),
             )
-        return cls(pieces, executors, trigger_rules)
+        thresholds = {name: float(value) for name, value in data.get("Action Confidence Threshold", {}).items()}
+        return cls(pieces, executors, trigger_rules, thresholds)
 
     def can_execute(self, task_name: str, executor: str) -> bool:
         return executor in self.executors.get(task_name, ())
@@ -181,5 +189,9 @@ class TaskDatabase:
                          for task in rule.robot_tasks if task not in known]
             if rule.robot_tasks and rule.robot_tasks[0] != name:
                 problems.append(f"trigger rule '{name}': 'robot task' must start with '{name}'")
+        problems += [f"'Action Confidence Threshold' for unknown task '{name}'"
+                     for name in self.confidence_thresholds if name not in known]
+        problems += [f"'Action Confidence Threshold' for '{name}' is {value}, not between 0 and 1"
+                     for name, value in self.confidence_thresholds.items() if not 0.0 <= value <= 1.0]
         if problems:
             raise ValueError("Invalid task database: " + "; ".join(problems))

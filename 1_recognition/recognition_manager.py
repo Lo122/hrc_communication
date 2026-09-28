@@ -2,14 +2,14 @@
 
 RecognitionManager organises three collaborators -- FrameSource (where frames come
 from), RealtimeSkeleton3DPipeline (frame -> 3D skeleton -> features) and DebugView
-(optional preview windows) -- and owns what is left: the LSTM step classifier, the
-feature buffer, and the round/step bookkeeping. One call to update() advances all
-of it by a frame and returns a RecognitionResult on a confirmed step transition.
+(optional preview windows) -- and owns what is left: the step classifier (in either
+format, see src/step_models.py), the feature buffer, and the round/step bookkeeping.
+One call to update() advances all of it by a frame and returns a RecognitionResult on
+a confirmed step transition.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
@@ -37,6 +37,7 @@ from camera_utils.frame_source import FrameSource
 from logging_setup import get_logger
 from render_utils.debug_view import DebugView
 from render_utils.video_recorder import VideoRecorder
+from step_models import StepModel, open_step_model
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
@@ -44,10 +45,10 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 DEFAULT_MODEL_DIR = Path(__file__).resolve().parent / "best_model" / "3d_skeleton"
 logger = get_logger(__name__)
 
-# Model-config feature keys that are a concatenation of several extractor outputs, in
-# this exact order. Each component is normalized separately first (the norm .npz holds
-# per-component stats), then concatenated -- the order training used.
-COMPOSITE_FEATURE_KEYS = {"pol_angles": ("polar_azimuth", "polar_elevation")}
+# A model fed at its own rate (step_models: sample_period_s) takes a frame up to this
+# share of a period early, so a loop running at about that rate feeds every frame
+# despite jitter, and a faster one every n-th.
+SAMPLE_EARLY_TOLERANCE = 0.25
 
 STEP_SMOOTHING_WINDOW = 7
 STEP_CONFIRMATION_COUNT = 3
@@ -92,20 +93,14 @@ class RecognitionManager:
         self.model_dir = Path(model_dir)
         self.enable_step_model = enable_step_model
 
-        if enable_step_model:
-            self.model_config_path = Path(model_config_path) if model_config_path is not None else self.model_dir / "config.json"
-            self.model_config = self._load_model_config()
-            self.model_path = Path(model_path) if model_path is not None else self._find_model_path()
-            self.norm_path = Path(norm_path) if norm_path is not None else self._find_norm_path()
-            self.feature_keys = feature_keys or list(self.model_config["feature_keys"])
-        else:
-            # Vision-only: the 3D pipeline runs for real, but the LSTM and its norm stats
-            # are never touched, so a missing .npz cannot stop the skeleton pipeline.
-            self.model_config_path = None
-            self.model_config = None
-            self.model_path = None
-            self.norm_path = None
-            self.feature_keys = list(feature_keys or [])
+        # The step classifier, in whichever format model_dir holds (step_models.py): the
+        # legacy AssistLSTM or the 4-head GRU. Vision-only runs never open it, so a
+        # missing file cannot stop the skeleton pipeline.
+        self.step_model: StepModel | None = (
+            open_step_model(self.model_dir, model_path=model_path,
+                            model_config_path=model_config_path, norm_path=norm_path,
+                            feature_keys=feature_keys)
+            if enable_step_model else None)
 
         self.device_name = device
         self.show_video = show_video
@@ -145,11 +140,14 @@ class RecognitionManager:
         self.window_size: int | None = None
         self.num_steps: int | None = None
         self.buffer = deque()
+        # Feeding a model at its own rate: when the next feature vector is due, and the
+        # times of those in the buffer (to warn once if the loop is too slow for it).
+        self._next_sample_due: float | None = None
+        self._sample_times: deque[float] = deque()
+        self._rate_checked = False
 
         self._torch = None
         self._pipeline_ready = False
-        self._model = None
-        self._norm_real_time = None
         self._skeleton_pipeline = None
         self._feature_extractor = None
 
@@ -190,6 +188,10 @@ class RecognitionManager:
         self.last_mistake_id: int | None = None
         self.last_mistake_score: float | None = None
         self.last_progress: float | None = None
+        # Multi-head models only (None for the legacy format): progress per step, and
+        # the background head's P(nobody is working).
+        self.last_step_progress: np.ndarray | None = None
+        self.last_idle_probability: float | None = None
         self.last_step_probabilities_timestamp: float | None = None
 
         self.round_id = 0
@@ -364,8 +366,14 @@ class RecognitionManager:
         # representation would flip mid-run and the derivative fit would read the
         # metres-scale jump as an enormous spurious velocity.
         features = self._feature_extractor.update(pipeline_out["root_relative"], frame_timestamp)
-        features = self._norm_real_time.normalize_features(features)
-        feature_vector = self._build_feature_vector(features)
+        if not self._sample_due(frame_timestamp):
+            # A model fed at its own rate skips this frame: the features above still
+            # advance (their velocity/acceleration fits need every frame), but nothing
+            # is buffered or predicted until the next sample is due.
+            record["warmup"] = len(self.buffer) < self.window_size
+            self._show(frame, pipeline_out)
+            return None
+        feature_vector = self.step_model.feature_vector(features)
         if not np.all(np.isfinite(feature_vector)):
             # With nobody in frame the feature extractor holds a zero skeleton, and
             # panels that divide by a body dimension (the ratios panel's shoulder
@@ -385,29 +393,19 @@ class RecognitionManager:
             feature_vector = np.nan_to_num(feature_vector, nan=0.0, posinf=0.0, neginf=0.0)
 
         self.buffer.append(feature_vector)
+        self._sample_times.append(frame_timestamp)
         if len(self.buffer) < self.window_size:
             self._show(frame, pipeline_out)
             return None
+        self._check_sample_rate()
 
-        x = np.stack(self.buffer).astype(np.float32)
-        x = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            # Models trained with a mistake head return a third output; models without
-            # one return two.
-            outputs = self._model(x)
-            step_logits, progress_pred = outputs[0], outputs[1]
-            mistake_logits = outputs[2] if len(outputs) > 2 else None
-            step_probs = torch.softmax(step_logits, dim=1)
-            raw_step_id = int(torch.argmax(step_probs, dim=1).item())
-            confidence = float(torch.max(step_probs, dim=1).values.item())
-            progress = float(progress_pred.item())
-            mistake_probs = (None if mistake_logits is None
-                             else torch.softmax(mistake_logits, dim=1).squeeze(0).cpu().numpy())
-
-        probabilities = step_probs.squeeze(0).cpu().numpy()
-        if not (np.isfinite(confidence) and np.isfinite(progress)
-                and np.all(np.isfinite(probabilities))):
+        prediction = self.step_model.predict(np.stack(self.buffer).astype(np.float32))
+        probabilities = prediction.step_scores
+        raw_step_id = prediction.raw_step_id
+        confidence = prediction.confidence
+        progress = prediction.progress_of(raw_step_id)
+        mistake_probs = prediction.mistake_probabilities
+        if not prediction.is_finite():
             # Belt to the feature guard's braces: whatever produced it, a non-finite
             # prediction is not a prediction. Publishing it would seed the stabilizer's
             # smoothing window with NaN (which then never recovers, since NaN loses
@@ -430,6 +428,8 @@ class RecognitionManager:
         self.last_mistake_score = (None if mistake_probs is None
                                    else float(1.0 - mistake_probs[0]))
         self.last_progress = progress
+        self.last_step_progress = prediction.step_progress
+        self.last_idle_probability = prediction.idle_probability
         self.last_step_probabilities_timestamp = frame_timestamp
         stable_step_id = self._stable_step_id(probabilities)
         self.last_raw_step_id = raw_step_id
@@ -440,7 +440,8 @@ class RecognitionManager:
         record.update(warmup=False, raw_step_id=raw_step_id, confidence=confidence,
                       progress=progress, stable_step_id=stable_step_id,
                       mistake_id=self.last_mistake_id,
-                      mistake_score=self.last_mistake_score)
+                      mistake_score=self.last_mistake_score,
+                      idle_probability=self.last_idle_probability)
 
 
         if stable_step_id is None:
@@ -449,6 +450,9 @@ class RecognitionManager:
             return None
 
         self._record_step_and_advance_round(stable_step_id)
+        # The stable step's own progress: its lane for a multi-head model, whose raw
+        # winner may be another step; the one value for the legacy format.
+        progress = prediction.progress_of(int(stable_step_id))
         result = RecognitionResult(
             round_id=self.round_id,
             step_id=int(stable_step_id),
@@ -579,36 +583,14 @@ class RecognitionManager:
         self.vision_config = replace(self.vision_config, device=self.vision_config.device or self.device)
 
         if self.enable_step_model:
-            from feature_utils.feature_normalizer import NormRealTime
-
-            self.window_size = int(self.model_config["window_size"])
-            self.num_steps = int(self.model_config["num_steps"])
+            self.step_model.load(torch, self.device)
+            self.window_size = self.step_model.window_size
+            self.num_steps = self.step_model.num_steps
             self.buffer = deque(maxlen=self.window_size)
-
-            # AssistLSTM's definition lives beside the checkpoint in best_model/, one
-            # level above the per-variant subdirectory the weights sit in.
-            model_dir = str(self.model_dir.parent) if str(self.model_dir.name) in ["2d_skeleton", "3d_skeleton"] else str(self.model_dir)
-            if model_dir not in sys.path:
-                sys.path.insert(0, model_dir)
-            from LSTM_model_train import AssistLSTM
-            # num_mistakes/num_layers/dropout must mirror the values the checkpoint was
-            # trained with, or load_state_dict rejects the weights (a mistake_head trained
-            # into the checkpoint has no place to go in a head-less model). Older configs
-            # predate these keys, hence the defaults.
-            num_mistakes = self.model_config.get("num_mistakes")
-            self._model = AssistLSTM(
-                input_dim=int(self.model_config["input_dim"]),
-                hidden_dim=int(self.model_config["hidden_dim"]),
-                num_steps=self.num_steps,
-                num_layers=int(self.model_config.get("num_layers", 1)),
-                dropout=float(self.model_config.get("dropout", 0.5)),
-                num_mistakes=int(num_mistakes) if num_mistakes is not None else None,
-            ).to(self.device)
-            self._model.load_state_dict(torch.load(self.model_path, map_location=self.device))
-            self._model.eval()
+            self._sample_times = deque(maxlen=self.window_size)
+            logger.info("Loaded %s.", self.step_model.describe())
 
             self._feature_extractor = StreamingH36MFeatureExtractor(self.vision_config)
-            self._norm_real_time = NormRealTime(str(self.norm_path), self.feature_keys)
             self._ensure_stabilizer()
         else:
             logger.info("Vision-only mode: YOLO 2D pose + MotionBERT 3D lift are live; "
@@ -647,7 +629,29 @@ class RecognitionManager:
             min_margin=STEP_MIN_MARGIN,
             allowed_transitions=self._observed_transitions(),
             override_factor=config.RECOGNITION_FILTER_OVERRIDE_FACTOR,
+            min_confidence_by_step=self._step_confidence_thresholds(),
         )
+
+    def _step_confidence_thresholds(self) -> dict[int, float]:
+        """{step id: min confidence} from the task database's "Action Confidence
+        Threshold"; steps it leaves out use STEP_MIN_CONFIDENCE."""
+        if self.num_steps != len(config.STEP_NAMES):
+            return {}
+        from task_database import TaskDatabase
+
+        path = Path(__file__).resolve().parents[1] / config.TASK_DATABASE_PATH
+        try:
+            thresholds = TaskDatabase.from_json(path).confidence_thresholds
+        except (OSError, ValueError) as exc:
+            logger.warning("No per-step confidence from %s (%s); every step uses %.2f.",
+                           path, exc, STEP_MIN_CONFIDENCE)
+            return {}
+        by_step = {config.STEP_NAMES.index(name): value for name, value in thresholds.items()
+                   if name in config.STEP_NAMES}
+        logger.info("Step confidence: %s; other steps %.2f.",
+                    ", ".join(f"{config.STEP_NAMES[k]} {v:.2f}" for k, v in sorted(by_step.items())),
+                    STEP_MIN_CONFIDENCE)
+        return by_step
 
     def _observed_transitions(self) -> dict[int, list[int]] | None:
         """Step changes the annotated task sequences make plausible (see
@@ -664,47 +668,52 @@ class RecognitionManager:
         except OSError:
             logger.warning("Transition table %s not found; step transitions are not filtered.", table_path)
             return None
-        return model.allowed_transitions(config.STEP_NAMES, config.RECOGNITION_FILTER_MIN_PROBABILITY)
+        allowed = model.allowed_transitions(config.STEP_NAMES, config.RECOGNITION_FILTER_MIN_PROBABILITY)
+        # Reachable from any step (config.RECOGNITION_FILTER_OPEN_STEPS).
+        open_steps = [config.STEP_NAMES.index(name) for name in config.RECOGNITION_FILTER_OPEN_STEPS
+                      if name in config.STEP_NAMES]
+        return {step: sorted(set(targets) | set(open_steps)) for step, targets in allowed.items()}
 
     def _stable_step_id(self, probabilities):
         if self.step_stabilizer is None:
             return int(np.argmax(probabilities))
         return self.step_stabilizer.update(probabilities)
 
-    def _find_model_path(self) -> Path:
-        model_path = self.model_dir / "best_model.pth"
-        if not model_path.exists():
-            raise FileNotFoundError(f"Expected trained model at {model_path}.")
-        return model_path
+    @property
+    def step_labels(self) -> list[str] | None:
+        """The model's step names (config.STEP_NAMES when they line up), or None
+        without a step model."""
+        return None if self.step_model is None else self.step_model.step_labels
 
-    def _find_norm_path(self) -> Path:
-        candidates = sorted(self.model_dir.glob("*.npz"))
-        if len(candidates) == 1:
-            return candidates[0]
-        if not candidates:
-            raise FileNotFoundError(f"No norm .npz file found in {self.model_dir}.")
-        raise FileExistsError(f"Expected exactly one norm .npz file in {self.model_dir}, found {len(candidates)}.")
+    def _sample_due(self, timestamp: float) -> bool:
+        """Whether this frame feeds the model. Every frame for a model without a rate
+        of its own (legacy); otherwise one frame per sample_period_s, on a fixed grid so
+        a loop between rates still averages the model's rate (a 15 Hz loop feeds 2 of
+        every 3 frames: 10 Hz, not 7.5)."""
+        period = self.step_model.sample_period_s
+        if period is None:
+            return True
+        due = self._next_sample_due
+        if due is not None and timestamp < due - SAMPLE_EARLY_TOLERANCE * period:
+            return False
+        # A loop that fell more than a period behind starts a new grid rather than
+        # feeding a burst of catch-up samples.
+        self._next_sample_due = (timestamp + period if due is None or timestamp > due + period
+                                 else due + period)
+        return True
 
-    def _load_model_config(self) -> dict[str, Any]:
-        with self.model_config_path.open("r", encoding="utf-8") as config_file:
-            return json.load(config_file)
-
-    def _build_feature_vector(self, features: dict[str, Any]) -> np.ndarray:
-        values = []
-        for key in self.feature_keys:
-            for part_key in COMPOSITE_FEATURE_KEYS.get(key, (key,)):
-                try:
-                    value = features[part_key]
-                except KeyError:
-                    raise KeyError(
-                        f"Feature '{part_key}' (for model config feature_key '{key}') is not "
-                        f"produced by the feature extractor. Available features: "
-                        f"{sorted(features)}."
-                    ) from None
-                if self._torch is not None and isinstance(value, self._torch.Tensor):
-                    value = value.detach().cpu().numpy()
-                values.append(np.asarray(value, dtype=np.float32).reshape(-1))
-        return np.concatenate(values, axis=0)
+    def _check_sample_rate(self) -> None:
+        """Once, when the buffer first fills: warn if the loop fed the model much slower
+        than it was trained at, since its window then spans more time than in training."""
+        period = self.step_model.sample_period_s
+        if self._rate_checked or period is None or len(self._sample_times) < 2:
+            return
+        self._rate_checked = True
+        spacing = (self._sample_times[-1] - self._sample_times[0]) / (len(self._sample_times) - 1)
+        if spacing > 1.5 * period:
+            logger.warning("The %s model expects a feature vector every %.2f s but got one "
+                           "every %.2f s: run the loop at %g Hz or more (--loop-hz).",
+                           self.step_model.model_dir.name, period, spacing, 1.0 / period)
 
     @staticmethod
     def _looks_like_frame(input_data) -> bool:

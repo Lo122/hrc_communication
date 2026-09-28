@@ -28,10 +28,10 @@ Usage:
 
     uv run python run_recognition.py `
         --video-source 6 `
-        --model-dir 1_recognition/best_model/3d_skeleton_02 `
+        --model-dir 1_recognition/best_model/3d_skeleton_03 `
         --intrinsics-file intrinsics_640x360_obs.json `
         --extrinsics-file extrinsics_3840x2160_obs.json `
-        --body-calibration 1_recognition/calib_data/body_uid-08.json `
+        --body-calibration 1_recognition/calib_data/body_uid-09.json `
         --fp16 `
         --record 1_recognition/results/recognition_test/detection_test.mp4 `
         --record-raw 1_recognition/results/recognition_test/detection_test_raw.mp4
@@ -58,6 +58,19 @@ Usage:
             --iphone-rotate 270 `
             --fp16 `
             --loop-hz 10
+
+    # the 4-head GRU (multi-label tasks, per-task progress, idle head): it is fed at
+    # 10 Hz whatever the loop rate, so keep --loop-hz at 10 or more
+    uv run python run_recognition.py `
+            --iphone `
+            --model-dir 1_recognition/best_model/S3_10fps_8s_bg05 `
+            --intrinsics-file iphone_intrinsics.json `
+            --extrinsics-file iphone_extrinsics.json `
+            --body-calibration 1_recognition/calib_data/body_uid-08.json `
+            --iphone-rotate 270 `
+            --fp16 `
+            --loop-hz 10 `
+            --show-probabilities
             
                 
 
@@ -122,6 +135,7 @@ from events import Event, EventType
 from logging_setup import configure_logging, get_logger
 from recorded_take import RecordedLocations
 from recognition_manager import DEFAULT_MODEL_DIR, RecognitionManager
+from step_models import MULTI_HEAD
 from step_probability_plot import StepProbabilityPlot
 from trigger_manager import TaskUpdatePublisher, task_update_event
 from vision_model.vision_config import VisionConfig
@@ -224,7 +238,7 @@ def _parse_args() -> argparse.Namespace:
                               "1.0 = the recording's own rate). 2.0 drops twice as many frames "
                               "per inference, i.e. simulates a model half as fast, without "
                               "touching the frame timestamps the features are fit against.")
-    parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR), help="Directory containing config.json and best_model.pth.")
+    parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR), help="Model directory: legacy (config.json, best_model.pth, a norm .npz) or multi-head (config.json, feature_selection.json, model_weights.pth, standardization.npz, e.g. 1_recognition/best_model/S3_10fps_8s_bg05) -- told apart by its files.")
     parser.add_argument("--host", default=config.EVENT_TRANSPORT_HOST, help="Communication event receiver host.")
     parser.add_argument("--port", type=int, default=config.EVENT_TRANSPORT_PORT, help="Communication event receiver port.")
     parser.add_argument("--no-display", action="store_true", help="Disable the recognition video preview window.")
@@ -597,17 +611,18 @@ if __name__ == "__main__":
                 probs_timestamp = recognition_manager.last_step_probabilities_timestamp
                 if probs_timestamp is not None and probs_timestamp != last_plotted_probabilities_timestamp:
                     if probability_plot is None:
-                        step_labels = (config.STEP_NAMES
-                                       if len(config.STEP_NAMES) == recognition_manager.num_steps
-                                       else None)
+                        multi_head = recognition_manager.step_model.format == MULTI_HEAD
                         probability_plot = StepProbabilityPlot(
                             recognition_manager.num_steps,
                             history_seconds=args.probability_history_seconds,
-                            step_labels=step_labels)
+                            step_labels=recognition_manager.step_labels,
+                            probability_title=("step scores: P(task) x P(working); idle = P(idle)"
+                                               if multi_head else "task step probabilities"))
                     probability_plot.update(
                         probs_timestamp,
                         recognition_manager.last_step_probabilities,
-                        recognition_manager.last_progress)
+                        recognition_manager.last_progress,
+                        recognition_manager.last_step_progress)
                     last_plotted_probabilities_timestamp = probs_timestamp
                 elif probability_plot is None and recognition_manager.window_size is not None \
                         and frame_count % 15 == 0:
@@ -616,7 +631,7 @@ if __name__ == "__main__":
                     # so a several-second wait before the window first appears doesn't look
                     # like a hang.
                     print(f"[recognition] buffering for step probabilities: "
-                          f"{len(recognition_manager.buffer)}/{recognition_manager.window_size} frames")
+                          f"{len(recognition_manager.buffer)}/{recognition_manager.window_size} samples")
 
             # Human location is a continuous, much-higher-frequency stream than the
             # discrete task events above -- throttled to config.HUMAN_LOCATION_

@@ -52,6 +52,27 @@ PLOT_HEADER_H = 18
 PLOT_ROW_WEIGHTS = (0.34, 0.24, 0.16, 0.26)
 
 
+def fit_on_white(image, size: tuple[int, int]):
+    """image scaled to fit size (width, height) with its aspect ratio kept, centred on
+    white -- a 16:9 camera frame in a square panel gets white bands, not a squash."""
+    import cv2
+
+    panel_w, panel_h = size
+    h, w = image.shape[:2]
+    if (w, h) == (panel_w, panel_h):
+        return image
+    scale = min(panel_w / w, panel_h / h)
+    new_w, new_h = max(1, round(w * scale)), max(1, round(h * scale))
+    resized = cv2.resize(image, (new_w, new_h),
+                         interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+    if resized.ndim == 2:
+        resized = cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
+    canvas = np.full((panel_h, panel_w, 3), 255, dtype=np.uint8)
+    x, y = (panel_w - new_w) // 2, (panel_h - new_h) // 2
+    canvas[y:y + new_h, x:x + new_w] = resized
+    return canvas
+
+
 class DebugView:
     """Owns the two debug windows and the history behind the plot.
 
@@ -216,9 +237,9 @@ class DebugView:
             # location (top-down), same layout as eval/pose_detection_live.py's preview.
             panel_3d = self._renderer_3d.render(skeleton)
             display = cv2.hconcat([
-                cv2.resize(overlay, (panel_w, panel_h)),
-                cv2.resize(panel_3d, (panel_w, panel_h)),
-                cv2.resize(self._render_world_panel(world_xyz), (panel_w, panel_h)),
+                fit_on_white(overlay, (panel_w, panel_h)),
+                fit_on_white(panel_3d, (panel_w, panel_h)),
+                fit_on_white(self._render_world_panel(world_xyz), (panel_w, panel_h)),
             ])
 
         display = self._draw_overlay(

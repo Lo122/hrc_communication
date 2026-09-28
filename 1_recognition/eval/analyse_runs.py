@@ -29,6 +29,7 @@ Outputs, written to --out (default <input>/analysis):
     step_timeline.png   predicted step over time, one band per run
     confidence.png      classifier confidence over time
     progress.png        progress head over time (what fires the triggers)
+    idle.png            idle probability over time (multi-head models only)
 
 The CSVs are the table-view twin of the plots: every number in a figure is
 readable there too.
@@ -506,6 +507,13 @@ def main() -> int:
                 title="Progress estimate over time",
                 subtitle="The regression head that crosses the thresholds firing the triggers",
                 ylabel="Progress")
+    # Multi-head models only; runs logged before the column existed lack it.
+    idle_runs = [run for run in runs if "idle_prob" in run.frames]
+    if idle_runs:
+        plot_series(idle_runs, "idle_prob", out_dir, filename="idle.png",
+                    title="Idle probability over time",
+                    subtitle="Background head: P(nobody is working); idle wins above 0.5",
+                    ylabel="P(idle)")
 
     logger.info("Analysis written to %s", out_dir)
     return 0

@@ -191,6 +191,21 @@ class ForceScrewDetectorTests(unittest.TestCase):
         self.assertEqual(self.done(seen), [])
         self.assertIn(TCP_WEIGHT_CHANGE, [signal.name for _s, signal in seen])
 
+    def test_the_measured_weight_transfer_is_inside_the_configured_range(self):
+        # Run 2026-09-28 13:53: the panel's weight going over to the frame changed the
+        # load by 45 N. With the configured range that asks to leave soon after.
+        def transfer(s):
+            return [0.0, 0.0, -25.0 + (45.0 if s >= SHIFT_AT else 0.0), 0.0, 0.0, 0.0]
+
+        self.detector = ForceScrewDetector(ScrewingThresholds(), min_progress=0.5,
+                                           weight_change_n=config.TCP_WEIGHT_CHANGE_N,
+                                           weight_range_n=config.TCP_WEIGHT_RANGE_N,
+                                           weight_steady_s=config.TCP_WEIGHT_STEADY_S)
+        done = self.done(self.run_until(45.0, screws=0, wrench=transfer))
+        self.assertEqual(len(done), 1)
+        # Loud until max_push_s (8 s) calls it a level, then steady for TCP_WEIGHT_STEADY_S.
+        self.assertAlmostEqual(done[0][0], SHIFT_AT + 8.0 + config.TCP_WEIGHT_STEADY_S, delta=0.3)
+
     def test_listens_only_while_holding_and_restarts_per_hold(self):
         lifting = SimpleNamespace(task_instance_id="hold-1", state=S.R_EXECUTING)
         self.run_until(10.0, active_task=lifting)

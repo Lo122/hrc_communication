@@ -29,11 +29,15 @@ frames.csv columns
     update_ms          wall-clock cost of the whole recognition_manager.update()
                        call -- the latency that CAUSES the drops
     detected           1 if the 3D lift produced a skeleton this frame
-    warmup             1 while the LSTM window buffer is still filling
+    warmup             1 while the model's window buffer is still filling
     raw_step_id        argmax of the step classifier, before stabilization
     stable_step_id     StepIdStabilizer's output (blank until it commits)
-    confidence         max step probability
-    progress           regression head's progress output
+    confidence         max step probability (multi-head: max step score)
+    progress           regression head's progress output (multi-head: the raw
+                       step's progress lane). Blank on frames a multi-head model
+                       is not fed (it runs at its own rate, e.g. 10 Hz)
+    idle_prob          multi-head models' background head, P(nobody is
+                       working); blank for the legacy format
     world_x/y/z        world-frame pelvis position, blank when unavailable
 
 events.csv columns: time, epoch_s, wall_time_s and video_time_s as above, then
@@ -61,6 +65,8 @@ FRAME_COLUMNS = [
     # Blank for a model trained without a mistake head. mistake_score is 1 - P(no
     # mistake), so it stays meaningful if a later model has more than two classes.
     "mistake_id", "mistake_score",
+    # Multi-head models only (step_models.py): the background head, P(nobody working).
+    "idle_prob",
     "world_x", "world_y", "world_z",
 ]
 
@@ -150,6 +156,7 @@ class RunLogger:
             "progress": _round(record.get("progress"), 5),
             "mistake_id": record.get("mistake_id"),
             "mistake_score": _round(record.get("mistake_score"), 5),
+            "idle_prob": _round(record.get("idle_probability"), 5),
             "world_x": _round(world[0], 4),
             "world_y": _round(world[1], 4),
             "world_z": _round(world[2], 4),

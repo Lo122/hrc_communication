@@ -24,11 +24,11 @@ stature is simply left null.
 
 Usage (from the repo root):
     uv run python 1_recognition/setup/calibrate_body.py --device cuda:0 --camera `
-        --subject uid-08 --measured-height 1.74 `
+        --subject uid-08 --measured-height 1.62 `
         --camera-index 6 `
         --intrinsics 1_recognition/calib_data/intrinsics_3840x2160_obs.json `
         --extrinsics 1_recognition/calib_data/extrinsics_3840x2160_obs.json `
-        --output 1_recognition/calib_data/body_uid-08.json
+        --output 1_recognition/calib_data/body_uid-09.json
 
     # --intrinsics/--extrinsics default to calib_data/intrinsics.json and
     # extrinsics.json. Pass the pair this camera was actually calibrated with; the
