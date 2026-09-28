@@ -186,9 +186,12 @@ task in its "robot task" chain is offered once R7 succeeds.
   command or starting queued tasks. Say/type `screw done` again to ask about R2.
   Each retry receives a distinct instance ID so old timeout events cannot
   affect the new request.
-- Pending execution retains the existing CLI command:
-  `execute round_7_task_2_piece_12`, for example. The prompt prints the actual
-  task instance ID. Speaking arbitrary pending IDs is not added by this change.
+- A pending action is asked about again by naming it: `leave`, `lift the panel`
+  (or `lift`), `pull the cables`, `bring the connector`, ... -- the prompt says
+  which. The robot's state picks the task and piece: `leave` is either leave (from
+  the panel or the hand-over position); naming the action the robot is asking
+  about answers yes; `leave` while holding ends the holding and asks to release
+  the panel (Screw stays open). `execute <task instance id>` still works.
 - If R2 is refused or times out, the prompt explicitly says the panel remains
   held. Other task starts wait until this pending leave action is handled.
 - Free drive and the hold stage have no automatic release timeout.

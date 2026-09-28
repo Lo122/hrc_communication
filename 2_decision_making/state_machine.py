@@ -42,8 +42,10 @@ class StateMachine:
         (RobotTaskState.R_FREE_DRIVE, EventType.H_DONE): RobotTaskState.R_HOLDING,
         (RobotTaskState.R_FREE_DRIVE, EventType.H_CANCEL): RobotTaskState.R_CANCELED,
         (RobotTaskState.R_HOLDING, EventType.H_SCREW_DONE): RobotTaskState.R_DONE,
-        # A detector says the held panel is secured: the robot may release it.
+        # A detector says the held panel is secured, or the human says "leave": the
+        # robot may release it.
         (RobotTaskState.R_HOLDING, EventType.TASK_SIGNAL): RobotTaskState.R_DONE,
+        (RobotTaskState.R_HOLDING, EventType.H_REQUEST_ROBOT_TASK): RobotTaskState.R_DONE,
         (RobotTaskState.R_HOLDING, EventType.H_CANCEL): RobotTaskState.R_RECOVERY_EVALUATING,
         # Handing over a brought item: the gripper opens on a yes or when asked for it.
         (RobotTaskState.R_WAITING_HANDOVER, EventType.H_ACCEPT): RobotTaskState.R_DONE,

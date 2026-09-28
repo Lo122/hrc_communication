@@ -445,6 +445,8 @@ class TaskManager:
             self.cli.show_message(f"Sorry, I cannot do {task_name or 'that task'}.",
                                   speech="Sorry, I cannot do that.")
             return
+        if self._request_by_name(task_name, event):
+            return
         if self._releases_panel(task_name):
             if self._held_piece_id is None:
                 self.cli.show_message("I am not holding a panel.", speech="I am not holding a panel.")
@@ -467,6 +469,36 @@ class TaskManager:
             return
         self.logger.log_message("Human requested robot task.", {"task_name": task_name, "piece_id": piece_id})
         self._start_robot_task(task_name, piece_id)
+
+    def _request_by_name(self, task_name: str, event: Event) -> bool:
+        """The human names a robot action ("leave", "lift the panel"), and the robot's
+        own state says which task and piece that means:
+          - the robot is asking about that action now: the name answers yes;
+          - it is under way: nothing to do;
+          - it is pending (refused or unanswered): it is asked about again, for the
+            piece it was offered for -- "leave" is either leave, from the panel or from
+            the hand-over position;
+          - "leave" while the robot holds the panel: the holding ends and it asks to
+            release the panel, as when the panel looks secured (Screw stays open).
+        Returns whether it was one of these; otherwise it is an ordinary request."""
+        task_id = config.TRACKED_TO_ROBOT_TASK[task_name]
+        same = LEAVE_TASKS if task_id in LEAVE_TASKS else {task_id}
+        active = self.active_task
+        if active is not None and active.task_id in same:
+            if active.state == RobotTaskState.R_WAITING_RESPONSE:
+                self._handle_accept(Event(EventType.H_ACCEPT, event.source, active.task_instance_id))
+            else:
+                self.cli.show_message("I am already on it.", speech="Already on it.")
+            return True
+        pending = sorted((task for task in self.pending_pool.list_all() if task.task_id in same),
+                         key=lambda task: task.piece_id)
+        if pending and active is None and (task_id in LEAVE_TASKS or not self._leave_pending()):
+            self._reoffer_pooled(pending[0], "The human named the pending task; asking permission.")
+            return True
+        if task_id == config.TASK_LEAVE and active is not None and active.state == RobotTaskState.R_HOLDING:
+            self._release_held_panel(event, "Okay.")
+            return True
+        return False
 
     def _request_piece(self, task_name: str) -> int | None:
         if self.tracker is None:
@@ -513,7 +545,7 @@ class TaskManager:
         if name != DONE_SIGNAL:
             self.tracker.set_signal(task_name, piece_id, name, value)
             if name == PANEL_SECURED and value and self._holds_panel(piece_id):
-                self._release_secured_panel(event)
+                self._release_held_panel(event, "The panel looks secured.")
             self._offer_triggered_tasks()
             return
         if not value or tracked.status == TaskStatus.DONE:
@@ -1182,7 +1214,8 @@ class TaskManager:
         what ends the holding, and the database's "Leave from the panel" rule (previous
         task Screw, "Done signal") then offers the leave -- ahead of anything else
         Screw unlocks, such as Bring Tool. The robot may also have been asked to leave
-        already, because the panel looked secured (_release_secured_panel): then this
+        already, because the panel looked secured or the human said "leave"
+        (_release_held_panel): then this
         only confirms that panel's Screw."""
         active = self.active_task
         if active is None or active.state != RobotTaskState.R_HOLDING:
@@ -1220,13 +1253,14 @@ class TaskManager:
         return (active is not None and active.state == RobotTaskState.R_HOLDING
                 and piece_id == self._held_piece_id)
 
-    def _release_secured_panel(self, event: Event) -> None:
-        """A detector says the held panel is secured (every screw counted, or the TCP
-        force): the holding ends and the robot asks to release the panel and leave.
-        Screw stays open -- recognition, or the human saying "screw done", confirms it."""
+    def _release_held_panel(self, event: Event, said: str) -> None:
+        """The holding ends and the robot asks to release the panel and leave: a detector
+        says the panel is secured (every screw counted, or the TCP force), or the human
+        said "leave". Screw stays open -- recognition, or the human saying "screw done",
+        confirms it."""
         task = self.active_task
-        self.cli.show_message("The panel looks secured.", speech="The panel looks secured.")
-        self._transition(task, RobotTaskState.R_DONE, event, "Panel secured; asking to release it.")
+        self.cli.show_message(said, speech=said)
+        self._transition(task, RobotTaskState.R_DONE, event, "Holding ended; asking to release the panel.")
         self.active_task = None
         self._propose_followup(task, config.TASK_LEAVE)
 

@@ -3,6 +3,17 @@
 import config
 from events import EventType, RobotTaskState
 
+# What to say to have a pending task asked about again (cmd_parser's request phrases).
+REQUEST_PHRASES = {
+    config.TASK_LIFT_PANEL: "lift the panel",
+    config.TASK_LEAVE: "leave",
+    config.TASK_BRING_CONNECTOR: "bring the connector",
+    config.TASK_BRING_CLAMPING_TOOL: "bring the tool",
+    config.TASK_RETURN_CLAMPING_TOOL: "take the tool back",
+    config.TASK_PULL_CABLES: "pull the cables",
+    config.TASK_LEAVE_HANDOVER: "leave",
+}
+
 
 class MessageManager:
     """Centralizes detailed CLI text and concise speech without changing state."""
@@ -107,7 +118,8 @@ class MessageManager:
             config.TASK_LEAVE: " I will keep holding the panel.",
             config.TASK_LEAVE_HANDOVER: " I will stay at the hand-over position.",
         }.get(task.task_id, "")
-        return f'{reason} This task is pending.{staying} To be asked again when ready, type "execute {task.task_instance_id}".'
+        phrase = REQUEST_PHRASES.get(task.task_id, f"execute {task.task_instance_id}")
+        return f'{reason} This task is pending.{staying} To be asked again when ready, say or type "{phrase}".'
 
     def get_defer_message(self, task, duration: float, *, spoken=False) -> str:
         if spoken:

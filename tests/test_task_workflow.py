@@ -933,7 +933,83 @@ class HandoverTests(WorkflowHarness):
                 self.assertEqual(tool.state, S.R_MANUAL_RECOVERY)
 
 
+class NamedRequestTests(WorkflowHarness):
+    """Naming an action ("leave", "lift") instead of "execute <task instance id>"."""
+
+    def refuse_leave(self):
+        self.hold()
+        self.reply("screw done")
+        leave = self.manager.active_task
+        self.assertEqual(leave.task_id, config.TASK_LEAVE)
+        self.reply("no")
+        self.assertIsNone(self.manager.active_task)
+        return leave
+
+    def test_pending_leave_is_asked_again_by_saying_leave(self):
+        leave = self.refuse_leave()
+        self.assertIn('say or type "leave"', self.output.show_message.call_args.args[0])
+        self.reply("leave")
+        self.assertIs(self.manager.active_task, leave)
+        self.assertEqual((leave.state, leave.piece_id), (S.R_WAITING_RESPONSE, 1))
+        self.reply("yes")
+        self.assertEqual(self.udp.send.call_args.args[0]["suggested_action"], "leave")
+
+    def test_naming_the_action_being_asked_about_answers_yes(self):
+        self.hold()
+        self.reply("screw done")
+        leave = self.manager.active_task
+        self.reply("leave")
+        self.assertEqual(leave.state, S.R_ACCEPTED)
+
+    def test_leave_while_holding_asks_to_release_the_panel(self):
+        self.hold()
+        self.reply("leave")
+        leave = self.manager.active_task
+        self.assertEqual((leave.task_id, leave.piece_id, leave.state),
+                         (config.TASK_LEAVE, 1, S.R_WAITING_RESPONSE))
+        self.assertEqual(self.status("Screw"), T.WORKING)  # recognition or "screw done" decides
+        self.assertEqual(self.udp.send.call_count, 1)  # only the lift so far
+
+    def test_leave_names_the_pending_hand_over_leave_too(self):
+        self.reply("bring the connector")
+        self.reply("yes")
+        self.complete_robot()
+        self.reply("yes")  # handed over: the robot leaves after its delay...
+        leave = self.manager.active_task
+        self.reply("cancel")  # ...unless told to stay: pending
+        self.assertTrue(self.manager.pending_pool.contains(leave.task_instance_id))
+        self.reply("leave")
+        self.assertIs(self.manager.active_task, leave)
+        self.assertEqual((leave.task_id, leave.state), (config.TASK_LEAVE_HANDOVER, S.R_WAITING_RESPONSE))
+
+    def test_pending_lift_is_asked_again_by_name(self):
+        self.trigger()
+        lift = self.manager.active_task
+        self.reply("no")
+        self.assertIn('say or type "lift the panel"', self.output.show_message.call_args.args[0])
+        self.reply("lift")
+        self.assertIs(self.manager.active_task, lift)
+        self.assertEqual(lift.state, S.R_WAITING_RESPONSE)
+
+    def test_leave_without_a_held_panel_or_pending_leave(self):
+        self.reply("leave")
+        self.assertIsNone(self.manager.active_task)
+        self.assertEqual(self.output.show_message.call_args.args[0], "I am not holding a panel.")
+
+
 class CommandParserTests(unittest.TestCase):
+    def test_every_pending_phrase_names_its_task(self):
+        from message_manager import REQUEST_PHRASES
+
+        parser = CommandParser()
+        for task_id, phrase in REQUEST_PHRASES.items():
+            with self.subTest(phrase=phrase):
+                event = parser.parse(phrase)
+                self.assertEqual(event.event_type, E.H_REQUEST_ROBOT_TASK)
+                named = config.TRACKED_TO_ROBOT_TASK[event.payload["task_name"]]
+                # "leave" names the leave from the panel; the hand-over leave is found by it.
+                self.assertEqual(named, config.TASK_LEAVE if task_id == config.TASK_LEAVE_HANDOVER else task_id)
+
     def test_task_commands_parse_with_task_names(self):
         parser = CommandParser()
         done = parser.parse("Tool Returned")

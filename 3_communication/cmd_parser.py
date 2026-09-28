@@ -71,10 +71,18 @@ class CommandParser:
     }
 
     # Human asks the robot for a task -> H_REQUEST_ROBOT_TASK {task_name}. It skips the
-    # trigger rules, but the robot still asks permission before executing.
+    # trigger rules, but the robot still asks permission before executing. Naming a
+    # pending task asks about it again; the robot's state picks the task and piece
+    # (TaskManager._request_by_name) -- "leave" is either leave.
     _ROBOT_REQUEST_ALIASES = {
+        "leave": "Leave from the panel",
+        "leave the panel": "Leave from the panel",
+        "release the panel": "Leave from the panel",
+        "move away": "Leave from the panel",
         "pull the cables": "Pull Cables",
+        "pull cables": "Pull Cables",
         "lift the panel": "Lift",
+        "lift": "Lift",
         "bring the tool": "Bring Tool",
         "bring tool": "Bring Tool",
         "bring the connector": "Bring Connector",
