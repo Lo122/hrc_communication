@@ -1,0 +1,7 @@
+true_vs_pred,Pull Cables,Place,Align,Screw,Connect Cables,Clamp Coupling,support
+Pull Cables,2040,760,318,981,289,340,4728
+Place,927,3187,875,1371,288,141,6789
+Align,396,1292,5996,2069,580,697,11030
+Screw,1715,1477,1999,35795,2316,3523,46825
+Connect Cables,607,435,926,3463,2179,1918,9528
+Clamp Coupling,213,166,487,2746,1254,2633,7499

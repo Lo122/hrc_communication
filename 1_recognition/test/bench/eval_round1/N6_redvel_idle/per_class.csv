@@ -1,0 +1,8 @@
+class,recall,precision,f1,support
+Pull Cables,0.1386,0.2243,0.1713,4402
+Place,0.4056,0.4086,0.4071,6792
+Align,0.5092,0.5908,0.5470,11030
+Screw,0.6317,0.7642,0.6917,47096
+Connect Cables,0.2744,0.3159,0.2937,9525
+Clamp Coupling,0.3048,0.3180,0.3113,7473
+No Related Task,0.8096,0.4818,0.6041,19076
