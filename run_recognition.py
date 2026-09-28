@@ -70,6 +70,16 @@ Usage:
             --iphone-rotate 270 `
             --fp16 `
             --loop-hz 10 `
+            --show-
+            
+    uv run python run_recognition.py `
+            --video-source 6 `
+            --model-dir 1_recognition/best_model/S3_10fps_8s_bg05 `
+            --intrinsics-file iphone_intrinsics.json `
+            --extrinsics-file iphone_extrinsics.json `
+            --body-calibration 1_recognition/calib_data/body_uid-08.json `
+            --fp16 `
+            --loop-hz 10 `
             --show-probabilities
             
                 
