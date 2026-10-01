@@ -8,7 +8,7 @@ too loud to speak, or check the robot's state at a glance.
 
 | # | Principle | How it shows up |
 |---|-----------|-----------------|
-| 1 | **One screen = one question** | Title ≤ 3 words ("Lift the panel?"), one supporting line. |
+| 1 | **One screen = one question** | A question is asked politely and in full ("Would you like me to lift the panel?"), within the title's two lines; one supporting line. Status titles stay short ("Lifting the panel"). Button labels stay short ("Yes"): three must fit a row. |
 | 2 | **Glance in < 1 s** | The signal inside the pad says who is talking: square and stepped while the robot speaks, soft concentric rings while it listens to you. |
 | 3 | **Three skins, one colour** | Deep red `#a42016` (`#e0584a` in the dark mode). **Clay** keeps the pressed pad as the subject with the drafting paper underneath; **Plate** turns the pad into one gauge face; **Sheet** lays it out as a drawing block — stamp and title on the left, the signal plotted on one wide plate. Each skin has a light and a dark mode (`?skin=clay\|plate\|sheet&mode=light\|dark`, or the buttons in the simulator). |
 | 4 | **Max 1 primary + 2 secondary actions** | Big primary button bottom-centre (easy thumb reach), secondaries below. |
@@ -22,23 +22,23 @@ too loud to speak, or check the robot's state at a glance.
 
 | Robot state | Screen | Tone | Title | Actions |
 |---|---|---|---|---|
-| no task, opening question (`--demo`) | ask-start | white | Shall we start? ("NEW ASSEMBLY") | **Let's go** · Not yet |
-| no task, the human pulls the cables (`--demo`) | ask-continue | white | Move on? ("CABLES ARE YOURS") | **Next step** · Not yet |
+| no task, opening question (`--demo`) | ask-start | white | Would you like to start the assembly? ("NEW ASSEMBLY") | **Let's go** · Not yet |
+| no task, the human pulls the cables (`--demo`) | ask-continue | white | Would you like to move on? ("CABLES ARE YOURS") | **Next step** · Not yet |
 | no task | idle | idle | I'm ready / Over to you | **Done** (your current step, if any) · up to 2 robot requests, only the ones next in the flow (Lift panel only once the cables are done); none during the `--demo` opening |
 | no task, pending pool | pending | idle | *task name* ("ON HOLD") | Start now |
-| `R_EXECUTING` + next task asked in advance | ask-next | white | Need the connector? ("NEXT UP") | **Yes, please** · No · Stop (hold) |
-| `R_WAITING_RESPONSE` | ask | white | Lift the panel? | **Yes, please** · I'll do it (Not yet when the robot would move away) · Later (+ 20 s ring) |
+| `R_EXECUTING` + next task asked in advance | ask-next | white | Would you like me to bring the connector? ("NEXT UP") | **Yes** · No · Stop (hold) |
+| `R_WAITING_RESPONSE` | ask | white | Would you like me to lift the panel? | **Yes** · I'll do it (Not yet when the robot would move away) · Later (+ 20 s ring) |
 | `R_DEFER` | defer | dim red | Starting shortly | Cancel (+ 5 s ring) |
 | `R_ACCEPTED` / `R_REDO` | starting | red | Getting ready / Starting over | Stop (hold) |
 | `R_EXECUTING` | running | red | Lifting the panel ("Next: …" once the next task is answered) | **Pause** · Start over · Stop (hold) + speed −/+ |
 | `R_PAUSED` | paused | dim red | Paused | **Carry on** · Start over · Stop (hold) |
-| `R_WAITING_FREE_DRIVE` | ask-free-drive | white | Adjust by hand? | **Yes** · Just hold |
+| `R_WAITING_FREE_DRIVE` | ask-free-drive | white | Would you like to adjust it by hand? | **Yes** · Just hold |
 | `R_FREE_DRIVE` | free-drive | white | Guide it into place | **Done** · Stop (hold) |
 | `R_HOLDING` | holding | white | Screw it in | **All screwed** · Stop (hold) |
 | `R_WAITING_HANDOVER` | ask-handover | white | Ready to take it? | **Take it** · Not yet |
 | `R_HOLDING_HANDOVER` | holding-handover | white | Whenever you're ready | **Hand it over** · Stop (hold) |
 | `R_RECOVERY_EVALUATING` | stopping | bright red | Stopping | — |
-| `R_WAITING_HOME_PERMISSION` | ask-home | bright red | Head back home? | **Go home** · By hand |
+| `R_WAITING_HOME_PERMISSION` | ask-home | bright red | Would you like me to head home? | **Go home** · By hand |
 | `R_RETURNING_HOME` | homing | red | Heading home | — |
 | `R_MANUAL_RECOVERY` | manual | white | Guide me by hand | **Done** · Abort (hold) |
 

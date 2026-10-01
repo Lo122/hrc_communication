@@ -163,7 +163,7 @@ class WorkflowTests(WorkflowHarness):
         comm.poll()
         self.assertEqual(self.output.show_permission_request.call_count, 2)
 
-    def test_done_does_not_release_and_screw_done_releases_only_while_holding(self):
+    def test_done_ends_adjusting_then_screwing_and_screw_done_only_while_holding(self):
         self.trigger()
         self.reply("screw done")
         self.assertEqual(self.manager.active_task.task_id, 1)
@@ -174,8 +174,11 @@ class WorkflowTests(WorkflowHarness):
         self.assertEqual(self.manager.active_task.state, S.R_FREE_DRIVE)
         self.reply("done")  # adjustment done: holding
         self.assertEqual(self.manager.active_task.state, S.R_HOLDING)
-        self.reply("done")  # does not release the panel
-        self.assertEqual(self.manager.active_task.state, S.R_HOLDING)
+        self.reply("done")  # while it holds the panel: screwing done
+        self.assertEqual(self.status("Screw"), T.DONE)
+        leave = self.manager.active_task
+        self.assertEqual((leave.task_id, leave.state), (config.TASK_LEAVE, S.R_WAITING_RESPONSE))
+        self.udp.send.assert_called_once()  # it asks before letting go
 
     def test_screw_done_without_held_panel_confirms_screw_and_offers_no_leave(self):
         self.reply("screw done")
@@ -227,14 +230,15 @@ class WorkflowTests(WorkflowHarness):
                 self.assertEqual([(entry["task_name"], entry["piece_id"]) for entry in self.manager.waiting_triggers],
                                  [("Pull Cables", 2), ("Lift", 2)])
 
-    def test_later_makes_the_task_pending_without_a_timer_and_old_timers_cannot_affect_it(self):
+    def test_later_asks_again_after_a_while_and_old_timers_cannot_affect_it(self):
         self.hold()
         self.reply("screw done")
         leave = self.manager.active_task
         with patch.dict(config.TASK_TIMINGS, {3: {"response_timeout_seconds": 30}}):
             self.reply("later")
-            self.timer.start_defer_timer.assert_not_called()  # no start in 5 s: pending
+            self.timer.start_defer_timer.assert_not_called()  # never started without a yes
             self.assertEqual((leave.state, self.manager.pending_pool.list_all()), (S.R_PENDING, [leave]))
+            self.assertIn("ask again in 30 seconds", self.output.show_message.call_args.args[0])
             self.assertIn('say or type "leave"', self.output.show_message.call_args.args[0])
             self.reply("leave")  # asked again, dispatched only on a fresh yes
             self.assertEqual(self.udp.send.call_count, 1)
@@ -247,6 +251,25 @@ class WorkflowTests(WorkflowHarness):
             self.emit(E.DEFER_TIMEOUT, task_instance_id=leave.task_instance_id)
             self.assertIs(self.manager.active_task, connector)
             self.assertEqual(connector.state, S.R_WAITING_RESPONSE)
+
+    def test_asking_for_the_later_task_sooner(self):
+        self.reply("pull the cables")
+        pull = self.manager.active_task
+        self.reply("later")
+        self.reply("pull the cables")
+        self.assertIs(self.manager.active_task, pull)
+        self.assertEqual(pull.state, S.R_WAITING_RESPONSE)
+        self.timer.cancel.assert_any_call("ask again later")
+
+    def test_later_holds_back_the_robots_own_offers_until_asked_again(self):
+        self.reply("pull the cables")
+        pull = self.manager.active_task
+        self.reply("later")
+        self.trigger(PULL, 0.9)  # the human pulls: would offer the lift
+        self.assertIsNone(self.manager.active_task)  # it waits for the question asked again
+        _, _, event = self.timer.schedule.call_args.args
+        self.manager.handle_event(event)
+        self.assertIs(self.manager.active_task, pull)
 
     def test_later_to_the_leave_keeps_holding_and_starts_nothing_else(self):
         self.hold()
@@ -267,9 +290,34 @@ class WorkflowTests(WorkflowHarness):
         self.assertEqual((lift.state, self.manager.pending_pool.list_all()), (S.R_REFUSED, []))
         self.assertIsNone(self.manager.active_task)
         self.assertFalse(self.tracker.get("Lift", 1).robot_offered)  # the human's again
-        self.assertIn("Okay, you do this one", self.output.show_message.call_args.args[0])
+        self.assertIn("leave this one to you", self.output.show_message.call_args.args[0])
+        self.assertEqual(self.manager.human_turn, "Lift")
         self.trigger(PULL, 0.9)
         self.assertIsNone(self.manager.active_task)  # and the robot does not ask again
+
+    def test_after_taking_the_lift_over_recognition_follows_the_rest(self):
+        self.reply("pull the cables")
+        self.reply("yes")
+        self.complete_robot()
+        self.reply("I'll do it")  # the lift
+        self.reply("done")
+        self.assertEqual(self.status("Lift"), T.DONE)
+        self.assertIsNone(self.manager.human_turn)  # the robot does not ask for the next steps
+        for step in (PLACE, ALIGN):  # recognition follows the human on
+            self.trigger(step, 0.5)
+        self.trigger(SCREW, 0.6)
+        self.emit(E.TASK_SIGNAL, payload={"task_name": "Screw", "piece_id": 1, "signal": "screw count", "value": 0.5})
+        self.assertEqual(self.manager.active_task.task_id, config.TASK_BRING_CONNECTOR)
+
+    def test_done_after_taking_a_task_over_moves_on(self):
+        self.reply("pull the cables")
+        self.reply("I'll do it")
+        self.assertEqual(self.manager.human_turn, "Pull Cables")
+        self.reply("done")  # the cables: the robot moves on to the lift
+        self.assertEqual(self.status("Pull Cables"), T.DONE)
+        self.assertIsNone(self.manager.human_turn)
+        lift = self.manager.active_task
+        self.assertEqual((lift.task_id, lift.state), (config.TASK_LIFT_PANEL, S.R_WAITING_RESPONSE))
 
     def test_no_to_leaving_the_panel_keeps_it_pending(self):
         """Only the robot can leave the panel it holds: a no waits pending, as before."""
@@ -673,7 +721,7 @@ class DemoOpeningTests(WorkflowHarness):
         super().setUp()
         self.emit(E.DEMO_START)
         self.assertEqual(self.manager.question, "start")
-        self.reply("yes")  # Shall we start the assembly?
+        self.reply("yes")  # Would you like to start the assembly?
 
     def fire_scheduled_offer(self):
         """The timer the demo scheduled goes off; returns its delay."""
@@ -743,17 +791,18 @@ class DemoOpeningTests(WorkflowHarness):
         self.complete_robot()
         self.assertEqual(lift.state, S.R_FREE_DRIVE)
 
-    def test_later_to_the_lift_while_pulling_makes_it_pending_until_asked(self):
+    def test_later_to_the_lift_while_pulling_asks_again_after_a_while(self):
         _, lift = self.robot_pulls_and_asks_about_the_lift()
         self.reply("later")
         self.assertIsNone(self.manager.advance_task)
         self.assertEqual((lift.state, self.manager.pending_pool.list_all()), (S.R_PENDING, [lift]))
-        self.assertIn('say or type "lift the panel"', self.output.show_message.call_args.args[0])
-        self.assertFalse(self.manager.demo_opening)
+        self.assertIn("ask again in 30 seconds", self.output.show_message.call_args.args[0])
+        name, delay, later = self.timer.schedule.call_args.args
+        self.assertEqual((name, delay), ("ask again later", config.LATER_ASK_AGAIN_S))
         self.emit(E.ROBOT_SUCCESS)
-        self.assertIsNone(self.manager.active_task)  # nothing starts after the pull by itself
+        self.assertIsNone(self.manager.active_task)  # it gives the time asked for
         self.timer.start_defer_timer.assert_not_called()
-        self.reply("lift the panel")
+        self.manager.handle_event(later)
         self.assertIs(self.manager.active_task, lift)
         self.assertEqual(lift.state, S.R_WAITING_RESPONSE)
 
@@ -766,13 +815,16 @@ class DemoOpeningTests(WorkflowHarness):
         self.assertEqual(self.manager.question, "continue")  # it speaks for the no
         self.assertTrue(self.manager.demo_opening)  # the lift is asked once the human has pulled
 
-    def test_later_to_the_pull_makes_it_pending_and_ends_the_opening(self):
+    def test_later_to_the_pull_asks_again_after_a_while(self):
         pull = self.manager.active_task
         self.reply("later")
         self.assertEqual((pull.state, self.manager.pending_pool.list_all()), (S.R_PENDING, [pull]))
-        self.timer.start_defer_timer.assert_not_called()
-        self.assertFalse(self.manager.demo_opening)  # recognition takes over meanwhile
-        self.reply("pull the cables")
+        self.assertTrue(self.manager.demo_opening)  # the opening goes on
+        name, delay, event = self.timer.schedule.call_args.args
+        self.assertEqual((name, delay, event.event_type, event.task_instance_id),
+                         ("ask again later", config.LATER_ASK_AGAIN_S, E.H_EXECUTE_PENDING_TASK,
+                          pull.task_instance_id))
+        self.manager.handle_event(event)  # the time is up
         self.assertIs(self.manager.active_task, pull)
         self.assertEqual(pull.state, S.R_WAITING_RESPONSE)
 
@@ -1065,7 +1117,7 @@ class HandoverTests(WorkflowHarness):
         leave = self.manager.active_task
         self.reply("later")
         self.assertEqual(leave.state, S.R_PENDING)
-        self.assertIn("I will stay here.", self.output.show_message.call_args.kwargs["speech"])
+        self.assertIn("I'll stay here.", self.output.show_message.call_args.kwargs["speech"])
         self.ros.publish_cancel.assert_not_called()
         self.assertTrue(self.manager.pending_pool.contains(leave.task_instance_id))
 

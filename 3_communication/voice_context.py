@@ -17,6 +17,9 @@ class VoiceContext:
     task_id: int | None = None
     task_instance_id: str | None = None
     reactive: bool = False
+    # Idle while the human does a task they took over from the robot ("I'll do it"):
+    # the robot waits for their "done".
+    human_turn: bool = False
 
 
 BASE_INSTRUCTIONS = """You interpret spoken human intent for a robot collaboration task.

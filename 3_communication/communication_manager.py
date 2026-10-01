@@ -4,7 +4,7 @@ from enum import Enum, auto
 from queue import Empty, SimpleQueue
 import time
 
-from events import RobotTaskState
+from events import EventType, RobotTaskState
 from voice_result import VoiceOutcome
 from voice_context import VoiceContext, build_instructions
 
@@ -30,6 +30,10 @@ STATE_MODES = {
 }
 
 
+# Idle, after the human took a task over ("I'll do it"): the robot waits for their done.
+HUMAN_TURN_REPLIES = {EventType.H_DONE, EventType.H_TASK_DONE}
+
+
 def listening_mode(context: VoiceContext, wake_word: bool = False) -> ListeningMode:
     """How to listen in this context. With no robot task it listens in reactive mode --
     the human commands the robot from idle there -- and with the wake word, since only
@@ -44,10 +48,11 @@ class CommunicationManager:
                  guard_seconds=0.25, max_attempts=2, retry_seconds=5.0, logger=None,
                  context_provider=None, wake_word=False, wake_window_seconds=5.0):
         self.cli = cli
-        # wake_word: while the robot waits for an answer (SINGLE mode) the answer counts as
-        # said; at any other time -- idle, while it works -- only after the robot's name
-        # ("hey UR, bring the tool"), emergency words excepted (CommandParser.addressed).
-        # The name alone opens a window of wake_window_seconds for the command.
+        # wake_word: the robot's name ("hey UR, ...") is needed only to start something
+        # else -- while it is idle, or to ask for another task while it works. What it
+        # is busy with needs none: an answer to its question, "faster" or "stop" while it
+        # moves, the "done" it waits for (_needs_name). The name alone opens a window of
+        # wake_window_seconds for the command.
         self.wake_word = wake_word
         self.wake_window_seconds = wake_window_seconds
         self._woken_until = 0.0
@@ -71,8 +76,12 @@ class CommunicationManager:
         self._error_notified = False
         self._closed = False
         self._context = VoiceContext(None)
+        self._synced = False  # the first sync starts listening even in the default context
         self._question_context = None
         self._question = None
+        self._question_speech = None
+        # The last line said, for "repeat" when no question is open: (message, speech).
+        self._last_said = None
 
     def _addressed(self, text: str) -> str | None:
         """The command in a recognized utterance; "" for the name alone, None for speech
@@ -80,17 +89,39 @@ class CommunicationManager:
         if not self.wake_word:
             return text
         command = self.parser.addressed(text)
-        if self.mode is ListeningMode.SINGLE:
-            # The robot asked: the reply needs no name (said with one, it is dropped).
-            return text if command is None else command
         if command == "":
             self._woken_until = time.monotonic() + self.wake_window_seconds
             return ""
         if command is None and time.monotonic() < self._woken_until:
             command = text  # the name came just before, on its own
+        if command is None and not self._needs_name(text):
+            command = text
         if command is not None:
             self._woken_until = 0.0
         return command
+
+    def _needs_name(self, text: str) -> bool:
+        """Said without the robot's name, is this not meant for it? While it is idle,
+        anything but the done it waits for. While it works on a task, only a request for
+        another task: answers and controls of the task under way ("yes", "faster",
+        "stop", "done") need no name, and neither does what is not understood (so the
+        robot can say it did not catch an answer)."""
+        event = self.parser.parse(text, source="human_voice", state=self._state)
+        if self._state is None:
+            return not (self._context.human_turn and event is not None
+                        and event.event_type in HUMAN_TURN_REPLIES)
+        return event is not None and event.event_type == EventType.H_REQUEST_ROBOT_TASK
+
+    def _repeat(self) -> None:
+        """Say the open question again -- or, with none open, the last line."""
+        if self._question is not None and self._question_context == self._context:
+            self._attempts = 0
+            self._announce(self._question, permission=True, speech=self._question_speech)
+        elif self._last_said is not None:
+            message, speech = self._last_said
+            self._announce(message, speech=speech)
+        else:
+            self._retry_at = time.monotonic()
 
     def _current_context(self, state) -> VoiceContext:
         return self.context_provider() if self.context_provider else VoiceContext(state)
@@ -105,7 +136,7 @@ class CommunicationManager:
     def show_permission_request(self, message: str, *, speech: str | None = None) -> None:
         self._attempts = 0
         self._question_context = self._current_context(self.state_provider())
-        self._question = message
+        self._question, self._question_speech = message, speech
         self._announce(message, permission=True, speech=speech)
 
     def _announce(self, message: str, permission=False, *, speech: str | None = None) -> None:
@@ -116,6 +147,7 @@ class CommunicationManager:
         self.voice.stop_listening()
         output = self.cli.show_permission_request if permission else self.cli.show_message
         output(message)
+        self._last_said = (message, speech)
         self.tts.speak(message if speech is None else speech)
         time.sleep(self.guard_seconds)
         state = self.state_provider()
@@ -130,8 +162,9 @@ class CommunicationManager:
         if self._closed:
             return
         context = self._current_context(state)
-        if context == self._context and not force:
+        if context == self._context and not force and self._synced:
             return
+        self._synced = True
         if context != self._context:
             self._attempts = 0
             if self.logger is not None:
@@ -196,13 +229,18 @@ class CommunicationManager:
                                                 else "Voice wake word heard.", {"text": detail})
                     self._retry_at = time.monotonic()
                     continue
-                event = self.parser.parse(command, source="human_voice")
+                if self.parser.is_repeat(command):
+                    self._repeat()
+                    continue
+                event = self.parser.parse(command, source="human_voice", state=self._state)
                 if event is not None:
                     event.task_instance_id = self._context.task_instance_id
                     self._errors = 0
                     self._error_notified = False
                     self.event_sink(event)
-                    # Let TaskManager consume the command before listening again.
+                    # Let TaskManager consume the command before listening again: a new
+                    # state restarts listening itself; if nothing changed, the next poll does.
+                    self._retry_at = time.monotonic()
                     return
                 outcome = VoiceOutcome.UNRECOGNIZED
                 detail = "Recognized text did not match a command"

@@ -111,7 +111,7 @@ class VoiceInterface:
     def _play_ready_beep(self) -> None:
         device = self._find_output_device(self._output_device_name)
         sample_rate = int(sd.query_devices(device, "output")["default_samplerate"])
-        samples = np.arange(int(sample_rate * 0.4))
+        samples = np.arange(int(sample_rate * 0.15))  # short: the human answers right after it
         tone = (0.4 * np.sin(2 * np.pi * 1000 * samples / sample_rate)).astype("float32")
         sd.play(tone, sample_rate, device=device, blocking=True)
 

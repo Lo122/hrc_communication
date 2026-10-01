@@ -2,7 +2,7 @@
 
 import re
 
-from events import Event, EventType
+from events import Event, EventType, RobotTaskState
 
 # Spoken contractions, written out so one key covers both ("i'll do it" = "i will do it").
 _CONTRACTIONS = {"i'll": "i will", "i'm": "i am", "let's": "let us", "it's": "it is",
@@ -23,7 +23,9 @@ class CommandParser:
 
     # Voice: the robot is addressed by name -- "hey UR, lift the panel" -- so talk in the
     # room is not taken for a command. The recognizer hears "UR" as these.
-    WAKE_WORDS = ("hey ur", "hey u r", "hey you are", "hey your", "hey you r", "hey robot")
+    WAKE_WORDS = ("hey ur", "hey u r", "hey you are", "hey your", "hey you r", "hey robot",
+                  # "hey" is short and often lost: "you are, carry on" still names it.
+                  "you are")
     # Said alone they work without the name: stopping the robot must never wait for it.
     EMERGENCY_PHRASES = ("stop", "pause", "cancel", "stop stop", "stop the robot", "stop it")
 
@@ -44,18 +46,13 @@ class CommandParser:
         "of course": EventType.H_ACCEPT,
         "sounds good": EventType.H_ACCEPT,
         "let us go": EventType.H_ACCEPT,
-        "next step": EventType.H_ACCEPT,
         "no": EventType.H_REFUSE,
         "nope": EventType.H_REFUSE,
         "no thanks": EventType.H_REFUSE,
         "no thank you": EventType.H_REFUSE,
         "refuse": EventType.H_REFUSE,
-        "i will do it": EventType.H_REFUSE,
-        "let me do it": EventType.H_REFUSE,
-        "just hold": EventType.H_REFUSE,
         "later": EventType.H_DEFER,
         "maybe later": EventType.H_DEFER,
-        "not yet": EventType.H_DEFER,
         "not now": EventType.H_DEFER,
         "in a minute": EventType.H_DEFER,
         "defer": EventType.H_DEFER,
@@ -113,6 +110,29 @@ class CommandParser:
         "i will take it": EventType.H_HANDOVER,
         "take it": EventType.H_HANDOVER,
     }
+
+    # Replies whose meaning depends on the question: (phrase, state) -> event. Said while
+    # the robot is in none of its states, the phrase is not understood rather than taken
+    # for something it does not mean there (state_machine.py decides what each event
+    # does in each state; a reply must not land on another one). Without a state --
+    # typed at the CLI -- the first meaning listed counts.
+    _STATE_REPLIES = {
+        # "Shall I ...?" -- the human does the task themselves.
+        ("i will do it", RobotTaskState.R_WAITING_RESPONSE): EventType.H_REFUSE,
+        ("let me do it", RobotTaskState.R_WAITING_RESPONSE): EventType.H_REFUSE,
+        # "Move on?" (the demo opening) and any other "Would you like me to ...?".
+        ("next step", RobotTaskState.R_WAITING_RESPONSE): EventType.H_ACCEPT,
+        # "Not yet": later to a question, not ready for the item held out.
+        ("not yet", RobotTaskState.R_WAITING_RESPONSE): EventType.H_DEFER,
+        ("not yet", RobotTaskState.R_WAITING_HANDOVER): EventType.H_REFUSE,
+        # "Adjust by hand?" -- no adjustment, just hold the panel.
+        ("just hold", RobotTaskState.R_WAITING_FREE_DRIVE): EventType.H_REFUSE,
+    }
+
+    # "Say that again": the robot repeats its question (or its last line). Not an event:
+    # nothing in the decision layer changes (CommunicationManager repeats it).
+    REPEAT_PHRASES = ("repeat", "repeat that", "repeat again", "repeat the question", "say again",
+                      "say that again", "can you repeat", "could you repeat", "pardon", "what did you say")
 
     # Asking for an item -> H_HANDOVER {task_name: the task that brings it}. Ready to take
     # the item the robot holds out, it opens the gripper; in reactive mode, with no item
@@ -182,7 +202,9 @@ class CommandParser:
     @classmethod
     def phrases(cls) -> list[str]:
         """Every command phrase."""
-        return [*cls._ALIASES, *cls._HANDOVER_ALIASES, *cls._TASK_DONE_ALIASES, *cls._ROBOT_REQUEST_ALIASES]
+        state_replies = list(dict.fromkeys(phrase for phrase, _ in cls._STATE_REPLIES))
+        return [*cls._ALIASES, *state_replies, *cls._HANDOVER_ALIASES, *cls._TASK_DONE_ALIASES,
+                *cls._ROBOT_REQUEST_ALIASES]
 
     @classmethod
     def voice_phrases(cls, wake_word: bool = True) -> list[str]:
@@ -190,7 +212,7 @@ class CommandParser:
         may follow a pause), the name before every command, every command alone (heard,
         then ignored unless it is an emergency word or follows the name) -- and [unk], so
         other speech is not forced onto the nearest command."""
-        commands = cls.phrases()
+        commands = [*cls.phrases(), *cls.REPEAT_PHRASES]
         if not wake_word:
             return [*commands, "[unk]"]
         wakes = [wake for wake in cls.WAKE_WORDS if wake not in ("hey u r", "hey you r")]
@@ -207,7 +229,9 @@ class CommandParser:
                 return text[len(wake):].strip()
         return text if text in self.EMERGENCY_PHRASES else None
 
-    def parse(self, raw_text: str, source: str = "human_cli") -> Event | None:
+    def parse(self, raw_text: str, source: str = "human_cli", state=None) -> Event | None:
+        """state: the robot task's state the reply is for (voice knows it); a reply that
+        only means something in some states (_STATE_REPLIES) is understood only there."""
         text = raw_text.strip().lower()
         if not text:
             return None
@@ -223,6 +247,9 @@ class CommandParser:
         text = self._known(normalize(text))
         if text is None:
             return None
+        if text in self._state_phrases():
+            event_type = self._state_reply(text, state)
+            return None if event_type is None else Event(event_type, source)
         if text in self._TASK_DONE_ALIASES:
             return Event(EventType.H_TASK_DONE, source, payload={"task_name": self._TASK_DONE_ALIASES[text]})
         if text in self._ROBOT_REQUEST_ALIASES:
@@ -233,11 +260,31 @@ class CommandParser:
 
         return Event(event_type=self._ALIASES[text], source=source)
 
+    @classmethod
+    def _state_phrases(cls) -> set[str]:
+        return {phrase for phrase, _ in cls._STATE_REPLIES}
+
+    def _state_reply(self, phrase: str, state) -> EventType | None:
+        if state is None:
+            return next(event for (said, _), event in self._STATE_REPLIES.items() if said == phrase)
+        return self._STATE_REPLIES.get((phrase, state))
+
+    def is_repeat(self, raw_text: str) -> bool:
+        """Is this a request to say the last question again?"""
+        text = normalize(raw_text)
+        return text in self.REPEAT_PHRASES or self._without_fillers(text) in self.REPEAT_PHRASES
+
     def _known(self, text: str) -> str | None:
         """The phrase as a key: as said, or without polite words around it."""
-        known = (self._ALIASES, self._HANDOVER_ALIASES, self._TASK_DONE_ALIASES, self._ROBOT_REQUEST_ALIASES)
+        known = (self._ALIASES, self._state_phrases(), self._HANDOVER_ALIASES, self._TASK_DONE_ALIASES,
+                 self._ROBOT_REQUEST_ALIASES)
         if any(text in aliases for aliases in known):
             return text
+        stripped = self._without_fillers(text)
+        return stripped if any(stripped in aliases for aliases in known) else None
+
+    @staticmethod
+    def _without_fillers(text: str) -> str:
         words, fillers = text.split(), [filler.split() for filler in _FILLERS]
         trimmed = True
         while trimmed and words:
@@ -247,5 +294,4 @@ class CommandParser:
                     words, trimmed = words[len(filler):], True
                 elif words[-len(filler):] == filler:
                     words, trimmed = words[:-len(filler)], True
-        stripped = " ".join(words)
-        return stripped if any(stripped in aliases for aliases in known) else None
+        return " ".join(words)

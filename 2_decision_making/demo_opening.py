@@ -5,7 +5,7 @@ Recognition cannot reliably tell when the assembly begins, so with --demo
 and TaskManager ignores recognition and the task detectors until the panel's lift is
 settled:
 
-  "Shall we start the assembly?"
+  "Would you like to start the assembly?"
     yes      -> the robot offers to pull the cables.
     no/later -> asked again DEMO_START_REASK_S later.
   "Would you like me to pull the cables?"
@@ -13,11 +13,10 @@ settled:
            DEMO_LIFT_ASK_AFTER_PULL_START_S after it starts, the robot asks about the
            lift while still pulling: a yes lifts the panel the moment the cables are
            pulled (TaskManager._offer_in_advance).
-    later -> the pull is pending until the human asks for it ("pull the cables"); the
-           opening is over, and the lift follows the pull as its chain's next task.
+    later -> asked again after config.LATER_ASK_AGAIN_S.
     no  -> the human pulls them (not pending: the robot does not ask again), and the
            robot asks:
-  "Shall we move on to the next step?"
+  "Would you like to move on?"
     yes      -> the robot asks about the lift now.
     no/later -> the human finishes the cables: the robot asks about the lift once
                 they say "cables pulled", or after Pull Cables' duration limit (the
@@ -25,7 +24,7 @@ settled:
   "Would you like me to lift the panel?"
     yes -> the usual lift: free drive, holding, screw done, leave.
     no  -> the human lifts it.
-    later -> the lift is pending until the human asks for it ("lift the panel").
+    later -> asked again after config.LATER_ASK_AGAIN_S.
 
 Once the lift is answered (or left unanswered: pending too) the opening is over:
 recognition, the trigger rules and the task detectors take over -- screw detection,
@@ -50,15 +49,15 @@ LIFT = "Lift"
 TASK_NAMES = {task_id: name for name, task_id in config.TRACKED_TO_ROBOT_TASK.items()}
 
 # The opening's own questions (TaskManager.ask_question).
-START = "start"          # "Shall we start the assembly?"
-CONTINUE = "continue"    # the human pulls the cables: "Shall we move on to the next step?"
+START = "start"          # "Would you like to start the assembly?"
+CONTINUE = "continue"    # the human pulls the cables: "Would you like to move on?"
 QUESTIONS = (START, CONTINUE)
 
 # The lift question settled one way or another: the opening is over.
 LIFT_SETTLED = {S.R_ACCEPTED, S.R_DEFER, S.R_REFUSED, S.R_PENDING}
-# The robot's pull stopped short, or waits pending (later, or no answer): nothing left
-# to script.
-PULL_STOPPED = {S.R_RECOVERY_EVALUATING, S.R_CANCELED, S.R_PENDING}
+# The robot's pull stopped short: nothing left to script. (Later keeps the opening
+# going: the pull is asked again after config.LATER_ASK_AGAIN_S.)
+PULL_STOPPED = {S.R_RECOVERY_EVALUATING, S.R_CANCELED}
 
 
 class DemoOpening:
@@ -130,8 +129,7 @@ class DemoOpening:
                 manager.tracker.start_task(PULL, self.piece_id, HUMAN)
                 manager.queue_question(CONTINUE)
             elif state in PULL_STOPPED:
-                self._end(manager, "the robot's cable pull is pending" if state == S.R_PENDING
-                          else "the robot's cable pull was stopped")
+                self._end(manager, "the robot's cable pull was stopped")
         elif name == LIFT and state in LIFT_SETTLED:
             if state == S.R_REFUSED:
                 manager.tracker.start_task(LIFT, self.piece_id, HUMAN)

@@ -116,6 +116,33 @@ class ScreenTests(unittest.TestCase):
             self.assertLessEqual(len(action.label), 12)
         self.assertEqual(requests(opening=True), [])  # the opening dialogue leads
 
+    def test_the_cycle_starts_over_once_the_robot_is_done_with_a_panel(self):
+        machine = StateMachine()
+        tracker, _ = build_task_tracking(ROOT, logger=MagicMock())
+
+        def requests():
+            screen = build_screen(None, [], machine, 0, tracker=tracker)
+            return [(a.task_name) for a in screen.actions if a.command == "H_REQUEST_ROBOT_TASK"]
+
+        for name in ("Pull Cables", "Lift", "Place", "Align", "Screw"):
+            tracker.confirm_done(name)
+        self.assertEqual(requests(), ["Bring Connector"])
+        tracker.confirm_done("Bring Connector", "Robot")  # the robot's last job on the left panel
+        self.assertEqual(requests(), ["Pull Cables"])      # the middle panel's cables
+        self.assertEqual(tracker.first_open_piece_for("Pull Cables"), 2)
+
+    def test_hand_over_screens_name_the_item(self):
+        machine = StateMachine()
+        for state, title in ((RobotTaskState.R_WAITING_HANDOVER, "Would you like to take the pipe coupling?"),
+                             (RobotTaskState.R_HOLDING_HANDOVER, "Holding the pipe coupling for you")):
+            task = MagicMock(state=state, task_id=config.TASK_BRING_CONNECTOR, updated_at=0.0)
+            self.assertEqual(build_screen(task, [], machine, 0).title, title)
+
+    def test_done_button_after_taking_a_task_over(self):
+        screen = build_screen(None, [], StateMachine(), 0, human_turn="Pull Cables")
+        self.assertEqual((screen.eyebrow, screen.title), ("PULL CABLES", "Over to you"))
+        self.assertEqual([a.command for a in screen.actions][:1], ["H_DONE"])
+
     def test_opening_questions(self):
         machine = StateMachine()
         for question in ("start", "continue"):
@@ -140,7 +167,7 @@ class ScreenTests(unittest.TestCase):
         advance = MagicMock(task_id=config.TASK_LIFT_PANEL)
         screen = build_screen(task, [], machine, 0, advance=advance)
         self.assertEqual(screen.screen, "ask-next")
-        self.assertEqual(screen.title, "Lift the panel?")
+        self.assertEqual(screen.title, "Would you like me to lift the panel?")
         self.assertEqual([a.command for a in screen.actions], ["H_ACCEPT", "H_REFUSE", "H_CANCEL"])
         self.assertTrue(screen.actions[-1].hold)
 
@@ -247,7 +274,7 @@ class WatchFlowTests(unittest.IsolatedAsyncioTestCase):
         self.system.ros.publish_gripper_open.assert_called_once()
         self.assertEqual(snap["task"]["task_id"], config.TASK_LEAVE_HANDOVER)
         self.assertEqual(snap["screen"]["screen"], "defer")
-        self.assertEqual(snap["screen"]["detail"], "Stepping back")
+        self.assertEqual(snap["screen"]["detail"], "Moving out of your way")
         self.assertEqual(snap["screen"]["countdown_total"],
                          config.HANDOVER_LEAVE_DELAY_S[config.TASK_BRING_CONNECTOR])
 
@@ -385,10 +412,15 @@ class MicrophoneTests(unittest.TestCase):
     the CPU, and the spoken sentence comes out chopped.
     """
 
-    def test_listening_waits_until_the_sentence_is_over(self):
-        opened = []
+    def test_listening_opens_right_when_the_sentence_is_over(self):
+        opened, finished = [], []
+
+        def speak(text, *args, **kwargs):  # pyttsx3 blocks until the sentence is said
+            time.sleep(0.5)
+            finished.append(time.time())
+
         system = SimSystem()
-        system.tts = SimpleNamespace(speak=lambda text, *a, **k: None)
+        system.tts = SimpleNamespace(speak=speak)
         system.voice = SimpleNamespace(
             start_listening=lambda *a, **k: opened.append(time.time())
         )
@@ -396,15 +428,19 @@ class MicrophoneTests(unittest.TestCase):
             mode=None, show_message=lambda message, **kwargs: None
         )
         bridge = HRCBridge(system, simulate=True)
+        estimated_end = time.time() + 3.0  # the simulator's speaking estimate is at least this
 
         system.tts.speak("May I lift the panel?")
         system.voice.start_listening(lambda *_: None, lambda *_: None)
+        time.sleep(0.3)
         self.assertEqual(opened, [], "the microphone opened during the sentence")
 
-        deadline = bridge._speaking_until + 0.6
+        deadline = time.time() + 2.0
         while time.time() < deadline and not opened:
-            time.sleep(0.05)
+            time.sleep(0.02)
         self.assertTrue(opened, "the microphone never opened after the sentence")
+        self.assertLess(opened[0] - finished[0], 0.4, "the human waited long after the sentence")
+        self.assertLess(opened[0], estimated_end, "the microphone waited for the estimate")
 
 
 if __name__ == "__main__":

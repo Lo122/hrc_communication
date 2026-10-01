@@ -190,6 +190,10 @@ def _free_udp_port(host: str, port: int) -> bool:
 
 
 TICK_SECONDS = 0.1      # runtime steps per second; higher rates starve speech
+# The microphone opens this long after the robot stops talking (its last word's echo),
+# and never waits longer than the limit for a line that hangs.
+LISTEN_AFTER_SPEECH_S = 0.1
+SPEECH_WAIT_LIMIT_S = 20.0
 
 
 class HRCBridge:
@@ -228,6 +232,12 @@ class HRCBridge:
         self._speak_min = 3.0 if simulate else 1.2       # seconds
         self._speech_queue: queue.Queue = queue.Queue()
         self._speech_thread: threading.Thread | None = None
+        # Set while no line is queued or being spoken: the microphone opens on it,
+        # right when the robot actually stops talking (not on the estimate above).
+        self._speech_idle = threading.Event()
+        self._speech_idle.set()
+        self._speech_lines = 0
+        self._speech_lock = threading.Lock()
         self._pending_listen: tuple | None = None
         self._install_message_tap()
         self.sim = None
@@ -272,6 +282,9 @@ class HRCBridge:
                 # Hand the sentence to the speech thread and return at once:
                 # spoken inline it would block the event loop, and the watch
                 # would only learn about the speech after it had finished.
+                with self._speech_lock:
+                    self._speech_lines += 1
+                    self._speech_idle.clear()
                 self._speech_queue.put((_speak, text, args, kwargs))
 
             tts.speak = speaking
@@ -284,8 +297,7 @@ class HRCBridge:
         start_listening = getattr(voice, "start_listening", None)
         if start_listening is not None:
             def deferred(*args, _start=start_listening, **kwargs):
-                wait = self._speaking_until - time.time()
-                if wait <= 0:
+                if self._speech_idle.is_set():
                     self._pending_listen = None
                     return _start(*args, **kwargs)
                 # Only the newest request survives: an older one would open the
@@ -294,7 +306,10 @@ class HRCBridge:
                 pending = self._pending_listen
 
                 def later():
-                    time.sleep(max(0.0, self._speaking_until - time.time()) + 0.15)
+                    # Open the microphone as soon as the robot has stopped talking,
+                    # just past the echo of its last word.
+                    self._speech_idle.wait(timeout=SPEECH_WAIT_LIMIT_S)
+                    time.sleep(LISTEN_AFTER_SPEECH_S)
                     if self._pending_listen is pending:
                         self._pending_listen = None
                         _start(*args, **kwargs)
@@ -315,6 +330,15 @@ class HRCBridge:
                 speak(text, *args, **kwargs)
             except Exception as exc:        # a broken voice must not stop the UI
                 print(f"[voice] could not speak: {exc}")
+            finally:
+                with self._speech_lock:
+                    self._speech_lines -= 1
+                    if self._speech_lines == 0:
+                        self._speech_idle.set()
+                        if config.VOICE_ENABLED:
+                            # Real speech has ended: so has the watch's speaking signal
+                            # (the simulator's stretched one is kept without a voice).
+                            self._speaking_until = min(self._speaking_until, time.time())
 
     def _voice_status(self) -> dict[str, bool]:
         """Who is talking right now: the robot (TTS) or the human (mic open)."""
@@ -567,6 +591,7 @@ class HRCBridge:
             "tracker": getattr(manager, "tracker", None),
             "question": getattr(manager, "question", None),
             "opening": getattr(manager, "in_opening", False),
+            "human_turn": getattr(manager, "human_turn", None),
         }
 
     def _snapshot(self) -> dict[str, Any]:

@@ -29,18 +29,18 @@ TASK_NAMES = {
     config.TASK_BRING_CLAMPING_TOOL: "Bring the clamp",
     config.TASK_RETURN_CLAMPING_TOOL: "Put the clamp away",
     config.TASK_PULL_CABLES: "Pull the cables",
-    config.TASK_LEAVE_HANDOVER: "Step back",
+    config.TASK_LEAVE_HANDOVER: "Move out of your way",
 }
 
 # The robot asks (R_WAITING_RESPONSE): the question, and the line under it.
 QUESTIONS = {
-    config.TASK_LIFT_PANEL: "Lift the panel?",
-    config.TASK_LEAVE: "Let go of the panel?",
-    config.TASK_BRING_CONNECTOR: "Need the connector?",
-    config.TASK_BRING_CLAMPING_TOOL: "Need the clamp?",
-    config.TASK_RETURN_CLAMPING_TOOL: "Done with the clamp?",
-    config.TASK_PULL_CABLES: "Pull the cables?",
-    config.TASK_LEAVE_HANDOVER: "Shall I step back?",
+    config.TASK_LIFT_PANEL: "Would you like me to lift the panel?",
+    config.TASK_LEAVE: "Would you like me to let go of the panel?",
+    config.TASK_BRING_CONNECTOR: "Would you like me to bring the connector?",
+    config.TASK_BRING_CLAMPING_TOOL: "Would you like me to bring the clamp?",
+    config.TASK_RETURN_CLAMPING_TOOL: "Would you like me to put the clamp away?",
+    config.TASK_PULL_CABLES: "Would you like me to pull the cables?",
+    config.TASK_LEAVE_HANDOVER: "Would you like me to move out of your way?",
 }
 ASK_DETAILS = {
     config.TASK_LIFT_PANEL: "I'll hold it while you work",
@@ -49,7 +49,7 @@ ASK_DETAILS = {
     config.TASK_BRING_CLAMPING_TOOL: "I can bring it over",
     config.TASK_RETURN_CLAMPING_TOOL: "I can put it away",
     config.TASK_PULL_CABLES: "I can do it for you",
-    config.TASK_LEAVE_HANDOVER: "To give you room to work",
+    config.TASK_LEAVE_HANDOVER: "So you have space to work",
 }
 
 # Asked before the robot moves away: "no" means stay, not "I'll do it".
@@ -57,12 +57,12 @@ STAY_TASKS = {config.TASK_LEAVE, config.TASK_LEAVE_HANDOVER}
 
 RUNNING_TITLES = {
     config.TASK_LIFT_PANEL: "Lifting the panel",
-    config.TASK_LEAVE: "Stepping back",
+    config.TASK_LEAVE: "Letting go",
     config.TASK_BRING_CONNECTOR: "Bringing the connector",
     config.TASK_BRING_CLAMPING_TOOL: "Bringing the clamp",
     config.TASK_RETURN_CLAMPING_TOOL: "Putting the clamp away",
     config.TASK_PULL_CABLES: "Pulling the cables",
-    config.TASK_LEAVE_HANDOVER: "Stepping back",
+    config.TASK_LEAVE_HANDOVER: "Moving out of your way",
 }
 
 # Robot tasks the human can ask for from the idle screen (H_REQUEST_ROBOT_TASK),
@@ -115,7 +115,7 @@ CANCEL_HOLD = A("H_CANCEL", "Stop", "stop", "danger", hold=True)
 _STATE_SCREENS: dict[RobotTaskState, dict[str, Any]] = {
     RobotTaskState.R_WAITING_RESPONSE: dict(
         screen="ask", tone="ask", haptic="ask",
-        actions=[A("H_ACCEPT", "Yes, please", "check", "primary"),
+        actions=[A("H_ACCEPT", "Yes", "check", "primary"),
                  A("H_REFUSE", "I'll do it", "x"),
                  A("H_DEFER", "Later", "clock")],
     ),
@@ -147,32 +147,32 @@ _STATE_SCREENS: dict[RobotTaskState, dict[str, Any]] = {
     ),
     RobotTaskState.R_WAITING_FREE_DRIVE: dict(
         screen="ask-free-drive", tone="ask", haptic="ask",
-        eyebrow="PANEL IS UP", title="Adjust by hand?",
-        detail="I'll go soft so you can move it",
+        eyebrow="PANEL IS UP", title="Would you like to adjust the panel by hand?",
+        detail="Free drive lets you move it yourself",
         actions=[A("H_FREE_GO", "Yes", "hand", "primary"),
                  A("H_REFUSE", "Just hold", "x")],
     ),
     RobotTaskState.R_FREE_DRIVE: dict(
         screen="free-drive", tone="hand", haptic="tap",
-        eyebrow="FREE DRIVE", title="Guide it into place",
-        detail="Tap Done when it sits right",
+        eyebrow="FREE DRIVE", title="Move the panel into place",
+        detail="Tap Done when it's in position",
         actions=[A("H_DONE", "Done", "check", "primary"), CANCEL_HOLD],
     ),
     RobotTaskState.R_HOLDING: dict(
         screen="holding", tone="hand", haptic="tap",
-        eyebrow="HOLDING THE PANEL", title="Screw it in",
+        eyebrow="HOLDING THE PANEL", title="Screw the panel in",
         detail="I'll hold it until you're done",
         actions=[A("H_SCREW_DONE", "All screwed", "check", "primary"), CANCEL_HOLD],
     ),
     RobotTaskState.R_WAITING_HANDOVER: dict(
         screen="ask-handover", tone="ask", haptic="ask",
-        title="Ready to take it?", detail="Hold it, then I'll let go",
+        title="Would you like to take it?", detail="Hold it first, then I'll let go",
         actions=[A("H_ACCEPT", "Take it", "hand", "primary"),
                  A("H_REFUSE", "Not yet", "x")],
     ),
     RobotTaskState.R_HOLDING_HANDOVER: dict(
         screen="holding-handover", tone="hand", haptic="tap",
-        title="Whenever you're ready", detail="I'll keep holding it for you",
+        title="Holding it for you", detail="Tap when you're ready to take it",
         actions=[A("H_HANDOVER", "Hand it over", "hand", "primary"), CANCEL_HOLD],
     ),
     RobotTaskState.R_RECOVERY_EVALUATING: dict(
@@ -181,7 +181,7 @@ _STATE_SCREENS: dict[RobotTaskState, dict[str, Any]] = {
     ),
     RobotTaskState.R_WAITING_HOME_PERMISSION: dict(
         screen="ask-home", tone="alert", haptic="ask",
-        eyebrow="STOPPED", title="Head back home?",
+        eyebrow="STOPPED", title="Would you like me to head home?",
         detail="The way back is clear",
         actions=[A("H_RETURN_HOME", "Go home", "home", "primary"),
                  A("H_MANUAL_RECOVERY", "By hand", "hand")],
@@ -192,8 +192,8 @@ _STATE_SCREENS: dict[RobotTaskState, dict[str, Any]] = {
     ),
     RobotTaskState.R_MANUAL_RECOVERY: dict(
         screen="manual", tone="hand", haptic="alert",
-        eyebrow="MANUAL RECOVERY", title="Guide me by hand",
-        detail="I'm in free drive. Tap Done after",
+        eyebrow="MANUAL RECOVERY", title="Move the arm by hand",
+        detail="Free drive is on. Tap Done when finished",
         actions=[A("H_DONE", "Done", "check", "primary"),
                  A("H_CANCEL", "Abort", "x", "danger", hold=True)],
     ),
@@ -203,13 +203,13 @@ _STATE_SCREENS: dict[RobotTaskState, dict[str, Any]] = {
 # opening's. A yes / no answers them like any robot question.
 _QUESTION_SCREENS: dict[str, dict[str, Any]] = {
     "start": dict(
-        eyebrow="NEW ASSEMBLY", title="Shall we start?",
+        eyebrow="NEW ASSEMBLY", title="Would you like to start the assembly?",
         detail="First up: the cables",
         actions=[A("H_ACCEPT", "Let's go", "check", "primary"),
                  A("H_REFUSE", "Not yet", "clock")],
     ),
     "continue": dict(
-        eyebrow="CABLES ARE YOURS", title="Move on?",
+        eyebrow="CABLES ARE YOURS", title="Would you like to move on?",
         detail="Next, I can lift the panel",
         actions=[A("H_ACCEPT", "Next step", "check", "primary"),
                  A("H_REFUSE", "Not yet", "clock")],
@@ -241,14 +241,16 @@ def _allowed(state_machine, state, command: str, task_id) -> bool:
 
 def build_screen(task, pending: list, state_machine, now: float,
                  last_message: str = "", *, advance=None, advance_answer: str | None = None,
-                 tracker=None, question: str | None = None, opening: bool = False) -> WatchScreen:
+                 tracker=None, question: str | None = None, opening: bool = False,
+                 human_turn: str | None = None) -> WatchScreen:
     """Return the screen for the active task (or the question/pending/idle screen).
 
     advance: the robot task asked about while the active one still runs
     (TaskManager.advance_task), and advance_answer the human's yes / later to it
     so far. tracker: the assembly-task tracker, for the idle screen's inputs.
     question: the open question outside any robot task (TaskManager.question).
-    opening: the demo opening leads (TaskManager.in_opening): no robot requests."""
+    opening: the demo opening leads (TaskManager.in_opening): no robot requests.
+    human_turn: the task the human took over with a no (TaskManager.human_turn)."""
 
     if task is None:
         if question in _QUESTION_SCREENS:
@@ -266,7 +268,7 @@ def build_screen(task, pending: list, state_machine, now: float,
                 detail="Tap whenever you want my help",
                 actions=[A("H_EXECUTE_PENDING_TASK", "Start now", "play", "primary")],
             )
-        return _idle_screen(tracker, opening)
+        return _idle_screen(tracker, opening, human_turn)
 
     if advance is not None and advance_answer is None and task.state is RobotTaskState.R_EXECUTING:
         return _advance_screen(task, advance, state_machine)
@@ -284,6 +286,11 @@ def build_screen(task, pending: list, state_machine, now: float,
             # A no keeps the robot where it is; the human does not take it over.
             spec["actions"] = [replace(a, label="Not yet") if a.command == "H_REFUSE" else a
                                for a in spec["actions"]]
+    elif task.state in (RobotTaskState.R_WAITING_HANDOVER, RobotTaskState.R_HOLDING_HANDOVER):
+        item = config.HANDOVER_ITEMS.get(task.task_id)
+        if item:
+            spec["title"] = (f"Would you like to take the {item}?"
+                             if task.state is RobotTaskState.R_WAITING_HANDOVER else f"Holding the {item} for you")
     elif task.state is RobotTaskState.R_EXECUTING:
         spec["title"] = RUNNING_TITLES.get(task.task_id, name)
         spec["detail"] = "Please keep clear of the arm"
@@ -309,25 +316,31 @@ def build_screen(task, pending: list, state_machine, now: float,
         if task.task_id == config.TASK_LEAVE:
             screen.detail = "Letting go of the panel"
         elif task.task_id == config.TASK_LEAVE_HANDOVER:
-            screen.detail = "Stepping back"
+            screen.detail = "Moving out of your way"
     return screen
 
 
-def _idle_screen(tracker, opening: bool = False) -> WatchScreen:
+def _idle_screen(tracker, opening: bool = False, human_turn: str | None = None) -> WatchScreen:
     """Nothing to answer: confirm the task the human is on, or ask the robot for the
     task that comes next."""
     screen = WatchScreen(screen="idle", tone="idle", title="I'm ready",
                          detail="I'll ask when I can help")
-    if tracker is None:
-        return screen
-    working = tracker.working_task()
-    if working is not None:
+    working = tracker.working_task() if tracker is not None else None
+    if human_turn is not None:
+        # Taken over from the robot: its "done" lets the robot move on.
+        screen.eyebrow = human_turn.upper()
+        screen.title = "Over to you"
+        screen.detail = "Tap Done and I'll move on"
+        screen.actions.append(A("H_DONE", "Done", "check", "primary"))
+    elif working is not None:
         screen.eyebrow = working.task_name.upper()
         screen.title = "Over to you"
         screen.detail = "Tap Done when you've finished"
         screen.actions.append(A("H_TASK_DONE", "Done", "check", "primary"))
     elif opening:
         screen.detail = "We'll start together in a moment"
+    if tracker is None:
+        return screen
     if opening:
         return screen  # the opening dialogue leads; nothing to ask for yet
     requests = [A("H_REQUEST_ROBOT_TASK", label, "play", task_name=name)
@@ -355,7 +368,24 @@ def _requestable(tracker, task_name: str) -> bool:
         return False
     if _waits_for_chain(tracker, task_name, piece_id):
         return False
-    return _next_step(tracker, piece_id) == task_name or _rule_started(tracker, task_name, piece_id)
+    return (_next_step(tracker, piece_id) == task_name or _rule_started(tracker, task_name, piece_id)
+            or _robot_done_before(tracker, task_name, piece_id))
+
+
+def _robot_done_before(tracker, task_name: str, piece_id: int) -> bool:
+    """The next panel's first robot task, once the robot has done all it can on the panel
+    before: the cycle starts over at Pull Cables while the human finishes that panel."""
+    if piece_id == tracker.piece_ids[0] or piece_id not in tracker.piece_ids:
+        return False
+    database = tracker.database
+    piece = next(p for p in database.pieces if p.piece_id == piece_id)
+    first = next((name for name in piece.task_list if database.can_execute(name, "Robot")), None)
+    if task_name != first:
+        return False
+    before = tracker.piece_ids[tracker.piece_ids.index(piece_id) - 1]
+    previous = next(p for p in database.pieces if p.piece_id == before)
+    return all(tracker.get(name, before).status == TaskStatus.DONE
+               for name in previous.task_list if database.can_execute(name, "Robot"))
 
 
 def _waits_for_chain(tracker, task_name: str, piece_id: int) -> bool:
@@ -403,7 +433,7 @@ def _advance_screen(task, advance, state_machine) -> WatchScreen:
         eyebrow="NEXT UP",
         title=QUESTIONS.get(advance.task_id, TASK_NAMES.get(advance.task_id, "Next task") + "?"),
         detail=f"Right after {doing}",
-        actions=[A("H_ACCEPT", "Yes, please", "check", "primary"), A("H_REFUSE", "No", "x"), *stop],
+        actions=[A("H_ACCEPT", "Yes", "check", "primary"), A("H_REFUSE", "No", "x"), *stop],
     )
 
 

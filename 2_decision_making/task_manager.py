@@ -52,6 +52,8 @@ ROBOT_TASK_TO_TRACKED = {task_id: name for name, task_id in config.TRACKED_TO_RO
 # The source of the recognition model's events (typed ones are "manual_recognition").
 RECOGNITION_SOURCE = "recognition"
 RECOGNITION_TIMER = "recognition active"
+# The task the human said "later" to is asked about again when this timer goes off.
+LATER_TIMER = "ask again later"
 # How many of the operator's manual commands the live view lists.
 MANUAL_RESULTS_KEPT = 12
 
@@ -120,6 +122,12 @@ class TaskManager:
         # The bring task just handed over: what follows it (its chain) waits until the
         # robot has left the hand-over position.
         self._handed_over: RobotTask | None = None
+        # (task name, piece) the human took over with a no ("I'll do it"): the robot
+        # waits for their "done" to move on (human_turn).
+        self._human_turn: tuple[str, int] | None = None
+        # The pending task the human said "later" to: asked again after
+        # config.LATER_ASK_AGAIN_S, and until then the robot offers nothing on its own.
+        self._later: str | None = None
         # Last recognized task ignored while a robot lift leads (logged once per task).
         self._ignored_recognition: str | None = None
         # What the step selector (sequence_step_selector.py) made of the last task update
@@ -288,7 +296,7 @@ class TaskManager:
                 # Not marked offered: the rule is checked again once a panel is held.
                 continue
             self.policy.mark_offered(task_name, piece_id)
-            if (self.active_task is not None or self._leave_pending()
+            if (self.active_task is not None or self._held_back()
                     or (self.waiting_triggers and not releases_panel)):
                 entry = {"task_name": task_name, "piece_id": piece_id, "requested": False}
                 if releases_panel:
@@ -306,7 +314,7 @@ class TaskManager:
 
     def _start_next_waiting(self) -> None:
         while (self.active_task is None and self.question is None and self.waiting_triggers
-               and not self._leave_pending()):
+               and not self._held_back()):
             entry = self.waiting_triggers.popleft()
             task_name, piece_id = entry["task_name"], entry["piece_id"]
             if not self._tracked_task_open(task_name, piece_id):
@@ -486,7 +494,7 @@ class TaskManager:
                                     {"task_name": task_name, "piece_id": piece_id})
             return
         active = self.active_task
-        if active is None and not self._leave_pending():
+        if active is None and not self._held_back():
             self._start_robot_task(task_name, piece_id)
         elif self._can_ask_in_advance(task_name, piece_id):
             self._offer_in_advance(task_name, piece_id)
@@ -558,6 +566,8 @@ class TaskManager:
                              "Human deferred the task asked in advance; pending until asked for.")
             task.pending_reason = "refused" if refused else "later"
             self.pending_pool.add(task)
+            if not refused:
+                self._ask_again_later(task)
             self.cli.show_message(self.message_manager.get_pending_message(task),
                                   speech=self.message_manager.get_pending_message(task, spoken=True))
             return True
@@ -774,6 +784,16 @@ class TaskManager:
             if task.task_id == task_id and task.piece_id == piece_id:
                 return task
         return None
+
+    def _held_back(self) -> bool:
+        """The robot offers nothing on its own: a pending leave keeps it where it is, and a
+        task the human said "later" to is asked about again first."""
+        return self._leave_pending() or self._later is not None
+
+    def _ask_again_later(self, task: RobotTask) -> None:
+        self._later = task.task_instance_id
+        self.timer.schedule(LATER_TIMER, config.LATER_ASK_AGAIN_S,
+                            Event(EventType.H_EXECUTE_PENDING_TASK, "timer", task.task_instance_id))
 
     def _leave_pending(self) -> bool:
         # A pending leave task keeps the robot at the held panel or the hand-over position.
@@ -1027,6 +1047,7 @@ class TaskManager:
         if self.active_task is task:
             self.active_task = None
         self.tracker.hand_to_human(name, task.piece_id)
+        self._human_turn = (name, task.piece_id)
         if self._queued_question is None:  # else the question that follows speaks for it
             self.cli.show_message(self.message_manager.get_human_does_message(task),
                                   speech=self.message_manager.get_human_does_message(task, spoken=True))
@@ -1046,8 +1067,9 @@ class TaskManager:
         )
 
     def _handle_defer(self, event: Event) -> None:
-        """Later: the task waits in the pending pool until the human asks for it (by
-        name, or "execute <id>") -- then it is asked about again. No timer."""
+        """Later: the task waits in the pending pool, and is asked about again after
+        config.LATER_ASK_AGAIN_S -- or sooner, when the human asks for it (by name, or
+        "execute <id>"). The robot offers nothing else on its own meanwhile."""
         if self._answer_question(event) or self._answer_in_advance(event):
             return
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
@@ -1056,7 +1078,8 @@ class TaskManager:
 
         self.timer.cancel_response_timer()
         self._move_to_pending(task, RobotTaskState.R_PENDING, event, "later",
-                              "Human deferred task; pending until asked for.")
+                              "Human deferred task; asked again later.")
+        self._ask_again_later(task)
 
     def _handle_response_timeout(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
@@ -1074,6 +1097,12 @@ class TaskManager:
         self._transition(task, RobotTaskState.R_ACCEPTED, event, "Deferred task dispatched; waiting for robot running status.")
 
     def _handle_execute_pending(self, event: Event) -> None:
+        if event.task_instance_id is not None and event.task_instance_id == self._later:
+            if event.source == "timer" and self.active_task is not None:
+                # Busy with something the human asked for: ask a little later.
+                self.timer.schedule(LATER_TIMER, config.DEFER_SECONDS, event)
+                return
+            self._later = None
         if self.active_task is not None:
             self._log_invalid(event, "Cannot execute pending task while active task exists.")
             return
@@ -1094,6 +1123,9 @@ class TaskManager:
     def _reoffer_pooled(self, task: RobotTask, message: str, event: Event | None = None) -> None:
         """Bring a refused/timed-out robot task back from the pending pool and ask
         permission again; it is dispatched only on H_ACCEPT, like any other offer."""
+        if task.task_instance_id == self._later:
+            self._later = None
+            self.timer.cancel(LATER_TIMER)
         if event is None:
             event = Event(EventType.H_EXECUTE_PENDING_TASK, "task_manager", task.task_instance_id)
         self.pending_pool.remove(task.task_instance_id)
@@ -1239,7 +1271,11 @@ class TaskManager:
             return
 
         # Speed Control Formula: increase speed by SPEED_STEP, but do not exceed MAX_SPEED
-        task.speed = min(task.speed + config.SPEED_STEP, config.MAX_SPEED)
+        speed = min(task.speed + config.SPEED_STEP, config.MAX_SPEED)
+        if speed == task.speed:
+            self._say_speed_limit(faster=True)
+            return
+        task.speed = speed
 
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed increased.")
@@ -1248,13 +1284,22 @@ class TaskManager:
             speech=self.message_manager.get_acknowledgement(event.event_type, spoken=True),
         )
 
+    def _say_speed_limit(self, faster: bool) -> None:
+        """The speed is at its limit: nothing changes, and "speed increased" would not be true."""
+        self.cli.show_message(self.message_manager.get_speed_limit_message(faster),
+                              speech=self.message_manager.get_speed_limit_message(faster, spoken=True))
+
     def _handle_slowdown(self, event: Event) -> None:
         task = self._require_active(event, RobotTaskState.R_EXECUTING)
         if task is None:
             return
 
         # Speed Control Formula: decrease speed by SPEED_STEP, but do not go below MIN_SPEED
-        task.speed = max(task.speed - config.SPEED_STEP, config.MIN_SPEED)
+        speed = max(task.speed - config.SPEED_STEP, config.MIN_SPEED)
+        if speed == task.speed:
+            self._say_speed_limit(faster=False)
+            return
+        task.speed = speed
 
         self.ros.publish_speed(task.speed)
         self._transition(task, RobotTaskState.R_EXECUTING, event, "Robot speed decreased.")
@@ -1353,10 +1398,30 @@ class TaskManager:
             speech=self.message_manager.get_acknowledgement(EventType.H_CANCEL, spoken=True),
         )
 
+    @property
+    def human_turn(self) -> str | None:
+        """The task the human took over with a no ("I'll do it") and has not finished,
+        while the robot has nothing else to do: it waits for their "done". The steps
+        after it are recognition's to follow, as always."""
+        if self._human_turn is None or self.active_task is not None or self.tracker is None:
+            return None
+        name, piece_id = self._human_turn
+        task = self.tracker.get(name, piece_id)
+        return name if task is not None and task.status != TaskStatus.DONE else None
+
     def _handle_human_done(self, event: Event) -> None:
         if self.active_task is None and self.tracker is not None:
-            # No robot task to report to: "done" confirms the human's own task.
-            self._handle_task_done(Event(EventType.H_TASK_DONE, event.source))
+            # No robot task to report to: "done" confirms the human's own task -- the
+            # one they took over from the robot, if they did.
+            payload = {}
+            if self.human_turn is not None:
+                payload = {"task_name": self.human_turn, "piece_id": self._human_turn[1]}
+            self._handle_task_done(Event(EventType.H_TASK_DONE, event.source, payload=payload))
+            return
+        if self.active_task.state == RobotTaskState.R_HOLDING:
+            # The robot holds the panel for the screws: "done" means screwing is done.
+            self._handle_screw_done(Event(EventType.H_SCREW_DONE, event.source,
+                                          event.task_instance_id, dict(event.payload or {})))
             return
         task = self._require_active_in(
             event,

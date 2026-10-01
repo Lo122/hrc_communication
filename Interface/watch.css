@@ -137,6 +137,9 @@ button { font: inherit; color: inherit; }
 .watch[data-skin="clay"] .cross { display: none; }   /* clay keeps only the grid */
 
 /* ---------- Status bar --------------------------------------------------- */
+/* every line in the stamp's typeface (IBM Plex Mono, watch.html) */
+.watch { font-family: var(--mono); }
+
 .status-bar {
   position: relative; z-index: 2;
   display: flex; align-items: center; justify-content: space-between; gap: 6px;
@@ -159,23 +162,21 @@ button { font: inherit; color: inherit; }
   max-width: 100%;
 }
 .status-word {
-  font: 500 7px/1.3 var(--mono);
+  font: 500 6px/1.3 var(--mono);
   letter-spacing: 0.12em;
   color: var(--dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.watch[data-skin="clay"] .status-word,
-.watch[data-skin="plate"] .status-word { display: none; }
 
 /* the stamp: the line the backend already writes, in a drawing-block box */
 .stamp {
   position: relative; z-index: 2;
   flex: none;
   margin: 0;
-  padding: 2px 6px;
+  padding: 1px 5px;
   border: 1px solid var(--red);
   border-radius: 3px;
-  font: 600 7.5px/1.3 var(--mono);
+  font: 600 6px/1.3 var(--mono);   /* as "mic open" beside it */
   letter-spacing: 0.12em;
   color: var(--red);
   max-width: 100%;
@@ -183,7 +184,6 @@ button { font: inherit; color: inherit; }
 }
 .screen[data-tone="hand"] .stamp,
 .screen[data-tone="idle"] .stamp { border-color: var(--dim); color: var(--dim); }
-.watch[data-skin="plate"] .stamp { display: none; }   /* the plate speaks for itself */
 
 /* ---------- The pad: pressed clay that holds the signal ------------------ */
 .stage {
@@ -191,8 +191,12 @@ button { font: inherit; color: inherit; }
   flex: 1 1 auto;
   display: flex; align-items: center; justify-content: center;
   width: 100%;
-  min-height: 0;
+  min-height: 84px;   /* the pad's height: it never rises into the stamp above */
+  margin-top: 4px;
 }
+.watch[data-skin="clay"] .stage { min-height: 80px; }
+.watch[data-skin="plate"] .stage { min-height: 104px; }
+.watch[data-shape="round"][data-skin="plate"] .stage { min-height: 84px; }
 .pad {
   position: relative;
   display: grid; place-items: center;
@@ -207,8 +211,8 @@ button { font: inherit; color: inherit; }
 }
 .watch[data-mode="dark"] .pad { box-shadow: 5px 5px 12px var(--sh-dark), -4px -4px 10px var(--sh-light); }
 .watch[data-skin="clay"] .pad { width: 80px; height: 80px; }
-.watch[data-skin="plate"] .pad { width: 122px; height: 122px; border-radius: 50%; }
-.watch[data-shape="round"][data-skin="plate"] .pad { width: 112px; height: 112px; }
+.watch[data-skin="plate"] .pad { width: 104px; height: 104px; border-radius: 50%; }
+.watch[data-shape="round"][data-skin="plate"] .pad { width: 84px; height: 84px; }
 
 /* gauge: the tick ring (plate only) and the arc for time / progress */
 .gauge { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
@@ -299,19 +303,19 @@ button { font: inherit; color: inherit; }
   flex: none;
   position: relative; z-index: 2;
   margin: 9px 0 0;
-  font-size: 15px; line-height: 1.12; font-weight: 700;
-  letter-spacing: -0.005em;
+  font-size: 11.5px; line-height: 1.18; font-weight: 700;
+  letter-spacing: -0.02em;
   text-wrap: balance;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.watch[data-shape="round"] .title { font-size: 13.5px; }
+.watch[data-shape="round"] .title { font-size: 11px; }
 .watch[data-skin="plate"] .title { margin-top: 7px; }
 .detail {
   flex: none;
   position: relative; z-index: 2;
   margin: 3px 0 0;
-  font-size: 9px; line-height: 1.25;
+  font-size: 8px; line-height: 1.25;
   color: var(--dim);
 }
 .watch[data-skin="plate"] .detail { display: none; }   /* the plate keeps one line */
@@ -384,7 +388,7 @@ button { font: inherit; color: inherit; }
   border: 0; border-radius: 15px;
   background: var(--pad);
   color: var(--ink);
-  font-size: 10.5px; font-weight: 700; letter-spacing: 0.02em;
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.02em;
   text-transform: uppercase;
   cursor: pointer;
   user-select: none; -webkit-user-select: none;
@@ -417,7 +421,7 @@ button { font: inherit; color: inherit; }
 .btn svg { position: relative; z-index: 1; }
 /* three answers in one row: the labels get the space, the icons step out */
 .row:has(.btn:nth-child(3)) .btn svg { display: none; }
-.row:has(.btn:nth-child(3)) .btn { font-size: 10px; padding: 0 5px; }
+.row:has(.btn:nth-child(3)) .btn { font-size: 7.5px; letter-spacing: 0; padding: 0 3px; }
 .btn svg { width: 11px; height: 11px; flex: none; opacity: 0.75; }
 .hold-hint { font: 500 7px/1 var(--mono); letter-spacing: 0.12em; color: var(--dim); }
 
@@ -437,9 +441,13 @@ button { font: inherit; color: inherit; }
 .toast.is-visible { opacity: 1; transform: translateY(0); }
 
 /* ---------- Round (Wear OS) density ------------------------------------- */
-.watch[data-shape="round"] .btn { min-height: 28px; font-size: 10px; padding: 0 7px; }
+.watch[data-shape="round"] .btn { min-height: 28px; font-size: 9px; padding: 0 7px; }
 .watch[data-shape="round"] .hold-hint { display: none; }
-.watch[data-shape="round"] .pad { width: 78px; height: 78px; }
+.watch[data-shape="round"] .pad { width: 64px; height: 64px; }
+/* the round face is shorter: a smaller pad keeps the buttons on it */
+.watch[data-shape="round"] .stage { min-height: 64px; margin-top: 2px; }
+/* the rim curves in at the top: the stamp sits in the middle (the sheet keeps its left edge) */
+.watch[data-shape="round"]:not([data-skin="sheet"]) .stamp-row { align-self: center; }
 .watch[data-shape="round"] .paper { background-image: none; }
 
 /* ---------- Watch-only page (phone on the wrist) ------------------------- */
@@ -467,9 +475,12 @@ body.watch-only .watch::after { display: none; }
 .watch[data-skin="sheet"] .screen { align-items: stretch; text-align: left; padding: 10px 13px 12px; }
 .watch[data-skin="sheet"] .cross { display: none; }
 .watch[data-skin="sheet"] .stamp-row { margin-top: 7px; }
-.watch[data-skin="sheet"] .title { order: 2; margin: 7px 0 0; font-size: 15px; }
+.watch[data-skin="sheet"] .title { order: 2; margin: 7px 0 0; font-size: 11.5px; }
+.watch[data-shape="round"][data-skin="sheet"] .title { font-size: 11px; }
+/* the round face's margins, not the sheet's own: nothing runs past the rim */
+.watch[data-shape="round"][data-skin="sheet"] .screen { padding: 16px 26px 20px; }
 .watch[data-skin="sheet"] .detail { display: none; }
-.watch[data-skin="sheet"] .stage { order: 3; margin-top: 8px; flex: 1 1 auto; align-items: stretch; }
+.watch[data-skin="sheet"] .stage { order: 3; margin-top: 8px; flex: 1 1 auto; align-items: stretch; min-height: 0; }
 .watch[data-skin="sheet"] .rail { order: 4; }
 .watch[data-skin="sheet"] .actions { order: 5; }
 

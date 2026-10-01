@@ -38,6 +38,9 @@ MISTAKE_NAMES = [
 
 RESPONSE_TIMEOUT_SECONDS = 20.0
 DEFER_SECONDS = 5.0
+# "Later" to a robot question: the robot waits this long -- offering nothing else on
+# its own meanwhile -- then asks the same question again.
+LATER_ASK_AGAIN_S = 30.0
 RECOVERY_STOP_DELAY_SECONDS = 0.5
 
 DEFAULT_SPEED = 0.2
@@ -320,7 +323,7 @@ DEMO_LIFT_ASK_AFTER_PULL_START_S = 45.0
 # When the human pulls the cables instead, ask about the lift after Pull Cables'
 # duration limit (TASK_OVERRUN_STAT of its annotated duration, p95 = 6 s) plus this.
 DEMO_HUMAN_PULL_BUFFER_S = 10.0
-# "Shall we start the assembly?" answered no or later: asked again this much later.
+# "Would you like to start the assembly?" answered no or later: asked again this much later.
 DEMO_START_REASK_S = 30.0
 # The task detectors (screw detection) in the demo: their signals count.
 DEMO_DETECTORS_MODE = "on"
@@ -369,10 +372,10 @@ VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-
 VOICE_INPUT_DEVICE_NAME = None
 VOICE_OUTPUT_DEVICE_NAME = None
 VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
-VOICE_TTS_RATE = 190
+VOICE_TTS_RATE = 220
 # The robot's voice: the first installed SAPI voice whose name contains this (None:
-# the system default). Zira is Windows' built-in female English voice.
-VOICE_TTS_VOICE = "Zira"
+# the system default). David is Windows' built-in male English voice, Zira the female one.
+VOICE_TTS_VOICE = "David"
 # Answers to the robot's own questions need no name ("yes"). Anything else -- idle, or
 # while the robot works -- counts only after it: "hey UR, bring the tool", so talk in the
 # room is not taken for a command; with it on, the robot also listens while idle.

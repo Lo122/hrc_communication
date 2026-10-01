@@ -196,6 +196,9 @@ class HRCSystem:
             if manager is not None and manager.question is not None:
                 return VoiceContext(RobotTaskState.R_WAITING_RESPONSE,
                                     task_instance_id=f"question {manager.question}", reactive=reactive)
+            turn = getattr(manager, "human_turn", None)
+            if turn is not None:
+                return VoiceContext(None, task_instance_id=f"human {turn}", reactive=reactive, human_turn=True)
             return VoiceContext(None, reactive=reactive)
         return VoiceContext(task.state, task.task_id, task.task_instance_id, reactive=reactive)
 

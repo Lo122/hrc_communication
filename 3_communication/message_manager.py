@@ -45,13 +45,13 @@ class MessageManager:
     def get_permission_message(self, task_id: int, *, spoken=False) -> str:
         if spoken:
             return {
-                config.TASK_LIFT_PANEL: "Shall I lift the panel for you?",
-                config.TASK_LEAVE: "Is the panel secure? Shall I let go and step back?",
-                config.TASK_BRING_CONNECTOR: "Would you like me to bring the pipe connector?",
+                config.TASK_LIFT_PANEL: "Would you like me to lift the panel?",
+                config.TASK_LEAVE: "Would you like me to let go of the panel?",
+                config.TASK_BRING_CONNECTOR: "Would you like me to bring the connector?",
                 config.TASK_BRING_CLAMPING_TOOL: "Would you like me to bring the clamping tool?",
-                config.TASK_RETURN_CLAMPING_TOOL: "Done with the clamping tool? Shall I put it away?",
-                config.TASK_PULL_CABLES: "Shall I pull the cables for you?",
-                config.TASK_LEAVE_HANDOVER: "Shall I step back now?",
+                config.TASK_RETURN_CLAMPING_TOOL: "Would you like me to put the clamping tool away?",
+                config.TASK_PULL_CABLES: "Would you like me to pull the cables?",
+                config.TASK_LEAVE_HANDOVER: "Would you like me to move out of your way?",
             }[task_id]
         return config.PERMISSION_MESSAGES[task_id]
 
@@ -60,21 +60,21 @@ class MessageManager:
         when the human pulls the cables themselves."""
         if question == "start":
             if spoken:
-                return "Hello! Shall we start the assembly?"
-            return "Hello! Shall we start the assembly? Say yes when you are ready, or no if you need a moment."
+                return "Hello! Would you like to start the assembly?"
+            return "Hello! Would you like to start the assembly? Say yes when you are ready, or no if you need a moment."
         if spoken:
-            return "Alright, the cables are yours. Shall we move on to the next step?"
-        return ("Alright, you pull the cables. Shall we move on to the next step? "
+            return "Alright, the cables are yours. Would you like to move on?"
+        return ("Alright, you pull the cables. Would you like to move on to the next step? "
                 'Say yes and I will offer to lift the panel, or no to finish the cables first.')
 
     def get_opening_wait_message(self, question: str, wait: float, *, spoken=False) -> str:
         """A no or later to an opening question: what happens next, and when."""
         if question == "start":
             if spoken:
-                return "No problem. I will ask again in a moment."
+                return "No problem, I'll ask again soon."
             return f"No problem, take your time. I will ask again in {wait:g} seconds."
         if spoken:
-            return 'Okay. Say "cables pulled" when you are done.'
+            return 'Okay. Say "cables pulled" when done.'
         return ('Okay, finish the cables first. Say or type "cables pulled" when you are done, '
                 f"or I will ask about lifting the panel in {wait:g} seconds.")
 
@@ -82,12 +82,12 @@ class MessageManager:
         if spoken:
             return {
                 config.TASK_LIFT_PANEL: "Lifting the panel now.",
-                config.TASK_LEAVE: "Letting go and stepping back.",
-                config.TASK_BRING_CONNECTOR: "On my way with the pipe connector.",
+                config.TASK_LEAVE: "Letting go of the panel.",
+                config.TASK_BRING_CONNECTOR: "Bringing the connector.",
                 config.TASK_BRING_CLAMPING_TOOL: "On my way with the clamping tool.",
                 config.TASK_RETURN_CLAMPING_TOOL: "Putting the clamping tool away.",
                 config.TASK_PULL_CABLES: "Pulling the cables now.",
-                config.TASK_LEAVE_HANDOVER: "Stepping back.",
+                config.TASK_LEAVE_HANDOVER: "Moving out of your way.",
             }[task.task_id]
         lift_arrival = ("I will ask about manual adjustment when the lift is complete."
                         if config.LIFT_ASKS_FREE_DRIVE else
@@ -106,14 +106,14 @@ class MessageManager:
     def get_handover_question(self, task, *, spoken=False) -> str:
         item = config.HANDOVER_ITEMS[task.task_id]
         if spoken:
-            return f"Here is the {item}. Ready to take it?"
+            return f"Here is the {item}. Would you like to take it?"
         return (f"Can I hand over the {item}? Yes opens the gripper, so hold it first. "
                 "Say yes or no after the beep, or type your reply.")
 
     def get_handover_wait_message(self, task, *, spoken=False) -> str:
         item = config.HANDOVER_ITEMS[task.task_id]
         if spoken:
-            return f'No rush. Say "give me the {item}" when you are ready.'
+            return f'No rush. Say "give me the {item}" when ready.'
         return (f"Okay, I will keep holding the {item}. Let me know when you are ready to receive it: "
                 f'say or type "give me the {item}".')
 
@@ -122,7 +122,7 @@ class MessageManager:
         kept short and not said -- a countdown sounds too explicit."""
         item = config.HANDOVER_ITEMS[task.task_id]
         if spoken:
-            leaving = "" if leave_in is None else " I will step back now."
+            leaving = "" if leave_in is None else " I'll move out of your way."
             return f"There you go.{leaving}"
         leaving = ("" if leave_in is None else
                    " I'm moving away. Say or type cancel to keep me here.")
@@ -130,12 +130,12 @@ class MessageManager:
 
     def get_left_handover_message(self, *, spoken=False) -> str:
         if spoken:
-            return "I have stepped back."
+            return "I'm out of your way now."
         return "I have moved away from the hand-over position."
 
     def get_free_drive_on_arrival_message(self, *, spoken=False) -> str:
         if spoken:
-            return 'The panel is in place. Guide it by hand, then say "done".'
+            return 'Panel in place. Adjust it, then say "done".'
         return ('The panel is in position and free drive is on. Adjust the panel, then say or type "done". '
                 "I will then keep holding the panel while you screw it in place.")
 
@@ -146,7 +146,7 @@ class MessageManager:
 
     def get_left_panel_message(self, *, spoken=False) -> str:
         if spoken:
-            return "I have let go and stepped back."
+            return "I've let go of the panel."
         return "I have released the panel and moved away from it."
 
     def get_holding_message(self, *, spoken=False) -> str:
@@ -155,18 +155,21 @@ class MessageManager:
                 return 'Holding the panel. Say "leave" to release it.'
             return 'I will keep holding the panel. Say or type "leave" when I should release it and move away.'
         if spoken:
-            return 'I will hold the panel for you.'
+            return 'Holding the panel. Say "done" when it\'s screwed.'
         return 'I will keep holding the panel. I will then ask before releasing the panel.'
 
     def get_pending_message(self, task, *, spoken=False) -> str:
         if spoken:
             staying = {
-                config.TASK_LEAVE: " I will keep holding the panel.",
-                config.TASK_LEAVE_HANDOVER: " I will stay here.",
+                config.TASK_LEAVE: " Still holding the panel.",
+                config.TASK_LEAVE_HANDOVER: " I'll stay here.",
             }.get(task.task_id, "")
-            said = {"later": "Okay, later then.", "timeout": "No answer, so I will leave it for now."}
-            return said.get(task.pending_reason, "Okay, I will leave it for now.") + staying
-        reason = {"timeout": "No reply received.", "later": "Okay, later."}.get(task.pending_reason, "Okay.")
+            said = {"later": f"Okay, I'll ask again in {config.LATER_ASK_AGAIN_S:g} seconds.",
+                    "timeout": "No answer, I'll leave it for now."}
+            return said.get(task.pending_reason, "Okay, I'll leave it for now.") + staying
+        reason = {"timeout": "No reply received.",
+                  "later": f"Okay, I will ask again in {config.LATER_ASK_AGAIN_S:g} seconds."
+                  }.get(task.pending_reason, "Okay.")
         staying = {
             config.TASK_LEAVE: " I will keep holding the panel.",
             config.TASK_LEAVE_HANDOVER: " I will stay at the hand-over position.",
@@ -179,38 +182,39 @@ class MessageManager:
     def get_human_does_message(self, task, *, spoken=False) -> str:
         """A no to a task the human can do: they do it, and the robot does not ask again."""
         if spoken:
-            return "Alright, it is all yours."
+            return 'Alright, it\'s yours. Say "done" when ready.'
         phrase = REQUEST_PHRASES.get(task.task_id, f"execute {task.task_instance_id}")
-        return f'Okay, you do this one. If you want me to do it after all, say or type "{phrase}".'
+        return ('Alright, I will leave this one to you. Say or type "done" when you are ready, and I will '
+                f'move on to the next task. If you want me to do it after all, say or type "{phrase}".')
 
     def get_return_home_permission_message(self, *, spoken=False) -> str:
         if spoken:
-            return 'I have stopped. Shall I head home? Say "home", or "no" to guide me by hand.'
+            return 'I stopped. Would you like me to head home?'
         return 'Robot stopped in a validated recovery zone. Type "home" to return home or "no" for manual recovery.'
 
     def get_manual_recovery_message(self, *, spoken=False) -> str:
         if spoken:
-            return 'Guide me by hand, then say "done".'
+            return 'Free drive is on. Move the arm by hand, then say "done".'
         return 'Free-drive mode is enabled. Complete the manual adjustment and type "done" when finished.'
 
     def get_acknowledgement(self, event_type: EventType, *, spoken=False) -> str:
         if spoken:
             return {
                 EventType.H_ACCEPT: "Great, on it.",
-                EventType.H_REFUSE: "Alright, it is all yours.",
+                EventType.H_REFUSE: "Alright, it's yours.",
                 EventType.H_DEFER: "Okay, later then.",
                 EventType.H_PAUSE: "Paused.",
-                EventType.H_RESUME: "Carrying on.",
-                EventType.H_RESTART: "Starting over.",
-                EventType.H_CANCEL: "Okay, stopped.",
-                EventType.H_SPEEDUP: "A little faster.",
-                EventType.H_SLOWDOWN: "A little slower.",
-                EventType.H_DONE: "Thanks, got it.",
-                EventType.ROBOT_SUCCESS: "All done.",
-                EventType.ROBOT_HOMED: "I am back home.",
-                EventType.H_FREE_GO: 'Free drive is on. Guide the panel, then say "done".',
-                EventType.H_RETURN_HOME: "Heading home.",
-                EventType.H_MANUAL_RECOVERY: "Okay, guide me by hand.",
+                EventType.H_RESUME: "Resumed.",
+                EventType.H_RESTART: "Restarting.",
+                EventType.H_CANCEL: "Canceled.",
+                EventType.H_SPEEDUP: "Speed increased.",
+                EventType.H_SLOWDOWN: "Speed decreased.",
+                EventType.H_DONE: "Done signal sent.",
+                EventType.ROBOT_SUCCESS: "Task complete.",
+                EventType.ROBOT_HOMED: "Back home.",
+                EventType.H_FREE_GO: 'Free drive on. Adjust the panel, then say "done".',
+                EventType.H_RETURN_HOME: "Returning home.",
+                EventType.H_MANUAL_RECOVERY: "Manual recovery started.",
             }.get(event_type, "Okay.")
         messages = {
             EventType.H_ACCEPT: "Robot task accepted.",
@@ -281,6 +285,13 @@ class MessageManager:
                 return f'Say "give me the {item}" to take it first.'
             return f'I am holding the {item} out to you. Say or type "give me the {item}" to take it, or cancel.'
         return "I am not holding a panel."
+
+    def get_speed_limit_message(self, faster: bool, *, spoken=False) -> str:
+        """Faster at the top speed, slower at the lowest: the speed did not change."""
+        if spoken:
+            return "Already at top speed." if faster else "Already at lowest speed."
+        return ("The robot is already at its top speed." if faster
+                else "The robot is already at its lowest speed.")
 
     def get_invalid_event_message(
         self,
