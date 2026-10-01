@@ -311,8 +311,8 @@ TCP_WEIGHT_RANGE_N = (5.0, 60.0)
 TCP_WEIGHT_STEADY_S = 10.0
 
 # -- Demo opening (run_communication.py --demo; 2_decision_making/demo_opening.py) --
-# The first panel starts from the dialogue, not recognition: the robot offers to pull
-# the cables, then asks about the lift.
+# The first panel starts from the dialogue, not recognition: the robot asks to start
+# the assembly, offers to pull the cables, then asks about the lift.
 # The robot's cable pull takes a fixed time: ask about the lift this long after it
 # starts, a little before it ends, so a yes lifts the panel right after the pull.
 # PLACEHOLDER: set from the robot program's pull duration.
@@ -320,6 +320,8 @@ DEMO_LIFT_ASK_AFTER_PULL_START_S = 45.0
 # When the human pulls the cables instead, ask about the lift after Pull Cables'
 # duration limit (TASK_OVERRUN_STAT of its annotated duration, p95 = 6 s) plus this.
 DEMO_HUMAN_PULL_BUFFER_S = 10.0
+# "Shall we start the assembly?" answered no or later: asked again this much later.
+DEMO_START_REASK_S = 30.0
 # The task detectors (screw detection) in the demo: their signals count.
 DEMO_DETECTORS_MODE = "on"
 
@@ -367,7 +369,17 @@ VOICE_MODEL_PATH = "3_communication/vosk_fallback/models/vosk-model-small-en-us-
 VOICE_INPUT_DEVICE_NAME = None
 VOICE_OUTPUT_DEVICE_NAME = None
 VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
-VOICE_TTS_RATE = 220
+VOICE_TTS_RATE = 190
+# The robot's voice: the first installed SAPI voice whose name contains this (None:
+# the system default). Zira is Windows' built-in female English voice.
+VOICE_TTS_VOICE = "Zira"
+# Answers to the robot's own questions need no name ("yes"). Anything else -- idle, or
+# while the robot works -- counts only after it: "hey UR, bring the tool", so talk in the
+# room is not taken for a command; with it on, the robot also listens while idle.
+# Emergency words (stop, pause, cancel) never need it. The name alone gives this long
+# to say the command. Not with GPT voice.
+VOICE_WAKE_WORD = True
+VOICE_WAKE_WINDOW_S = 5.0
 VOICE_POST_TTS_GUARD_SECONDS = 0.2
 VOICE_MAX_ATTEMPTS = 2
 VOICE_ERROR_RETRY_SECONDS = 5.0

@@ -93,12 +93,8 @@
       <section class="controls">
         <div class="panel">
           <h2>1 · Human (recognition)</h2>
-          <p class="hint">Fake an LSTM trigger — the robot then asks on the watch.</p>
-          <div class="grid" id="triggers">
-            <button class="sim-btn" data-step="0">H0 Pull cables<small>→ R: lift panel</small></button>
-            <button class="sim-btn" data-step="4">H4 Connect pipes<small>→ R: bring clamp tool</small></button>
-            <button class="sim-btn" data-step="5">H5 Clamp<small>→ R: return clamp tool</small></button>
-          </div>
+          <p class="hint">Fake a recognized human step. The task database decides what the robot offers.</p>
+          <div class="grid" id="triggers"></div>
         </div>
 
         <div class="panel">
@@ -136,11 +132,12 @@
         <div class="panel">
           <h2>Try these flows</h2>
           <ol class="scenarios">
-            <li>H0 → Yes → watch it lift → “Guide by hand?” Yes → Done → Screwed → release → connector.</li>
-            <li>H0 → wait 20 s (no answer) → task goes pending → “Start now”.</li>
-            <li>H4 → In 5 s → Cancel during the countdown.</li>
-            <li>H0 → Yes → Pause → Resume → faster/slower.</li>
-            <li>H0 → Yes → hold Stop → Return home. Repeat with “Safe home zone” off → manual recovery.</li>
+            <li>Pull Cables → Yes → watch it lift → free drive: Done → Screwed → release → connector.</li>
+            <li>Connector arrives → “Take it now?” Not yet → “Give me” → it moves away after 2 s.</li>
+            <li>Clamp tool arrives → Yes → “Move away?” Yes. While a task runs, answer the next question (“After this”).</li>
+            <li>Idle → “Done” on your current step, or ask the robot for a task (Pull cables, Bring tool…).</li>
+            <li>Pull Cables → wait 20 s (no answer) → task goes pending → “Start now”.</li>
+            <li>Pull Cables → Yes → hold Stop → Return home. Repeat with “Safe home zone” off → manual recovery.</li>
           </ol>
         </div>
       </section>
@@ -174,6 +171,25 @@
         return data;
       }
 
+      // One button per recognition step (config.STEP_NAMES), built once.
+      let stepsKey = null;
+      function renderSteps(steps) {
+        const key = steps.join("|");
+        if (key === stepsKey) return;
+        stepsKey = key;
+        $("#triggers").innerHTML = "";
+        steps.forEach((name, i) => {
+          const b = document.createElement("button");
+          b.className = "sim-btn";
+          b.dataset.step = String(i);
+          b.textContent = name;
+          const small = document.createElement("small");
+          small.textContent = `step ${i}`;
+          b.appendChild(small);
+          $("#triggers").appendChild(b);
+        });
+      }
+
       let lastState = undefined;
       watch.onChange((e) => {
         if (e.type === "command") {
@@ -192,6 +208,7 @@
         if (s.sim) {
           $("#auto-robot").checked = s.sim.auto_robot;
           $("#safe-home").checked = s.sim.safe_home;
+          renderSteps(s.sim.steps || []);
         } else {
           $("#state-chip").textContent = state + " · LIVE (sim panel disabled)";
         }

@@ -224,6 +224,7 @@
       b.className = "btn";
       b.dataset.role = a.role;
       b.dataset.command = a.command;
+      if (a.task_name) b.dataset.taskName = a.task_name;   // a robot task request
       if (a.hold) {
         b.dataset.hold = "1";
         b.setAttribute("aria-label", `${a.label} (press and hold)`);
@@ -233,7 +234,8 @@
     }
 
     function renderActions(screen) {
-      const key = st.skin + "|" + screen.screen + "|" + screen.actions.map((a) => a.command).join(",");
+      const key = st.skin + "|" + screen.screen + "|"
+        + screen.actions.map((a) => a.command + (a.task_name ? `:${a.task_name}` : "")).join(",");
       if (key === st.actionsKey) return;
       st.actionsKey = key;
       const box = $("actions");
@@ -445,7 +447,7 @@
         else toast("Press and hold to stop");
         return;
       }
-      send(b.dataset.command);
+      send(b.dataset.command, b.dataset.taskName ? { task_name: b.dataset.taskName } : {});
     });
 
     function tickClock() {

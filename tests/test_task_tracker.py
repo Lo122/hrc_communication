@@ -25,7 +25,7 @@ from task_tracker import TaskTracker
 DATABASE = TaskDatabase.from_json(ROOT / config.TASK_DATABASE_PATH)
 TRANSITIONS = TransitionModel.from_csv(ROOT / config.TASK_TRANSITION_TABLE_PATH)
 RECOGNIZED = config.STEP_NAMES
-SUPPORT = ("Bring Tool", "Bring Connector", "Bring back Tool")
+SUPPORT = ("Bring Connector",)
 
 
 class FakeClock:
@@ -50,12 +50,13 @@ def logged(logger, text):
 class TaskDatabaseTests(unittest.TestCase):
     def test_loads_pieces_executors_and_trigger_rules(self):
         self.assertEqual([piece.piece_id for piece in DATABASE.pieces], [1, 2, 3])
-        self.assertEqual(len(DATABASE.pieces[0].task_list), 10)
+        self.assertEqual(len(DATABASE.pieces[0].task_list), 8)
         self.assertTrue(DATABASE.can_execute("Lift", "Robot"))
         self.assertFalse(DATABASE.can_execute("Screw", "Robot"))
-        rule = DATABASE.trigger_rules["Bring Tool"]
+        self.assertFalse(DATABASE.can_execute("Bring Tool", "Robot"))  # taken out on purpose
+        rule = DATABASE.trigger_rules["Bring Connector"]
         self.assertEqual((rule.previous_tasks, rule.progress, rule.done_signal),
-                         (("Screw", "Connect Cables"), 0.5, False))
+                         (("Screw",), 0.0, False))
         leave = DATABASE.trigger_rules["Leave from the panel"]
         self.assertEqual((leave.previous_tasks, leave.done_signal), (("Screw",), True))
         # A robot action outside the pieces' assembly: never blocks a piece's completion.
@@ -84,7 +85,7 @@ class TaskDatabaseTests(unittest.TestCase):
 
     def test_rejects_bad_piece_ids_and_chains(self):
         with self.assertRaisesRegex(ValueError, "Piece id"):
-            _parse_piece_ids("m + 1", ("Screw",), "Bring Tool")
+            _parse_piece_ids("m + 1", ("Screw",), "Bring Connector")
         rule = TriggerRule("Pull Cables", ("Clamp Coupling",), 0.5, robot_tasks=("Lift", "Pull Cables"))
         with self.assertRaisesRegex(ValueError, "must start with"):
             TaskDatabase(DATABASE.pieces, DATABASE.executors, {"Pull Cables": rule})
@@ -111,6 +112,8 @@ class TaskTrackerTests(unittest.TestCase):
         self.assertEqual((self.status("Pull Cables"), self.tracker.get("Pull Cables", 1).executor),
                          (T.WORKING, "Human"))
         for name in RECOGNIZED:
+            if self.tracker.get(name, 1) is None:  # "Non Related Task": no task of its own
+                continue
             if self.status(name) in (T.WORKING, T.DONE):
                 continue
             expected = (T.PENDING if TRANSITIONS.probability("Pull Cables", name) >= config.PENDING_MIN_PROBABILITY
@@ -208,13 +211,15 @@ class TaskTrackerTests(unittest.TestCase):
         self.assertEqual(self.tracker.confirm_done().task_name, "Screw")
 
     def test_robot_states_mirror_and_never_undo_done(self):
-        self.tracker.set_robot_status("Bring Tool", 1, T.PENDING)
-        self.assertEqual(self.status("Bring Tool"), T.PENDING)
-        self.tracker.set_robot_status("Bring Tool", 1, T.WORKING)
-        self.assertEqual((self.status("Bring Tool"), self.tracker.get("Bring Tool", 1).executor), (T.WORKING, "Robot"))
-        self.tracker.set_robot_status("Bring Tool", 1, T.DONE)
-        self.tracker.set_robot_status("Bring Tool", 1, T.PENDING)
-        self.assertEqual((self.status("Bring Tool"), self.tracker.get("Bring Tool", 1).executor), (T.DONE, "Robot"))
+        self.tracker.set_robot_status("Bring Connector", 1, T.PENDING)
+        self.assertEqual(self.status("Bring Connector"), T.PENDING)
+        self.tracker.set_robot_status("Bring Connector", 1, T.WORKING)
+        self.assertEqual((self.status("Bring Connector"), self.tracker.get("Bring Connector", 1).executor),
+                         (T.WORKING, "Robot"))
+        self.tracker.set_robot_status("Bring Connector", 1, T.DONE)
+        self.tracker.set_robot_status("Bring Connector", 1, T.PENDING)
+        self.assertEqual((self.status("Bring Connector"), self.tracker.get("Bring Connector", 1).executor),
+                         (T.DONE, "Robot"))
 
     def test_robot_completion_of_human_only_task_is_rejected(self):
         self.tracker.set_robot_status("Screw", 1, T.DONE)
@@ -246,7 +251,7 @@ class TaskTrackerTests(unittest.TestCase):
         self.tracker.start_task("Align", 2)  # the human aligns piece 2 in free drive
         self.assertEqual((self.status("Clamp Coupling"), self.tracker.get("Clamp Coupling", 1).inferred),
                          (T.DONE, True))
-        self.assertNotEqual(self.status("Bring back Tool"), T.DONE)  # support tasks stay open
+        self.assertNotEqual(self.status("Bring Connector"), T.DONE)  # support tasks stay open
         self.assertEqual((self.status("Align", 2), self.tracker.get("Align", 2).executor), (T.WORKING, "Human"))
         self.assertEqual(self.status("Pull Cables", 2), T.DONE)
         self.assertEqual((self.tracker.reference_task, self.tracker.reference_piece_id), ("Align", 2))
@@ -284,10 +289,10 @@ class RobotTriggerPolicyTests(unittest.TestCase):
         self.tracker.on_task_recognized("Align", 0.9)
         self.assertEqual(self.names(), [])
         self.tracker.on_task_recognized("Screw", 0.5)
-        self.assertEqual(self.names(), [])  # Bring Tool's "Condition": Screw done
+        self.assertEqual(self.names(), [])  # Bring Connector's "Condition": Screw done, or a signal
         self.tracker.confirm_done("Screw")
         self.assertEqual([item for item in self.policy.candidates() if item[0] != "Leave from the panel"],
-                         [("Bring Tool", 1), ("Bring Connector", 1)])
+                         [("Bring Connector", 1)])
 
     def test_condition_alternatives_accept_detector_signals(self):
         self.tracker.on_task_recognized("Screw", 0.6)
@@ -296,7 +301,6 @@ class RobotTriggerPolicyTests(unittest.TestCase):
         self.assertNotIn("Bring Connector", self.names())
         self.tracker.set_signal("Screw", 1, "screw count", 0.5)
         self.assertIn(("Bring Connector", 1), self.policy.candidates())
-        self.assertNotIn("Bring Tool", self.names())  # its condition wants Screw done itself
         other, _ = make_tracker()
         other.on_task_recognized("Screw", 0.6)
         other.set_signal("Screw", 1, "TCP weight change", True)
@@ -306,7 +310,7 @@ class RobotTriggerPolicyTests(unittest.TestCase):
     def test_confirmed_previous_task_counts_as_full_progress(self):
         self.tracker.on_task_recognized("Screw", 0.1)
         self.tracker.confirm_done("Screw")
-        self.assertIn("Bring Tool", self.names())
+        self.assertIn("Bring Connector", self.names())
 
     def test_done_signal_rule_needs_confirmation_not_recognized_progress(self):
         self.tracker.on_task_recognized("Screw", 1.0)
@@ -321,17 +325,19 @@ class RobotTriggerPolicyTests(unittest.TestCase):
     def test_each_task_is_offered_once_per_piece(self):
         self.tracker.on_task_recognized("Screw", 0.9)
         self.tracker.confirm_done("Screw")
-        self.assertIn("Bring Tool", self.names())
-        self.policy.mark_offered("Bring Tool", 1)
-        self.assertEqual(self.tracker.get("Bring Tool", 1).status, T.PENDING)
-        self.assertNotIn("Bring Tool", self.names())
+        self.assertIn("Bring Connector", self.names())
+        self.policy.mark_offered("Bring Connector", 1)
+        self.assertEqual(self.tracker.get("Bring Connector", 1).status, T.PENDING)
+        self.assertNotIn("Bring Connector", self.names())
 
     def test_done_or_working_tasks_are_not_offered(self):
-        self.tracker.confirm_done("Bring Tool", "Human")
         self.tracker.set_robot_status("Bring Connector", 1, T.WORKING)
         self.tracker.on_task_recognized("Screw", 0.9)
+        self.tracker.set_signal("Screw", 1, "screw count", 1.0)  # its condition holds
         self.assertEqual(self.names(), [])
-        self.assertFalse(self.policy.allows("Bring Tool", 1))
+        self.assertFalse(self.policy.allows("Bring Connector", 1))
+        self.tracker.confirm_done("Bring Connector", "Human")
+        self.assertFalse(self.policy.allows("Bring Connector", 1))
 
     def test_piece_id_sends_lift_and_pull_cables_to_the_right_piece(self):
         self.tracker.on_task_recognized("Pull Cables", 0.6)
@@ -340,7 +346,7 @@ class RobotTriggerPolicyTests(unittest.TestCase):
         for name in ("Place", "Align", "Screw", "Connect Cables"):
             self.tracker.on_task_recognized(name, 0.3)
         self.tracker.on_task_recognized("Clamp Coupling", 0.6)
-        # "n + 1"; Bring back Tool also waits for Screw done, which never came.
+        # "n + 1".
         self.assertEqual(self.policy.candidates(), [("Pull Cables", 2), ("Lift", 2)])
 
     def test_no_piece_after_the_last_one(self):
@@ -369,6 +375,8 @@ class TransitionFilterTests(unittest.TestCase):
         self.assertIn(align, allowed[place])
         for index, targets in allowed.items():
             self.assertIn(index, targets)
+            if not TRANSITIONS.is_observed(RECOGNIZED[index]):
+                continue  # a step the table never saw leave ("Non Related Task") is unrestricted
             for target in targets:
                 if target != index:
                     self.assertGreaterEqual(TRANSITIONS.probability(RECOGNIZED[index], RECOGNIZED[target]), 0.02)

@@ -69,7 +69,7 @@ class SnapshotTests(unittest.TestCase):
         lift = self.rule(snapshot, "Lift")
         self.assertEqual((lift["triggering"], lift["verdict"], lift["offered"]),
                          (["Pull Cables"], "already offered", [1]))
-        self.assertEqual(self.rule(snapshot, "Bring Tool")["verdict"], "waiting for its previous task")
+        self.assertEqual(self.rule(snapshot, "Bring Connector")["verdict"], "waiting for its previous task")
 
     def test_condition_and_held_panel_explain_what_waits(self):
         self.emit(E.HUMAN_TASK_UPDATE, step_id=PULL, round_id=7, progress=0.8)
@@ -95,8 +95,8 @@ class SnapshotTests(unittest.TestCase):
         snapshot = self.snapshot()
         leave = self.rule(snapshot, "Leave from the panel")
         self.assertEqual((leave["offers"], leave["verdict"]), ([], "the robot holds no panel of that piece"))
-        self.assertEqual(snapshot["robot"]["active"]["task"], "Bring Tool")
-        self.assertEqual([entry["task_name"] for entry in snapshot["robot"]["queue"]], ["Bring Connector"])
+        self.assertEqual(snapshot["robot"]["active"]["task"], "Bring Connector")
+        self.assertEqual(snapshot["robot"]["queue"], [])
 
     def test_timeline_keeps_events_transitions_and_status_changes(self):
         self.emit(E.HUMAN_LOCATION_UPDATE, x=0, y=0, z=0)

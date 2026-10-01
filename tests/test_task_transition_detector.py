@@ -348,7 +348,7 @@ class TaskSignalHandlingTests(unittest.TestCase):
         self.signal(DONE_SIGNAL)
         self.assertEqual((self.tracker.get("Screw", 1).status, self.tracker.get("Screw", 1).executor),
                          (T.DONE, "Human"))
-        self.assertEqual(self.manager.active_task.task_id, config.TASK_BRING_CLAMPING_TOOL)
+        self.assertEqual(self.manager.active_task.task_id, config.TASK_BRING_CONNECTOR)
 
     def test_signal_for_unknown_task_is_ignored(self):
         self.signal(DONE_SIGNAL, task_name="Paint")

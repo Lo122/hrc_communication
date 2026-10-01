@@ -22,7 +22,7 @@ from communication_manager import CommunicationManager
 from decision_view import DecisionView, TimelineLogger, build_snapshot
 from demo_opening import build_demo_opening
 from event_queue import EventQueue
-from events import Event, EventType
+from events import Event, EventType, RobotTaskState
 from gh_dispatcher import GHDispatcher
 from logger import EventLogger
 from message_manager import MessageManager
@@ -89,16 +89,17 @@ class HRCSystem:
         self.cli = CLIInterface(self.command_parser)
         self.message_manager = MessageManager(reactive=reactive)
 
+        wake_word = config.VOICE_WAKE_WORD and not config.VOICE_GPT_ENABLED
         if config.VOICE_ENABLED:
             self.voice = VoiceInterface(
                 model_path=ROOT / config.VOICE_MODEL_PATH,
                 gpt_enabled=config.VOICE_GPT_ENABLED,
-                phrases=CommandParser.phrases(),
+                phrases=CommandParser.voice_phrases(wake_word),
                 device_name=config.VOICE_INPUT_DEVICE_NAME,
                 output_device_name=config.VOICE_OUTPUT_DEVICE_NAME,
                 timeout=config.VOICE_LISTEN_TIMEOUT_SECONDS,
             )
-            self.tts = TTSManager(config.VOICE_TTS_RATE)
+            self.tts = TTSManager(config.VOICE_TTS_RATE, voice=config.VOICE_TTS_VOICE)
         else:
             self.voice = NullVoiceInterface()
             self.tts = NullTTSManager()
@@ -115,6 +116,8 @@ class HRCSystem:
             max_attempts=config.VOICE_MAX_ATTEMPTS,
             retry_seconds=config.VOICE_ERROR_RETRY_SECONDS,
             logger=self.logger,
+            wake_word=wake_word,
+            wake_window_seconds=config.VOICE_WAKE_WINDOW_S,
         )
 
         self.udp_sender = UDPSender(config.UDP_HOST, config.UDP_PORT)
@@ -177,14 +180,22 @@ class HRCSystem:
                 self.communication.queue_message("Command not recognized.")
 
     def _current_state(self):
-        task = getattr(self, "task_manager", None)
-        return task.active_task.state if task and task.active_task else None
+        manager = getattr(self, "task_manager", None)
+        if manager is None:
+            return None
+        if manager.active_task is not None:
+            return manager.active_task.state
+        # A question outside any robot task (the demo opening's) waits for a yes / no too.
+        return RobotTaskState.R_WAITING_RESPONSE if manager.question is not None else None
 
     def _current_voice_context(self) -> VoiceContext:
         manager = getattr(self, "task_manager", None)
         task = manager.active_task if manager else None
         reactive = getattr(self, "reactive", False)
         if task is None:
+            if manager is not None and manager.question is not None:
+                return VoiceContext(RobotTaskState.R_WAITING_RESPONSE,
+                                    task_instance_id=f"question {manager.question}", reactive=reactive)
             return VoiceContext(None, reactive=reactive)
         return VoiceContext(task.state, task.task_id, task.task_instance_id, reactive=reactive)
 

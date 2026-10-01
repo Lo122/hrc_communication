@@ -200,9 +200,6 @@ class ReactiveTaskManager(TaskManager):
         tracked = self.tracker.get(name, active.piece_id) if name is not None else None
         return tracked is None or tracked.status != TaskStatus.DONE
 
-    def _location(self, piece_id: int) -> str | None:
-        return next((piece.location for piece in self.tracker.database.pieces if piece.piece_id == piece_id), None)
-
     # -- no initiative -------------------------------------------------------------------
 
     def _handle_screw_done(self, event: Event) -> None:

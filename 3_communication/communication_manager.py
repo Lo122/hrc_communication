@@ -30,10 +30,11 @@ STATE_MODES = {
 }
 
 
-def listening_mode(context: VoiceContext) -> ListeningMode:
-    """How to listen in this context. With no robot task, only reactive mode listens: the
-    human commands the robot from idle there, while otherwise the robot asks first."""
-    if context.state is None and context.reactive:
+def listening_mode(context: VoiceContext, wake_word: bool = False) -> ListeningMode:
+    """How to listen in this context. With no robot task it listens in reactive mode --
+    the human commands the robot from idle there -- and with the wake word, since only
+    "hey UR, ..." counts then; otherwise the robot asks first."""
+    if context.state is None and (context.reactive or wake_word):
         return ListeningMode.CONTINUOUS
     return STATE_MODES.get(context.state, ListeningMode.OFF)
 
@@ -41,8 +42,15 @@ def listening_mode(context: VoiceContext) -> ListeningMode:
 class CommunicationManager:
     def __init__(self, cli, parser, voice, tts, event_sink, state_provider,
                  guard_seconds=0.25, max_attempts=2, retry_seconds=5.0, logger=None,
-                 context_provider=None):
+                 context_provider=None, wake_word=False, wake_window_seconds=5.0):
         self.cli = cli
+        # wake_word: while the robot waits for an answer (SINGLE mode) the answer counts as
+        # said; at any other time -- idle, while it works -- only after the robot's name
+        # ("hey UR, bring the tool"), emergency words excepted (CommandParser.addressed).
+        # The name alone opens a window of wake_window_seconds for the command.
+        self.wake_word = wake_word
+        self.wake_window_seconds = wake_window_seconds
+        self._woken_until = 0.0
         self.parser = parser
         self.voice = voice
         self.tts = tts
@@ -65,6 +73,24 @@ class CommunicationManager:
         self._context = VoiceContext(None)
         self._question_context = None
         self._question = None
+
+    def _addressed(self, text: str) -> str | None:
+        """The command in a recognized utterance; "" for the name alone, None for speech
+        not meant for the robot."""
+        if not self.wake_word:
+            return text
+        command = self.parser.addressed(text)
+        if self.mode is ListeningMode.SINGLE:
+            # The robot asked: the reply needs no name (said with one, it is dropped).
+            return text if command is None else command
+        if command == "":
+            self._woken_until = time.monotonic() + self.wake_window_seconds
+            return ""
+        if command is None and time.monotonic() < self._woken_until:
+            command = text  # the name came just before, on its own
+        if command is not None:
+            self._woken_until = 0.0
+        return command
 
     def _current_context(self, state) -> VoiceContext:
         return self.context_provider() if self.context_provider else VoiceContext(state)
@@ -116,7 +142,7 @@ class CommunicationManager:
                 })
         self._context = context
         self._state = state
-        self.mode = listening_mode(context)
+        self.mode = listening_mode(context, self.wake_word)
         self._generation += 1
         self._retry_at = None
         self.voice.stop_listening()
@@ -161,7 +187,16 @@ class CommunicationManager:
                 continue
             self._generation += 1
             if outcome == "text":
-                event = self.parser.parse(detail, source="human_voice")
+                command = self._addressed(detail)
+                if not command:
+                    # Not meant for the robot, or its name alone with the command to
+                    # follow: keep listening, without a word.
+                    if self.logger is not None:
+                        self.logger.log_message("Voice input not addressed to the robot." if command is None
+                                                else "Voice wake word heard.", {"text": detail})
+                    self._retry_at = time.monotonic()
+                    continue
+                event = self.parser.parse(command, source="human_voice")
                 if event is not None:
                     event.task_instance_id = self._context.task_instance_id
                     self._errors = 0
@@ -193,8 +228,8 @@ class CommunicationManager:
                 if self._attempts == 1 and self.max_attempts > 1:
                     choices = "yes, no, or later" if self._state == RobotTaskState.R_WAITING_RESPONSE else "yes or no"
                     self._announce(
-                        f"Please say {choices}, or type your reply.", permission=True,
-                        speech=f"Please say {choices}.",
+                        f"Sorry, I did not catch that. Please say {choices}, or type your reply.",
+                        permission=True, speech=f"Sorry, I did not catch that. Please say {choices}.",
                     )
                     continue
             self._retry_at = time.monotonic()

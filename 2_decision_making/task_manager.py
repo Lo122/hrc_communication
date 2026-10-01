@@ -100,6 +100,10 @@ class TaskManager:
         self.recognition_active = recognition_activation_s <= 0
         self._recognition_seen = False
         self._demo_waiting = False
+        # A yes / no question that belongs to no robot task (the demo opening's), by
+        # key, and one to ask once the event being handled is done (queue_question).
+        self.question: str | None = None
+        self._queued_question: str | None = None
 
         self.active_task: RobotTask | None = None
         # A robot task asked about while the active one still runs (_offer_in_advance),
@@ -152,6 +156,7 @@ class TaskManager:
             EventType.H_REQUEST_ROBOT_TASK: self._handle_robot_request,
             EventType.H_NEXT_PIECE: self._handle_next_piece,
             EventType.DEMO_START: self._handle_demo_start,
+            EventType.DEMO_QUESTION: self._handle_demo_question,
             EventType.MANUAL_CONTROL: self._handle_manual_control,
             EventType.RECOGNITION_ACTIVE: self._handle_recognition_active,
             EventType.SCHEDULED_OFFER: self._handle_scheduled_offer,
@@ -185,6 +190,7 @@ class TaskManager:
             return
 
         handler(event)
+        self._ask_queued_question()
         self._start_next_waiting()
         self._report_status()
 
@@ -299,7 +305,8 @@ class TaskManager:
         return config.TRACKED_TO_ROBOT_TASK.get(task_name) == config.TASK_LEAVE
 
     def _start_next_waiting(self) -> None:
-        while self.active_task is None and self.waiting_triggers and not self._leave_pending():
+        while (self.active_task is None and self.question is None and self.waiting_triggers
+               and not self._leave_pending()):
             entry = self.waiting_triggers.popleft()
             task_name, piece_id = entry["task_name"], entry["piece_id"]
             if not self._tracked_task_open(task_name, piece_id):
@@ -336,6 +343,11 @@ class TaskManager:
         """The demo's scripted opening runs: recognition and detectors are ignored."""
         return self.demo is not None and self.demo.active
 
+    @property
+    def in_opening(self) -> bool:
+        """The demo opening runs, or waits for recognition to start: the robot leads."""
+        return self.demo_opening or self._demo_waiting
+
     def _handle_demo_start(self, event: Event) -> None:
         if self.demo is None or self.tracker is None:
             self._log_invalid(event, "No demo opening configured.")
@@ -361,6 +373,64 @@ class TaskManager:
         self.manual_results.appendleft({"t": time.time(), "op": payload.get("op"), "ok": ok, "text": text})
         self.logger.log_message(f"Manual control: {text}" if ok else f"Manual control refused: {text}",
                                 {key: value for key, value in payload.items() if value is not None})
+
+    # -- questions outside a robot task (the demo opening's) ---------------------
+
+    def ask_question(self, question: str, message: str, *, speech: str | None = None) -> None:
+        """Ask a yes / no question that belongs to no robot task. H_ACCEPT, H_REFUSE and
+        H_DEFER answer it while no robot task is active; the demo opening decides what
+        the answer does."""
+        self.question = question
+        self.logger.log_message("Asking a question.", {"question": question})
+        self.cli.show_permission_request(message, speech=speech)
+
+    def queue_question(self, question: str) -> None:
+        """Ask the question once the event being handled is done, after its own messages."""
+        self._queued_question = question
+
+    def schedule_question(self, question: str, delay: float) -> None:
+        self.timer.schedule(self._question_timer(question), delay,
+                            Event(EventType.DEMO_QUESTION, "timer", payload={"question": question}))
+
+    def cancel_question(self, question: str) -> None:
+        self.timer.cancel(self._question_timer(question))
+        if self.question == question:
+            self.question = None
+        if self._queued_question == question:
+            self._queued_question = None
+
+    @staticmethod
+    def _question_timer(question: str) -> str:
+        return f"question {question}"
+
+    def _ask_queued_question(self) -> None:
+        question, self._queued_question = self._queued_question, None
+        if question is not None and self.demo is not None:
+            self.demo.ask(self, question)
+
+    def _handle_demo_question(self, event: Event) -> None:
+        if not self.demo_opening:
+            self._log_invalid(event, "No demo opening running to ask its question.")
+            return
+        self.demo.ask(self, event.payload.get("question"))
+
+    def _answer_question(self, event: Event) -> bool:
+        """A yes / no / later answers the open question when no robot task waits for one."""
+        if self.question is None or self.active_task is not None:
+            return False
+        question, self.question = self.question, None
+        self.logger.log_message("Question answered.", {"question": question, "answer": event.event_type.name})
+        if self.demo is not None:
+            self.demo.on_answer(self, question, event.event_type)
+        return True
+
+    def withdraw_pending(self, task_name: str, piece_id: int) -> None:
+        """Drop a pending robot offer the human has taken over."""
+        task = self._pooled_task(task_name, piece_id)
+        if task is not None:
+            self.pending_pool.remove(task.task_instance_id)
+            self.logger.log_message("Removed pending robot task: the human does it.",
+                                    {"task_instance_id": task.task_instance_id})
 
     # -- recognition warm-up ----------------------------------------------------
 
@@ -494,8 +564,11 @@ class TaskManager:
         self._advance_answer = event
         self.logger.log_message("Answer kept until the current robot task succeeds.",
                                 {"task_instance_id": task.task_instance_id, "answer": event.event_type.name})
-        self.cli.show_message(self.message_manager.get_advance_acknowledgement(event.event_type),
-                              speech=self.message_manager.get_advance_acknowledgement(event.event_type, spoken=True))
+        location = self._location(task.piece_id)
+        self.cli.show_message(
+            self.message_manager.get_command_message(task.task_id, task.piece_id, location, queued=True),
+            speech=self.message_manager.get_command_message(task.task_id, task.piece_id, location,
+                                                            queued=True, spoken=True))
         return True
 
     def _start_advance(self, finished: RobotTask) -> bool:
@@ -605,7 +678,10 @@ class TaskManager:
             self.cli.show_message(f"There is no open {name} to mark done.", speech="Nothing to mark done.")
             return
         self._withdraw_finished_offers()
-        self.cli.show_message(f"Okay, {task.task_name} is done.", speech=f"{task.task_name} done.")
+        self.cli.show_message(f"Okay, {task.task_name} is done.",
+                              speech=f"Thanks, {task.task_name.lower()} is done.")
+        if self.demo is not None:
+            self.demo.on_task_done(self, task.task_name, task.piece_id)
         self._offer_triggered_tasks()
 
     def _handle_task_signal(self, event: Event) -> None:
@@ -869,7 +945,7 @@ class TaskManager:
         self.ros.publish_human_location(xyz, timestamp, keypoints, velocity)
 
     def _handle_accept(self, event: Event) -> None:
-        if self._answer_in_advance(event):
+        if self._answer_question(event) or self._answer_in_advance(event):
             return
         if self.active_task is not None:
             if self.active_task.state == RobotTaskState.R_WAITING_FREE_DRIVE:
@@ -888,13 +964,21 @@ class TaskManager:
         self.timer.cancel_response_timer()
         self._transition(task, RobotTaskState.R_ACCEPTED, event, "Human accepted task.")
         self.gh_dispatcher.dispatch_task(task)
+        # Say what it will do, and to which panel: "Okay, I will lift the left panel."
+        location = self._location(task.piece_id)
         self.cli.show_message(
-            self.message_manager.get_acknowledgement(event.event_type),
-            speech=self.message_manager.get_acknowledgement(event.event_type, spoken=True),
+            self.message_manager.get_command_message(task.task_id, task.piece_id, location),
+            speech=self.message_manager.get_command_message(task.task_id, task.piece_id, location, spoken=True),
         )
 
+    def _location(self, piece_id: int) -> str | None:
+        """Where the piece sits ("left"), from the task database."""
+        if self.tracker is None:
+            return None
+        return next((piece.location for piece in self.tracker.database.pieces if piece.piece_id == piece_id), None)
+
     def _handle_refuse(self, event: Event) -> None:
-        if self._answer_in_advance(event):
+        if self._answer_question(event) or self._answer_in_advance(event):
             return
         task = self._require_active_in(
             event,
@@ -943,8 +1027,9 @@ class TaskManager:
         if self.active_task is task:
             self.active_task = None
         self.tracker.hand_to_human(name, task.piece_id)
-        self.cli.show_message(self.message_manager.get_human_does_message(task),
-                              speech=self.message_manager.get_human_does_message(task, spoken=True))
+        if self._queued_question is None:  # else the question that follows speaks for it
+            self.cli.show_message(self.message_manager.get_human_does_message(task),
+                                  speech=self.message_manager.get_human_does_message(task, spoken=True))
         return True
 
     def _move_to_pending(self, task: RobotTask, state: RobotTaskState, event: Event,
@@ -953,6 +1038,8 @@ class TaskManager:
         task.pending_reason = reason
         self.pending_pool.add(task)
         self.active_task = None
+        if self._queued_question is not None:
+            return  # the question that follows speaks for it
         self.cli.show_message(
             self.message_manager.get_pending_message(task),
             speech=self.message_manager.get_pending_message(task, spoken=True),
@@ -961,7 +1048,7 @@ class TaskManager:
     def _handle_defer(self, event: Event) -> None:
         """Later: the task waits in the pending pool until the human asks for it (by
         name, or "execute <id>") -- then it is asked about again. No timer."""
-        if self._answer_in_advance(event):
+        if self._answer_question(event) or self._answer_in_advance(event):
             return
         task = self._require_active(event, RobotTaskState.R_WAITING_RESPONSE)
         if task is None:

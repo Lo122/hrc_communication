@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -22,14 +23,20 @@ from message_manager import MessageManager
 from pending_task import PendingTaskPool
 from state_machine import StateMachine
 from task_manager import TaskManager
+from task_tracker import build_task_tracking
+from demo_opening import build_demo_opening
 from timer_manager import TimerManager
-from watch_screens import _STATE_SCREENS, build_screen
+from watch_screens import _STATE_SCREENS, allowed_commands, build_screen
+
+ROOT = Path(__file__).resolve().parents[1]
+PULL = config.STEP_NAMES.index("Pull Cables")
 
 
 class SimSystem:
-    """Real TaskManager with ROS/Grasshopper replaced by recording fakes."""
+    """Real TaskManager (with the task database) and ROS/Grasshopper replaced by
+    recording fakes."""
 
-    def __init__(self):
+    def __init__(self, demo=False):
         self.event_queue = EventQueue()
         self.gh_dispatcher = MagicMock()
         self.ros = MagicMock()
@@ -42,6 +49,7 @@ class SimSystem:
         self.pending_pool = PendingTaskPool()
         self.state_machine = StateMachine()
         self.timer = TimerManager(event_callback=self.event_queue.put)
+        self.tracker, self.policy = build_task_tracking(ROOT, logger=MagicMock())
         self.task_manager = TaskManager(
             state_machine=self.state_machine,
             pending_pool=self.pending_pool,
@@ -51,6 +59,9 @@ class SimSystem:
             gh_dispatcher=self.gh_dispatcher,
             ros_communication=self.ros,
             logger=MagicMock(),
+            task_tracker=self.tracker,
+            trigger_policy=self.policy,
+            demo=build_demo_opening() if demo else None,
         )
 
     def process_events(self) -> None:
@@ -80,6 +91,100 @@ class ScreenTests(unittest.TestCase):
         self.assertEqual(screen.screen, "pending")
         self.assertEqual(screen.actions[0].command, "H_EXECUTE_PENDING_TASK")
 
+    def test_idle_offers_only_the_robot_tasks_next_in_the_flow(self):
+        machine = StateMachine()
+        tracker, _ = build_task_tracking(ROOT, logger=MagicMock())
+
+        def requests(**context):
+            screen = build_screen(None, [], machine, 0, tracker=tracker, **context)
+            return [a.task_name for a in screen.actions if a.command == "H_REQUEST_ROBOT_TASK"]
+
+        self.assertEqual(requests(), ["Pull Cables"])  # the lift waits for the cables
+        tracker.on_task_recognized("Pull Cables", 0.5)
+        screen = build_screen(None, [], machine, 0, tracker=tracker)
+        self.assertEqual(screen.eyebrow, "PULL CABLES")
+        # The human pulls them: confirm it, nothing to ask the robot for yet.
+        self.assertEqual([(a.command, a.task_name) for a in screen.actions], [("H_TASK_DONE", None)])
+        tracker.confirm_done("Pull Cables")
+        self.assertEqual(requests(), ["Lift"])
+        for name in ("Lift", "Place", "Align"):
+            tracker.confirm_done(name)
+        self.assertEqual(requests(), [])
+        tracker.on_task_recognized("Screw", 0.3)
+        self.assertEqual(requests(), ["Bring Connector"])  # the database has the robot bring only the connector
+        for action in build_screen(None, [], machine, 0, tracker=tracker).actions:
+            self.assertLessEqual(len(action.label), 12)
+        self.assertEqual(requests(opening=True), [])  # the opening dialogue leads
+
+    def test_opening_questions(self):
+        machine = StateMachine()
+        for question in ("start", "continue"):
+            screen = build_screen(None, [], machine, 0, question=question)
+            self.assertEqual(screen.screen, "ask-" + question)
+            self.assertEqual(allowed_commands(None, [], machine, question=question),
+                             {("H_ACCEPT", None), ("H_REFUSE", None)})
+            for action in screen.actions:
+                self.assertLessEqual(len(action.label), 12)
+
+    def test_no_to_moving_away_reads_not_yet(self):
+        machine = StateMachine()
+        for task_id, label in ((config.TASK_LEAVE, "Not yet"), (config.TASK_LEAVE_HANDOVER, "Not yet"),
+                               (config.TASK_PULL_CABLES, "I'll do it")):
+            task = MagicMock(state=RobotTaskState.R_WAITING_RESPONSE, task_id=task_id, updated_at=0.0)
+            labels = {a.command: a.label for a in build_screen(task, [], machine, 0).actions}
+            self.assertEqual(labels["H_REFUSE"], label)
+
+    def test_next_task_asked_while_the_robot_runs(self):
+        machine = StateMachine()
+        task = MagicMock(state=RobotTaskState.R_EXECUTING, task_id=config.TASK_PULL_CABLES, updated_at=0.0)
+        advance = MagicMock(task_id=config.TASK_LIFT_PANEL)
+        screen = build_screen(task, [], machine, 0, advance=advance)
+        self.assertEqual(screen.screen, "ask-next")
+        self.assertEqual(screen.title, "Lift the panel?")
+        self.assertEqual([a.command for a in screen.actions], ["H_ACCEPT", "H_REFUSE", "H_CANCEL"])
+        self.assertTrue(screen.actions[-1].hold)
+
+        # Answered: the running screen is back, and says what follows.
+        screen = build_screen(task, [], machine, 0, advance=advance, advance_answer="H_ACCEPT")
+        self.assertEqual(screen.screen, "running")
+        self.assertEqual(screen.detail, "Next: lift the panel")
+
+
+class WatchOpeningTests(unittest.IsolatedAsyncioTestCase):
+    """--demo: the watch carries the opening dialogue."""
+
+    async def asyncSetUp(self):
+        self.system = SimSystem(demo=True)
+        self.bridge = HRCBridge(self.system, simulate=True, sim_task_seconds=0.01)
+        self.system.event_queue.put(Event(EventType.DEMO_START, "test"))
+        self.system.process_events()
+
+    async def asyncTearDown(self):
+        self.system.timer.cancel_response_timer()
+        for name in list(self.system.timer.timers):
+            self.system.timer.cancel(name)
+
+    async def cmd(self, command):
+        return await self.bridge.submit_watch_command(WatchCommand(command=command))
+
+    async def test_start_then_the_human_pulls_then_moves_on(self):
+        snap = await self.bridge.watch_state()
+        self.assertEqual(snap["screen"]["screen"], "ask-start")
+        snap = await self.cmd("H_ACCEPT")
+        self.assertEqual((snap["task"]["task_id"], snap["screen"]["screen"]),
+                         (config.TASK_PULL_CABLES, "ask"))
+        snap = await self.cmd("H_REFUSE")              # the human pulls them
+        self.assertEqual(snap["screen"]["screen"], "ask-continue")
+        self.assertEqual(snap["pending"], [])
+        snap = await self.cmd("H_ACCEPT")              # move on
+        self.assertEqual((snap["task"]["task_id"], snap["screen"]["screen"]),
+                         (config.TASK_LIFT_PANEL, "ask"))
+
+    async def test_no_robot_requests_while_the_opening_waits(self):
+        snap = await self.cmd("H_REFUSE")              # not yet
+        self.assertEqual(snap["screen"]["screen"], "idle")
+        self.assertEqual(snap["screen"]["actions"], [])
+
 
 class WatchFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -99,25 +204,79 @@ class WatchFlowTests(unittest.IsolatedAsyncioTestCase):
     async def cmd(self, command):
         return await self.bridge.submit_watch_command(WatchCommand(command=command))
 
+    async def request(self, task_name):
+        return await self.bridge.submit_watch_command(
+            WatchCommand(command="H_REQUEST_ROBOT_TASK", task_name=task_name))
+
     async def test_full_lift_panel_flow(self):
-        await self.bridge.simulate(SimRequest(event="RECOGNITION_TRIGGER", step_id=0))
+        await self.bridge.simulate(SimRequest(event="RECOGNITION_TRIGGER", step_id=PULL))
         snap = await self.bridge.watch_state()
+        self.assertEqual(snap["task"]["task_id"], config.TASK_LIFT_PANEL)
         self.assertEqual(snap["screen"]["screen"], "ask")
         self.assertIsNotNone(snap["screen"]["countdown_deadline"])
 
         await self.cmd("H_ACCEPT")
         await self.step()
+        if config.LIFT_ASKS_FREE_DRIVE:
+            snap = await self.bridge.watch_state()
+            self.assertEqual(snap["state"], "R_WAITING_FREE_DRIVE")
+            await self.cmd("H_FREE_GO")
         snap = await self.bridge.watch_state()
-        self.assertEqual(snap["state"], "R_WAITING_FREE_DRIVE")
+        self.assertEqual(snap["screen"]["screen"], "free-drive")
 
-        await self.cmd("H_FREE_GO")
         await self.cmd("H_DONE")
         snap = await self.cmd("H_SCREW_DONE")
         self.assertEqual(snap["task"]["task_id"], config.TASK_LEAVE)
         self.assertEqual(snap["screen"]["screen"], "ask")
 
+    async def test_connector_hand_over_not_yet_then_give_me(self):
+        # Asked for by voice ("bring the connector"); the watch answers from then on.
+        self.system.event_queue.put(Event(EventType.H_REQUEST_ROBOT_TASK, "test",
+                                          payload={"task_name": "Bring Connector"}))
+        self.system.process_events()
+        await self.cmd("H_ACCEPT")
+        await self.step()
+        snap = await self.bridge.watch_state()
+        self.assertEqual(snap["screen"]["screen"], "ask-handover")
+
+        snap = await self.cmd("H_REFUSE")
+        self.assertEqual(snap["screen"]["screen"], "holding-handover")
+        self.system.ros.publish_gripper_open.assert_not_called()
+
+        snap = await self.cmd("H_HANDOVER")
+        self.system.ros.publish_gripper_open.assert_called_once()
+        self.assertEqual(snap["task"]["task_id"], config.TASK_LEAVE_HANDOVER)
+        self.assertEqual(snap["screen"]["screen"], "defer")
+        self.assertEqual(snap["screen"]["detail"], "Stepping back")
+        self.assertEqual(snap["screen"]["countdown_total"],
+                         config.HANDOVER_LEAVE_DELAY_S[config.TASK_BRING_CONNECTOR])
+
+    async def test_idle_request_and_task_done(self):
+        snap = await self.bridge.watch_state()
+        self.assertEqual(snap["screen"]["screen"], "idle")
+        requests = [a["task_name"] for a in snap["screen"]["actions"]
+                    if a["command"] == "H_REQUEST_ROBOT_TASK"]
+        self.assertEqual(requests, ["Pull Cables"])
+        for not_yet in ("Lift", "Bring back Tool"):     # not on the screen
+            with self.assertRaises(HTTPException) as raised:
+                await self.request(not_yet)
+            self.assertEqual(raised.exception.status_code, 409)
+
+        snap = await self.request("Pull Cables")
+        self.assertEqual(snap["task"]["task_id"], config.TASK_PULL_CABLES)
+        self.assertEqual(snap["screen"]["screen"], "ask")
+
+        snap = await self.cmd("H_DEFER")              # later: to the pending pool
+        self.assertEqual(snap["screen"]["screen"], "pending")
+
+    async def test_no_hands_the_task_to_the_human(self):
+        await self.request("Pull Cables")
+        snap = await self.cmd("H_REFUSE")             # I'll do it
+        self.assertEqual(snap["screen"]["screen"], "idle")
+        self.assertEqual(snap["pending"], [])
+
     async def test_rejects_command_not_on_screen(self):
-        await self.bridge.simulate(SimRequest(event="RECOGNITION_TRIGGER", step_id=0))
+        await self.bridge.simulate(SimRequest(event="RECOGNITION_TRIGGER", step_id=PULL))
         with self.assertRaises(HTTPException) as raised:
             await self.cmd("H_PAUSE")
         self.assertEqual(raised.exception.status_code, 409)
@@ -126,7 +285,7 @@ class WatchFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 422)
 
     async def test_pause_speed_and_stop_to_home(self):
-        await self.bridge.simulate(SimRequest(event="RECOGNITION_TRIGGER", step_id=4))
+        await self.bridge.simulate(SimRequest(event="RECOGNITION_TRIGGER", step_id=PULL))
         await self.cmd("H_ACCEPT")
         self.bridge.sim.auto_robot = False
         self.system.event_queue.put(Event(EventType.ROBOT_RUNNING, "test"))
@@ -144,12 +303,19 @@ class WatchFlowTests(unittest.IsolatedAsyncioTestCase):
         snap = await self.bridge.watch_state()
         self.assertEqual(snap["screen"]["screen"], "idle")
 
-    async def test_refused_task_can_be_started_from_pending(self):
-        await self.bridge.simulate(SimRequest(event="RECOGNITION_TRIGGER", step_id=5))
-        snap = await self.cmd("H_REFUSE")
+    async def test_deferred_task_can_be_started_from_pending(self):
+        await self.bridge.simulate(SimRequest(event="RECOGNITION_TRIGGER", step_id=PULL))
+        snap = await self.cmd("H_DEFER")  # later: pending (a no hands it to the human)
         self.assertEqual(snap["screen"]["screen"], "pending")
         snap = await self.cmd("H_EXECUTE_PENDING_TASK")
-        self.assertEqual(snap["state"], "R_ACCEPTED")
+        # Offered again: it only starts after a fresh yes.
+        self.assertEqual(snap["state"], "R_WAITING_RESPONSE")
+
+    async def test_unknown_step_is_rejected(self):
+        with self.assertRaises(HTTPException) as raised:
+            await self.bridge.simulate(SimRequest(event="RECOGNITION_TRIGGER",
+                                                  step_id=len(config.STEP_NAMES)))
+        self.assertEqual(raised.exception.status_code, 422)
 
 
 class SpeechTests(unittest.IsolatedAsyncioTestCase):

@@ -18,7 +18,27 @@ uv run python -B Interface\server.py
 ```
 
 Run this command instead of `run_communication.py`, because both programs would
-otherwise try to bind the same recognition-event UDP port. Recognition events
+otherwise try to bind the same recognition-event UDP port. The voice (microphone
+and speech) runs inside this same process; it needs no port of its own.
+
+Two pages, on two ports:
+
+| Port | Page | What it shows |
+|---|---|---|
+| `http://127.0.0.1:8765/` | the watch | only the watch, as the participant sees it (`/sim` adds the Wizard-of-Oz panel) |
+| `http://127.0.0.1:8770/` | flow & signals | the decision view: every piece's tasks, detector signals, trigger rules and why they fire, the robot queue, a timeline |
+
+For the demo, open with the scripted dialogue
+(`2_decision_making/demo_opening.py`): "Shall we start the assembly?", then
+"Shall I pull the cables for you?" -- and, if the human pulls them, "Shall we
+move on to the next step?" -- then the lift:
+
+```powershell
+uv run python -B Interface\server.py --demo
+```
+
+It starts once recognition has reported in and warmed up
+(`config.RECOGNITION_ACTIVATION_S`); with `--simulate --demo` it starts at once. Recognition events
 arrive through the existing configured event transport. For an H0 test without
 the recognition process, start with:
 

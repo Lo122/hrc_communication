@@ -69,6 +69,8 @@ class EventType(Enum):
     H_NEXT_PIECE = auto()
     # The demo's scripted opening starts (2_decision_making/demo_opening.py).
     DEMO_START = auto()
+    # The demo opening asks one of its questions again (payload question): TaskManager.schedule_question.
+    DEMO_QUESTION = auto()
     # The operator changed the decision layer's state from the live view (payload "op"
     # plus its fields): 2_decision_making/manual_control.py.
     MANUAL_CONTROL = auto()

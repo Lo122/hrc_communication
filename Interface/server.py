@@ -89,6 +89,8 @@ class WatchCommand(BaseModel):
 
     command: str
     task_instance_id: str | None = None
+    # H_REQUEST_ROBOT_TASK only: which robot task (task database name).
+    task_name: str | None = None
 
 
 SimEventName = Literal[
@@ -117,6 +119,7 @@ class RuntimeSettings:
     debug_piece_id: int = 1
     simulate: bool = False
     sim_task_seconds: float = 16.0
+    demo: bool = False             # open with the scripted dialogue (demo_opening.py)
     voice: bool = True
     force_voice: bool = False      # keep the real mic/TTS even with --simulate
     free_port: bool = False
@@ -203,8 +206,10 @@ class HRCBridge:
         debug_piece_id: int = 1,
         simulate: bool = False,
         sim_task_seconds: float = 16.0,
+        demo: bool = False,
     ):
         self.system = system
+        self.demo = demo
         self.receiver = receiver
         self.start_cli = start_cli
         self.debug_trigger = debug_trigger
@@ -353,21 +358,29 @@ class HRCBridge:
             )
         if not settings.voice:
             config.VOICE_ENABLED = False
+        if settings.simulate and settings.demo:
+            # No recognition process to warm up in the simulator: open right away.
+            config.RECOGNITION_ACTIVATION_S = 0.0
 
         # rosbridge already fails softly (console fallback), but the voice stack
         # raises when the Vosk model or the microphone is missing. That should
         # not take the whole interface down: start without voice and say so, so
-        # the watch, the timers and the robot side still run.
+        # the watch, the timers and the robot side still run. Voice is only
+        # blamed when the retry without it succeeds; anything else (a broken
+        # task database, say) is raised as it is.
         try:
-            system = build_system()
+            system = build_system(demo=settings.demo)
         except Exception as exc:
             if not config.VOICE_ENABLED:
                 raise
+            config.VOICE_ENABLED = False
+            try:
+                system = build_system(demo=settings.demo)
+            except Exception:
+                raise exc from None
             print(f"[voice] disabled: {exc}")
             print("[voice] starting without speech input/output "
                   "(use --no-voice to skip this attempt next time).")
-            config.VOICE_ENABLED = False
-            system = build_system()
         if settings.free_port:
             _free_udp_port(settings.event_host, settings.event_port)
         try:
@@ -399,6 +412,7 @@ class HRCBridge:
             debug_piece_id=settings.debug_piece_id,
             simulate=settings.simulate,
             sim_task_seconds=settings.sim_task_seconds,
+            demo=settings.demo,
         )
 
     async def start(self) -> None:
@@ -407,6 +421,9 @@ class HRCBridge:
         self.system.system_running = True
         if self.start_cli:
             self.system.start_cli_thread()
+        if self.demo:
+            # "Shall we start the assembly?" -- once recognition is active.
+            self.system.start_demo()
         if self.debug_trigger:
             self.system.event_queue.put(
                 Event(
@@ -539,11 +556,25 @@ class HRCBridge:
         machine = getattr(self.system, "state_machine", None)
         return machine or self.system.task_manager.state_machine
 
+    def _screen_context(self) -> dict[str, Any]:
+        """What the screen needs besides the active task: the robot task asked about
+        while the active one runs, and the assembly tracker for the idle screen."""
+
+        manager = self.system.task_manager
+        return {
+            "advance": getattr(manager, "advance_task", None),
+            "advance_answer": getattr(manager, "advance_answer", None),
+            "tracker": getattr(manager, "tracker", None),
+            "question": getattr(manager, "question", None),
+            "opening": getattr(manager, "in_opening", False),
+        }
+
     def _snapshot(self) -> dict[str, Any]:
         now = time.time()
         task = self.system.task_manager.active_task
         pending = self._pending()
-        screen = build_screen(task, pending, self._state_machine(), now)
+        screen = build_screen(task, pending, self._state_machine(), now,
+                              **self._screen_context())
         return {
             "mode": "sim" if self.sim is not None else "live",
             "server_time": now,
@@ -575,6 +606,8 @@ class HRCBridge:
             "sim": None if self.sim is None else {
                 "auto_robot": self.sim.auto_robot,
                 "safe_home": self.sim.safe_home,
+                # The human steps recognition can report, in step_id order.
+                "steps": list(config.STEP_NAMES),
             },
         }
 
@@ -601,8 +634,10 @@ class HRCBridge:
         async with self._process_lock:
             task = self.system.task_manager.active_task
             pending = self._pending()
-            allowed = allowed_commands(task, pending, self._state_machine())
-            if payload.command not in allowed:
+            allowed = allowed_commands(task, pending, self._state_machine(),
+                                       **self._screen_context())
+            task_name = payload.task_name if payload.command == "H_REQUEST_ROBOT_TASK" else None
+            if (payload.command, task_name) not in allowed:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=f"{payload.command} is not available right now.",
@@ -614,6 +649,9 @@ class HRCBridge:
                 instance_id = instance_id or ids[0]
                 if instance_id not in ids:
                     raise HTTPException(status.HTTP_409_CONFLICT, "Pending task not found.")
+            elif task is None:
+                # Idle-screen inputs (task done, robot request) belong to no robot task.
+                instance_id = None
             elif instance_id is not None and instance_id != task.task_instance_id:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -627,6 +665,7 @@ class HRCBridge:
                     event_type=EventType[payload.command],
                     source="human_watch",
                     task_instance_id=instance_id,
+                    payload={"task_name": task_name} if task_name else {},
                 )
             )
             self.system.process_events()
@@ -643,7 +682,7 @@ class HRCBridge:
                 if payload.safe_home is not None:
                     self.sim.set_safe_home(payload.safe_home)
             elif payload.event == "RECOGNITION_TRIGGER":
-                if payload.step_id not in config.TRIGGER_RULES:
+                if payload.step_id is None or not 0 <= payload.step_id < len(config.STEP_NAMES):
                     raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown human step.")
                 self.sim.trigger(payload.step_id)
             else:
@@ -697,9 +736,10 @@ def create_app(
     # FastAPI converts each returned FileResponse directly into an HTTP response.
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
-        # The watch is the interface. With --simulate the root also carries the
-        # Wizard-of-Oz panel; live, it is the watch alone.
-        return static_file("simulator.html" if runtime_settings.simulate else "watch.html")
+        # The watch alone. The whole flow -- every task, signal and decision -- is
+        # on the decision view's own port (config.DECISION_VIEW_PORT); the
+        # Wizard-of-Oz panel stays on /sim.
+        return static_file("watch.html")
 
     # State-driven watch: /watch = watch only (open on a phone), /sim = watch
     # plus the Wizard-of-Oz simulator panel.
@@ -786,6 +826,12 @@ def main() -> None:
         help="Run without robot/ROS/voice; open /sim for the watch simulator.",
     )
     parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Open with the scripted dialogue: start the assembly?, pull the "
+             "cables?, then the lift (2_decision_making/demo_opening.py).",
+    )
+    parser.add_argument(
         "--free-port",
         action="store_true",
         help="Stop whatever still holds the recognition UDP port, then start.",
@@ -815,12 +861,17 @@ def main() -> None:
         debug_piece_id=args.debug_piece_id,
         simulate=args.simulate,
         sim_task_seconds=args.sim_task_seconds,
+        demo=args.demo,
         voice=not args.no_voice,
         force_voice=args.voice and not args.no_voice,
         free_port=args.free_port,
     )
+    shown_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
+    print(f"Watch:          http://{shown_host}:{args.port}/")
+    if config.DECISION_VIEW_PORT:
+        print(f"Flow & signals: http://{config.DECISION_VIEW_HOST}:{config.DECISION_VIEW_PORT}/")
     if args.simulate:
-        print(f"Watch simulator: http://{args.host}:{args.port}/sim")
+        print(f"Simulator:      http://{shown_host}:{args.port}/sim")
     uvicorn.run(create_app(settings), host=args.host, port=args.port)
 
 

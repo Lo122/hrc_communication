@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 from types import SimpleNamespace
 
@@ -15,7 +16,10 @@ from message_manager import MessageManager
 from pending_task import PendingTaskPool
 from state_machine import StateMachine
 from task_manager import TaskManager
+from task_tracker import build_task_tracking
 from timer_manager import TimerManager
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class RecordingQueue:
@@ -45,6 +49,8 @@ class BusinessSystem:
         self.gh_dispatcher = MagicMock()
         self.ros = MagicMock()
         self.timer = TimerManager(event_callback=self.event_queue.put)
+        # Robot offers come from the task database's trigger rules.
+        tracker, policy = build_task_tracking(ROOT, logger=MagicMock())
         self.task_manager = TaskManager(
             state_machine=StateMachine(),
             pending_pool=PendingTaskPool(),
@@ -54,6 +60,8 @@ class BusinessSystem:
             gh_dispatcher=self.gh_dispatcher,
             ros_communication=self.ros,
             logger=MagicMock(),
+            task_tracker=tracker,
+            trigger_policy=policy,
         )
 
     def process_events(self) -> None:
@@ -138,6 +146,51 @@ class HRCBridgeTests(unittest.IsolatedAsyncioTestCase):
         permission = await bridge.permission_state()
 
         self.assertFalse(permission.available)
+
+
+class BuildLiveVoiceFallbackTests(unittest.TestCase):
+    """build_live drops voice only when voice is what failed."""
+
+    def setUp(self):
+        import config
+        from unittest.mock import patch
+
+        self.config = config
+        voice_enabled = config.VOICE_ENABLED
+        self.addCleanup(setattr, config, "VOICE_ENABLED", voice_enabled)
+        config.VOICE_ENABLED = True
+        receiver = patch("Interface.server.UDPEventReceiver")
+        receiver.start()
+        self.addCleanup(receiver.stop)
+        self.patch = patch
+
+    def build(self, build_system):
+        from Interface.server import RuntimeSettings
+
+        with self.patch("communication_runtime.build_system", build_system):
+            return HRCBridge.build_live(RuntimeSettings())
+
+    def test_voice_failure_starts_without_voice(self):
+        def build_system(demo=False):
+            if self.config.VOICE_ENABLED:
+                raise RuntimeError("no microphone")
+            return MagicMock()
+
+        self.build(build_system)
+        self.assertFalse(self.config.VOICE_ENABLED)
+
+    def test_other_failure_is_raised_as_it_is(self):
+        def build_system(demo=False):
+            raise ValueError("Invalid task database")
+
+        import contextlib
+        import io
+
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            with self.assertRaisesRegex(ValueError, "Invalid task database"):
+                self.build(build_system)
+        self.assertNotIn("[voice] disabled", printed.getvalue())
 
 
 if __name__ == "__main__":
