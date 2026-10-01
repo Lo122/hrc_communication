@@ -1,0 +1,73 @@
+{
+    "task pool": [
+        {
+            "piece_id": "1",
+            "piece_location": "left",
+            "task_list": ["Pull Cables", "Lift", "Place", "Align", "Screw", "Connect Cables", "Clamp Coupling", "Bring Connector"]
+        },
+        {
+            "piece_id": "2",
+            "piece_location": "middle",
+            "task_list": ["Pull Cables", "Lift", "Place", "Align", "Screw", "Connect Cables", "Clamp Coupling", "Bring Connector"]
+        },
+        {
+            "piece_id": "3",
+            "piece_location": "right",
+            "task_list": ["Pull Cables", "Lift", "Place", "Align", "Screw", "Connect Cables", "Clamp Coupling", "Bring Connector"]
+        }
+    ],
+
+    "Task excutor": {
+        "Pull Cables": ["Human", "Robot"],
+        "Lift": ["Human", "Robot"],
+        "Place": ["Human", "Robot"],
+        "Align": ["Human"],
+        "Screw": ["Human"],
+        "Connect Cables": ["Human"],
+        "Clamp Coupling": ["Human"],
+        "Bring Connector": ["Human", "Robot"],
+        "Leave from the panel": ["Robot"]
+    },
+
+    "Robot task trigger info": {
+        "Pull Cables": {
+            "previous task": ["Connect Cables", "Clamp Coupling"],
+            "Progress": 0.5,
+            "Piece id": "n + 1",
+            "robot task": ["Pull Cables", "Lift"]
+        },
+
+        "Lift": {
+            "previous task": ["Pull Cables", "Clamp Coupling", "Connect Cables"],
+            "Progress": 0.5,
+            "Piece id": {"Pull Cables": "n", "Clamp Coupling": "n + 1", "Connect Cables": "n + 1"},
+            "robot task": ["Lift"]
+        },
+
+        "Leave from the panel": {
+            "previous task": ["Screw"],
+            "Done signal": true,
+            "Piece id": "n",
+            "robot task": ["Leave from the panel"]
+        },
+
+        "Bring Connector": {
+            "previous task": ["Screw"],
+            "Condition": {"Screw": [{"Done signal": true}, {"screw count": 0.5}, {"TCP weight change": true}]},
+            "Piece id": "n",
+            "robot task": ["Bring Connector"]
+        }
+    },
+
+    "Action Confidence Threshold": {
+        "Pull Cables": 0.5,
+        "Lift": 0.5,
+        "Place": 0.5,
+        "Align": 0.5,
+        "Screw": 0.4,
+        "Connect Cables": 0.25,
+        "Clamp Coupling": 0.25
+    },
+
+    "Rule": {}
+}

@@ -157,8 +157,8 @@ RECOGNITION_PROBABILITY_PUBLISH_DELTA = 0.05
 SEQUENCE_DEFAULT_MIN_CONFIDENCE = 0.5
 SEQUENCE_PRIOR_STRENGTH = 0.5
 # A switch away from the reference task counts once it wins this many task updates in a
-# row (staying is immediate). Also how long the model must show the task after Clamp
-# Coupling before Clamp Coupling counts as done (CLAMP_COUPLING_DONE_* below).
+# row (staying is immediate). Also how long recognition must show another step before
+# Clamp Coupling, once under way, counts as done (CLAMP_COUPLING_DONE_* below).
 SEQUENCE_CONFIRM_EVENTS = 3
 # Recognition's model needs this long to recognize motion once it runs: its task
 # updates count, and the demo opening starts, only this many seconds after the
@@ -263,13 +263,18 @@ SCREW_MIN_INTERVAL_S = 3.0
 # recognition moves on to another step while it is up).
 CONNECT_CABLES_DONE_HIGH = 0.60
 CONNECT_CABLES_DONE_LOW = 0.15
-# Clamp Coupling is recognized too unreliably to wait for: it is done once this statistic
-# of its annotated duration (TASK_DURATION_STATS_PATH: p95 14.2 s, p90 10.6 s, mean
-# 6.9 s) has passed since it started or Connect Cables ended -- or once recognition shows
-# a task the transition table expects after it with at least this probability (Pull
-# Cables 0.25, Lift 0.30: the next panel) for SEQUENCE_CONFIRM_EVENTS updates in a row.
-CLAMP_COUPLING_DONE_STAT = "p95"
-DURATION_DONE_NEXT_MIN_PROBABILITY = 0.2
+# Clamp Coupling the same way, from its own progress -- or recognition moving on to
+# another step for SEQUENCE_CONFIRM_EVENTS updates in a row while it is up, since its
+# progress starts up high. Its progress starts at ~0.5 once the clamping is recognized,
+# peaks at ~0.55 and falls back as it ends (run 2026-10-01 09:59, model S3_10fps_8s_bg05:
+# 0.50 -> 0.57 -> 0.18 over 15 s; tune on more takes). Not by time, nor by the next
+# panel's task being recognized: those marked it done while nobody clamped -- 14.2 s
+# after Connect Cables, recognition showing "Non Related Task" throughout -- and again
+# the moment the operator reset it, whenever the human was on Pull Cables (run
+# 2026-10-01 10:30). If recognition never shows it, "clamped" / "clamp done" (or the
+# live view) says it is done; until then the human stays on that piece.
+CLAMP_COUPLING_DONE_HIGH = 0.50
+CLAMP_COUPLING_DONE_LOW = 0.25
 # The wrench the force detectors read: a ROS_TOPICS key (geometry_msgs/WrenchStamped),
 # published by 4_execution/eval/read_ur_live_data.py --publish-ros -- which
 # run_system.py starts in its own window (--no-robot-live to skip it).

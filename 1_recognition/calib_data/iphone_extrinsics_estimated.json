@@ -1,0 +1,57 @@
+{
+  "T_world_from_camera": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      -0.08715574274765817,
+      0.9961946980917455,
+      0.0
+    ],
+    [
+      0.0,
+      -0.9961946980917455,
+      -0.08715574274765817,
+      1.3
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "ground_z": 0.0,
+  "T_world_from_robot_base": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "marker_id": null,
+  "notes": "SYNTHETIC / NOT CALIBRATED -- eyeballed from a single screenshot of the lab, NOT measured. Do not use for real measurements. Same frame convention as iphone_extrinsics_synthetic.json (ground = XY plane at z=0, +Z up, camera looking along world +Y, image plane spanning world XZ), but pitched 5 deg downward and raised to 1.3 m, which matches the scene in that screenshot better than a perfectly level 1.2 m camera. Pitch/height are rough guesses; yaw and the X/Y position are arbitrary choices (nothing in a markerless image can fix them). For a real pitch/roll, read ARKit gravity from Record3D (camera_utils/iphone_connection.py's camera_gravity_direction_cv) instead of guessing. source=hand-written estimate, capture_rotate90=90 (matches iphone_intrinsics.json)."
+}

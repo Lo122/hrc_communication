@@ -74,7 +74,8 @@ Usage:
                 --extrinsics-file extrinsics_3840x2160_obs.json `
                 --body-calibration 1_recognition/calib_data/body_uid-08.json `
                 --fp16 `
-                --loop-hz 10
+                --loop-hz 10 `
+                --show-probabilities
 
 
 One run directory then holds what recognition saw and what communication did about

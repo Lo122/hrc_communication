@@ -95,7 +95,7 @@ Record3D / iPhone:
         --use-reported-intrinsics --num-samples 60 `
         --method marker --marker-id 0 --marker-length-mm 200 --aruco-dict DICT_4X4_50 `
         --ground-z -0.62 `
-        --board-rpy-deg 90 0 0
+        --board-rpy-deg 0 0 90 `
         --intrinsics-output 1_recognition/calib_data/iphone_intrinsics.json `
         --extrinsics-output 1_recognition/calib_data/iphone_extrinsics.json
         """

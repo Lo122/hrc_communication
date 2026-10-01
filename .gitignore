@@ -69,7 +69,7 @@ temp/
 **/*.pt
 **/*.pth
 **/*.npz
-**/*.json
+1_recognition/best_model/**/*.json
 
 1_recognition/results/**
 

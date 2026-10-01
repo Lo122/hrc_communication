@@ -1,0 +1,29 @@
+{
+  "bone_lengths": {
+    "0-1": 0.11393881055979117,
+    "1-2": 0.3477039243259296,
+    "2-3": 0.3094706541795452,
+    "0-4": 0.11609691174494602,
+    "4-5": 0.33254276856115234,
+    "5-6": 0.2957571133186776,
+    "0-7": 0.22693547584443474,
+    "7-8": 0.2386834809659007,
+    "8-9": 0.185588498062432,
+    "9-10": 0.04286508688844019,
+    "8-11": 0.14826097747933437,
+    "11-12": 0.22039042376768114,
+    "12-13": 0.17191261546925543,
+    "8-14": 0.143236125797928,
+    "14-15": 0.23362508653869885,
+    "15-16": 0.26106101735869286
+  },
+  "stature_m": 0.0589203029375604,
+  "measured_stature_m": 1.74,
+  "nose_height_m": 0.05479588173193117,
+  "n_pose_frames": 130,
+  "n_height_frames": 117,
+  "subject_id": "uid-08",
+  "notes": "130 accepted / 663 rejected frames; 117 with a usable ground-plane height",
+  "units": "bone_lengths are MotionBERT root-relative units (NOT meters, see body_calibration.py's docstring); stature_m/measured_stature_m/nose_height_m are meters.",
+  "stature_fields": "stature_m is measured by the pipeline from the ground plane; measured_stature_m is a tape measurement and WINS when both are present. Set measured_stature_m by hand, or with setup/calibrate_body.py --measured-height."
+}

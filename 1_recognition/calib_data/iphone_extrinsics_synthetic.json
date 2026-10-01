@@ -1,0 +1,57 @@
+{
+  "T_world_from_camera": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      -1.0,
+      0.0,
+      1.2
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "ground_z": 0.0,
+  "T_world_from_robot_base": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "marker_id": null,
+  "notes": "SYNTHETIC / NOT CALIBRATED -- hand-written for pipeline smoke-testing without an ArUco marker. Assumes an idealised level camera; do not use for real measurements. World frame: ground is the XY plane (z=0), +Z up. Camera sits at (0, 0, 1.2) m, perfectly level (0 deg tilt/roll), looking along world +Y, so its image plane spans the world XZ plane. Column mapping of R_world_from_camera (OpenCV camera axes -> world): cam +X (right) -> world +X, cam +Y (down) -> world -Z, cam +Z (forward) -> world +Y. Resulting readings: y = distance in front of the camera, x = lateral offset (+ to the camera's right), z = height above the ground. To change the mounting height, edit row 3's last entry (1.2). source=hand-written, capture_rotate90=90 (matches iphone_intrinsics.json)."
+}

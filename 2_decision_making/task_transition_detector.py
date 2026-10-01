@@ -3,10 +3,9 @@
 Recognition's step output says which task the human is probably on, and TaskManager
 does not ask it at all while a robot lift leads. A detector reports that something
 specific has happened, from a signal it can read reliably: the shape of recognition's
-Screw progress over one screw (or Connect Cables' over the whole task), the TCP force
-while the robot holds a panel, or -- for Clamp Coupling, which recognition shows too
-unreliably -- how long it has been going and whether the next panel's work has
-started. Each report is a Signal on one task of one piece:
+Screw progress over one screw (or Connect Cables' and Clamp Coupling's over the whole
+task), or the TCP force while the robot holds a panel. Each report is a Signal on one
+task of one piece:
 
     Signal("Screw", 1, "progress", 0.5)            how far the task is, in place of
                                                    recognition's progress
@@ -231,22 +230,26 @@ class ScrewCountDetector(Detector):
 
 class ProgressDoneDetector(Detector):
     """A task done from the shape of recognition's progress for it: one climb to high and
-    fall to low -- or recognition moving on to another step after the climb -- as for
-    Connect Cables.
+    fall to low -- or recognition moving on to another step after the climb, for
+    moved_on_updates updates in a row -- as for Connect Cables and Clamp Coupling.
 
-    Works on the piece the human is on and starts over when that changes; reports "Done
-    signal" there once, unless the task is done already.
+    Works on the piece the human is on and starts over when that changes -- also when the
+    operator sets the task back to not done, which makes it the human's piece again; reports
+    "Done signal" there once, unless the task is done already.
     """
 
-    def __init__(self, task_name: str, *, high: float, low: float, name: str | None = None):
+    def __init__(self, task_name: str, *, high: float, low: float, moved_on_updates: int = 1,
+                 name: str | None = None):
         self.task_name = task_name
         self.name = name or f"{task_name.lower()} done"
         self.high, self.low = high, low
+        self.moved_on_updates = max(int(moved_on_updates), 1)
         self._start_over(None)
 
     def _start_over(self, piece_id: int | None) -> None:
         self._piece = piece_id
         self._cycle = ProgressCycle(self.high, self.low)
+        self._elsewhere = 0  # updates in a row showing another step
         self._reported = False
 
     def status(self) -> dict:
@@ -268,8 +271,12 @@ class ProgressDoneDetector(Detector):
             return []
         for _t, task_name, progress in context.recognition:
             if task_name != self.task_name:
+                self._elsewhere += 1
+                if self._elsewhere < self.moved_on_updates:
+                    continue  # a flicker, not yet moving on
                 ended, why = self._cycle.interrupt(), f"recognition moved on to {task_name}"
             else:
+                self._elsewhere = 0
                 ended, why = self._cycle.feed(progress), "progress fell back"
             if ended:
                 self._reported = True
@@ -279,7 +286,9 @@ class ProgressDoneDetector(Detector):
 
 class DurationDoneDetector(Detector):
     """A task recognition shows too unreliably to wait for, done by time or by what
-    follows it -- as for Clamp Coupling.
+    follows it. Not built by build_detectors(): it was Clamp Coupling's, and marked it
+    done while nobody clamped -- Clamp Coupling now goes by its progress
+    (ProgressDoneDetector, config.CLAMP_COUPLING_DONE_*).
 
     Its clock starts when the task starts (first recognized) or the task before it
     (after_task) ends on the same piece, whichever is first -- so it runs even if
@@ -521,31 +530,12 @@ def build_detectors() -> TaskTransitionDetectors:
                            weight_steady_s=config.TCP_WEIGHT_STEADY_S),
         ProgressDoneDetector(CONNECT_CABLES, high=config.CONNECT_CABLES_DONE_HIGH,
                              low=config.CONNECT_CABLES_DONE_LOW),
+        # Its progress starts up high, so a one-off other step must not end it.
+        ProgressDoneDetector(CLAMP_COUPLING, high=config.CLAMP_COUPLING_DONE_HIGH,
+                             low=config.CLAMP_COUPLING_DONE_LOW,
+                             moved_on_updates=config.SEQUENCE_CONFIRM_EVENTS),
     ]
-    clamp = _clamp_coupling_detector()
-    if clamp is not None:
-        detectors.append(clamp)
     return TaskTransitionDetectors(detectors)
-
-
-def _clamp_coupling_detector() -> DurationDoneDetector | None:
-    """Clamp Coupling's done-by-time detector: its limit from the annotated durations,
-    its next tasks from the transition table. None, logged, if either can't be read."""
-    from task_sequence_model import TransitionModel, load_duration_stat
-
-    root = Path(__file__).resolve().parents[1]
-    try:
-        limit_s = load_duration_stat(root / config.TASK_DURATION_STATS_PATH,
-                                     config.CLAMP_COUPLING_DONE_STAT)[CLAMP_COUPLING]
-        transitions = TransitionModel.from_csv(root / config.TASK_TRANSITION_TABLE_PATH)
-    except (OSError, KeyError, ValueError) as exc:
-        _logger.warning("No %s done detector: %s", CLAMP_COUPLING, exc)
-        return None
-    next_tasks = [name for name, probability in transitions.ranked_next(CLAMP_COUPLING)
-                  if name != CLAMP_COUPLING
-                  and probability >= config.DURATION_DONE_NEXT_MIN_PROBABILITY]
-    return DurationDoneDetector(CLAMP_COUPLING, limit_s=limit_s, after_task=CONNECT_CABLES,
-                                next_tasks=next_tasks, confirm_events=config.SEQUENCE_CONFIRM_EVENTS)
 
 
 def signal_payload(signal: Signal) -> dict:
