@@ -72,3 +72,5 @@ temp/
 **/*.json
 
 1_recognition/results/**
+
+**/*.docx

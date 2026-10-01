@@ -120,9 +120,33 @@ def save_extrinsics(path, T_world_from_camera, ground_z=0.0,
 
 
 def load_extrinsics(path):
+    """(T_world_from_camera, ground_z, T_world_from_robot_base) from either kind of
+    camera-pose file:
+
+      an extrinsics file        calibrate_camera.py's extrinsic step: stored as is
+      a robot-camera            setup/calibration/robot_camera_calibration.py: its world is
+      calibration               the marker it was calibrated on (this repo's convention:
+                                lying flat, z up), so T_world_from_camera is
+                                inv(T_camera_from_marker), and it carries the robot base
+                                pose in that world as well
+
+    A robot-camera calibration measures no floor. Its "ground_z" -- the floor's z in
+    the marker frame, e.g. -0.65 for a marker on a 0.65 m table -- is added to the file
+    by hand; without it the floor is taken at the marker's height."""
     with open(path) as f:
         data = json.load(f)
-    T_world_from_camera = np.array(data["T_world_from_camera"], dtype=np.float64)
+    if "T_world_from_camera" in data:
+        T_world_from_camera = np.array(data["T_world_from_camera"], dtype=np.float64)
+    elif "T_camera_from_marker" in data:
+        T_world_from_camera = np.linalg.inv(np.array(data["T_camera_from_marker"], dtype=np.float64))
+        if "ground_z" not in data:
+            logger.warning(
+                "%s is a robot-camera calibration without a floor height: the floor is taken "
+                "at the marker's height. Add \"ground_z\": <the floor's z in the marker frame, "
+                "in m> to it if the marker is not on the floor.", Path(path).name)
+    else:
+        raise ValueError(f"{path} is neither an extrinsics file (T_world_from_camera) nor a "
+                         "robot-camera calibration (T_camera_from_marker).")
     ground_z = float(data.get("ground_z", 0.0))
     T_world_from_robot_base = data.get("T_world_from_robot_base")
     if T_world_from_robot_base is not None:

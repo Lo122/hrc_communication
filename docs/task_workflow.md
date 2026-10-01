@@ -138,7 +138,7 @@ Every task proposal ends with:
 | R4 proposal | Would you like me to bring the clamping tool? | yes / no / later |
 | R3/R4 arrived | Can I hand over the pipe coupling / tool? Yes opens the gripper, so hold it first. Say yes or no after the beep, or type your reply. | yes / give me the … / no |
 | Not ready (no) | Okay, I will keep holding the tool. Let me know when you are ready to receive it: say or type "give me the tool". | give me the tool / give me the (pipe) coupling |
-| Pipe coupling handed over; R7 starts in 2 s | Opening the gripper. Here is the pipe coupling. I will move away in 2 seconds. Say or type cancel to keep me here. | cancel |
+| Pipe coupling handed over; R7 starts in 1 s | Opening the gripper. Here is the pipe coupling. I'm moving away. Say or type cancel to keep me here. | cancel |
 | Tool handed over; R7 proposal | Opening the gripper. Here is the tool. May I leave the hand-over position and move away? | yes / no / later |
 | R5 proposal | Would you like me to take the clamping tool back? | yes / no / later |
 
@@ -161,7 +161,7 @@ items and their names are `config.HANDOVER_ITEMS`).
 - `yes`, or asking for the item ("give me the tool"): the gripper opens
   (`true` on `/Robot/gripper`, `std_msgs/Bool`), the bring task is `R_DONE`, and R7
   follows: leave the hand-over position. After the pipe coupling the robot does
-  not ask: R7 starts 2 s after it has said so (`config.HANDOVER_LEAVE_DELAY_S`),
+  not ask: R7 starts 1 s after it has said so (`config.HANDOVER_LEAVE_DELAY_S`),
   a delayed start like `later`. After the tool it asks first.
 - `no`: the robot keeps holding the item (`R_HOLDING_HANDOVER`) and listens
   until the human says "give me the tool" / "give me the (pipe) coupling"; then
@@ -171,7 +171,7 @@ items and their names are `config.HANDOVER_ITEMS`).
 R7 is an ordinary robot action with its own permission, timer, pending and
 delay messages, like R2: refused or unanswered, it stays pending ("I will stay
 at the hand-over position") and other task starts wait for it; canceling a
-delayed R7 -- including the 2 s after the pipe coupling -- puts it back in the
+delayed R7 -- including the 1 s after the pipe coupling -- puts it back in the
 pending pool. Anything that follows the bring
 task in its "robot task" chain is offered once R7 succeeds.
 

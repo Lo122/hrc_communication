@@ -19,11 +19,14 @@ import config
 import torch
 from recognition_manager import RecognitionManager
 from skeleton3d_pipeline import StreamingH36MFeatureExtractor
-from step_models import LEGACY, MULTI_HEAD, MultiHeadStepModel, open_step_model
+from step_models import (LEGACY, MULTI_HEAD, MultiHeadStepModel, is_multi_head_training_run,
+                         open_step_model)
 from vision_model.vision_config import VisionConfig
 
 MODELS = ROOT / "1_recognition" / "best_model"
 MULTI_HEAD_DIR = MODELS / "S3_10fps_8s_bg05"
+# The same 4-head network in a training run's layout (best_model.pth, norm_stats.npz).
+TRAINING_RUN_DIR = MODELS / "3d_skeleton_05"
 LEGACY_DIR = MODELS / "3d_skeleton_02"
 
 # A standing H36M pose, pelvis at the origin (metres): pelvis, r_hip, r_knee, r_ankle,
@@ -75,6 +78,50 @@ class FormatDetectionTests(unittest.TestCase):
         legacy = open_step_model(LEGACY_DIR)
         self.assertEqual((legacy.format, legacy.window_size, legacy.sample_period_s), (LEGACY, 160, None))
 
+    def test_a_training_run_with_an_idle_head_opens_as_multi_head(self):
+        run = open_step_model(TRAINING_RUN_DIR)
+        self.assertEqual((run.format, run.window_size), (MULTI_HEAD, 120))
+        self.assertAlmostEqual(run.sample_period_s, 1 / 30)  # every frame of the 30 fps data
+        self.assertEqual(run.classes, list(config.STEP_NAMES[:7]))
+        self.assertEqual(run.step_labels[run.idle_step], "Non Related Task")
+        self.assertFalse(is_multi_head_training_run(legacy_config()))
+
+
+def legacy_config() -> dict:
+    import json
+
+    return json.loads((LEGACY_DIR / "config.json").read_text(encoding="utf-8"))
+
+
+class TrainingRunLayoutTests(unittest.TestCase):
+    """3d_skeleton_05: the S3 network in another layout, so the same inputs and heads."""
+
+    def setUp(self):
+        self.model = open_step_model(TRAINING_RUN_DIR)
+        self.model.load(torch, "cpu")
+
+    def test_builds_the_same_raw_input_vector_as_the_export_layout(self):
+        export = open_step_model(MULTI_HEAD_DIR)
+        features = extracted_features()
+        ours = self.model.feature_vector(features) * self.model.std + self.model.mean
+        theirs = export.feature_vector(features) * export.std + export.mean
+        np.testing.assert_allclose(ours, theirs, atol=1e-4)
+
+    def test_checkpoint_parameters_land_on_the_matching_heads(self):
+        checkpoint = torch.load(TRAINING_RUN_DIR / "best_model.pth", map_location="cpu")
+        heads = self.model._model.heads
+        for name, parameter in (("idle_head", heads.bg), ("step_head", heads.task),
+                                ("progress_head", heads.prog), ("mistake_head", heads.mist)):
+            torch.testing.assert_close(parameter.weight, checkpoint[f"{name}.weight"])
+        torch.testing.assert_close(self.model._model.rnn.weight_hh_l0, checkpoint["lstm.weight_hh_l0"])
+
+    def test_prediction_is_on_the_step_names_like_the_export(self):
+        prediction = self.model.predict(
+            np.random.default_rng(3).normal(size=(120, 251)).astype(np.float32))
+        self.assertEqual(len(prediction.step_scores), len(config.STEP_NAMES))
+        self.assertAlmostEqual(float(prediction.step_scores[7]), prediction.idle_probability, places=5)
+        self.assertTrue(np.all((prediction.step_progress >= 0) & (prediction.step_progress <= 1)))
+
 
 class MultiHeadModelTests(unittest.TestCase):
     def setUp(self):
@@ -107,6 +154,9 @@ class MultiHeadModelTests(unittest.TestCase):
         self.assertAlmostEqual(prediction.idle_probability, idle, places=5)
         np.testing.assert_allclose(prediction.step_scores[:7], tasks * (1 - idle), rtol=1e-5)
         self.assertAlmostEqual(float(prediction.step_scores[7]), idle, places=5)
+        # Each task's own sigmoid, unscaled by idle -- what the probability plot draws.
+        np.testing.assert_allclose(prediction.task_probabilities[:7], tasks, rtol=1e-5)
+        self.assertAlmostEqual(float(prediction.task_probabilities[7]), idle, places=5)
         self.assertEqual(prediction.progress_of(7), 0.0)  # idle has no lane
         self.assertTrue(np.all((prediction.step_progress >= 0) & (prediction.step_progress <= 1)))
         self.assertAlmostEqual(float(prediction.mistake_probabilities.sum()), 1.0, places=5)
@@ -127,6 +177,7 @@ class LegacyModelTests(unittest.TestCase):
         prediction = model.predict(window)
         self.assertAlmostEqual(float(prediction.step_scores.sum()), 1.0, places=4)
         self.assertIsNone(prediction.idle_probability)
+        self.assertIsNone(prediction.task_probabilities)  # the softmax already is that
         self.assertIsNone(prediction.step_progress)
         self.assertEqual(prediction.progress_of(3), prediction.progress_of(0))  # one value
 
@@ -185,6 +236,39 @@ class ManagerTests(unittest.TestCase):
         for result, _ in results:
             self.assertIn(result.step_id, range(len(config.STEP_NAMES)))
             self.assertTrue(0.0 <= result.progress <= 1.0)
+            # Every step's smoothed score and own lane, for the decision layer's choice.
+            self.assertEqual(len(result.step_probabilities), len(config.STEP_NAMES))
+            self.assertEqual(len(result.step_progress), len(config.STEP_NAMES))
+            self.assertAlmostEqual(result.progress, result.step_progress[result.step_id], places=5)
+        if results:
+            last, _ = results[-1]
+            np.testing.assert_allclose(
+                last.step_probabilities, manager.step_stabilizer.smoothed_probabilities, rtol=1e-6)
+
+    def test_the_readout_is_held_on_frames_the_model_skips(self):
+        """S3 is fed at 10 Hz; a 30 fps loop skips 2 frames in 3. Those used to be drawn
+        with the "Buffering" line instead of the readout -- the flicker."""
+        manager = RecognitionManager(model_dir=MULTI_HEAD_DIR, device="cpu")
+        shown = []
+        with patch("skeleton3d_pipeline.RealtimeSkeleton3DPipeline", FakePipeline), \
+                patch.object(manager._view, "show",
+                             side_effect=lambda *_a, **readout: shown.append(readout)):
+            for i in range(300):
+                manager.update_from_frame(np.zeros((8, 8, 3), np.uint8), timestamp=i / 30.0)
+        first = next(i for i, readout in enumerate(shown) if readout.get("raw_step_id") is not None)
+        after = shown[first:]
+        self.assertGreater(first, 200)  # 80 samples at 10 Hz buffered first
+        self.assertTrue(all(readout.get("raw_step_id") is not None for readout in after))
+        self.assertTrue(all(readout["idle_probability"] is not None for readout in after))
+        np.testing.assert_allclose(manager.last_task_probabilities[:7],
+                                   manager.last_step_probabilities[:7]
+                                   / (1 - manager.last_idle_probability), rtol=1e-4)
+
+    def test_training_run_model_is_fed_every_frame_at_30_fps(self):
+        manager, predictions, _results, _records = self.run_manager(TRAINING_RUN_DIR, frames=130)
+        self.assertEqual(len(predictions), 130 - 119)
+        self.assertIsNotNone(manager.last_idle_probability)
+        self.assertEqual(len(manager.last_step_progress), len(config.STEP_NAMES))
 
     def test_legacy_model_still_runs_every_frame(self):
         manager, predictions, _results, _records = self.run_manager(LEGACY_DIR, frames=170)

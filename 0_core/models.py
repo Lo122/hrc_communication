@@ -7,7 +7,12 @@ from events import RobotTaskState
 
 @dataclass
 class RecognitionResult:
-    """Standardized output of the recognition layer."""
+    """Standardized output of the recognition layer.
+
+    step_probabilities: every step's (smoothed) score over config.STEP_NAMES, from
+    which the decision layer picks the step itself (sequence_step_selector.py);
+    step_progress: every step's own progress, for a model with a lane per step.
+    None when the source has no such output (typed updates, a mismatched model)."""
 
     round_id: int
     step_id: int
@@ -15,6 +20,8 @@ class RecognitionResult:
     piece_id: int
     confidence: float
     timestamp: float
+    step_probabilities: list[float] | None = None
+    step_progress: list[float] | None = None
 
 
 @dataclass

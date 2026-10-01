@@ -89,7 +89,7 @@ HANDOVER_ITEMS = {
 # has said so -- a delayed start, so "cancel" still keeps it there. The others ask
 # "May I leave the hand-over position?".
 HANDOVER_LEAVE_DELAY_S = {
-    TASK_BRING_CONNECTOR: 2.0,
+    TASK_BRING_CONNECTOR: 1.0,
 }
 
 # Once the lift has brought the panel into position: False turns free drive on straight
@@ -139,8 +139,27 @@ RECOGNITION_FILTER_OPEN_STEPS = ("Screw", "Clamp Coupling")
 # The progress head's raw output divided by this gives 0-1 (the database's "Progress"
 # thresholds are 0-1). Check against a replay: training labels ran 0-100.
 RECOGNITION_PROGRESS_SCALE = 1.0
-# Recognition re-publishes a task update once progress has moved this much (0-1 scale).
+# Recognition re-publishes a task update once progress has moved this much (0-1 scale)
+# -- the stable step's, or any step's own lane for a model with one per step...
 RECOGNITION_PROGRESS_PUBLISH_DELTA = 0.02
+# ...or once any step's (smoothed) probability has moved this much: the decision layer
+# picks the step from them (SEQUENCE_* below), not only from the stable step.
+RECOGNITION_PROBABILITY_PUBLISH_DELTA = 0.05
+# -- Sequence-aware step selection (2_decision_making/src/sequence_step_selector.py) --
+# The models learned from human-only videos; beside the robot, the human's motion often
+# looks like another step. From recognition's step probabilities the decision layer
+# keeps only the tasks the sequence allows now (TaskTracker.potential_tasks), drops those
+# below their "Action Confidence Threshold" in the task database (this default where it
+# has none), weights the rest by the transition table and takes the best:
+#   score = p * ((1 - STRENGTH) + STRENGTH * P(task | reference task))
+# with weight 1 for staying on the reference task. STRENGTH 0: filtering only;
+# 1: the full transition probability.
+SEQUENCE_DEFAULT_MIN_CONFIDENCE = 0.5
+SEQUENCE_PRIOR_STRENGTH = 0.5
+# A switch away from the reference task counts once it wins this many task updates in a
+# row (staying is immediate). Also how long the model must show the task after Clamp
+# Coupling before Clamp Coupling counts as done (CLAMP_COUPLING_DONE_* below).
+SEQUENCE_CONFIRM_EVENTS = 3
 # Recognition's model needs this long to recognize motion once it runs: its task
 # updates count, and the demo opening starts, only this many seconds after the
 # recognition process first reports in (a human location or a task update). Typed
@@ -232,20 +251,31 @@ GH_STEP_MESSAGES = {
 TASK_DETECTORS_MODE = "log"
 # Screw count, from recognition's Screw progress: per screw it climbs and drops back
 # near 0 right as that screw ends. Climbing to HIGH then falling to LOW counts one
-# screw; counts closer than MIN_INTERVAL apart are one. Tuned on two annotated cam-05
-# takes (uid-11 and uid-12 take-01, model 3d_skeleton_01, realtime playback): real
-# screws peak at 0.36-0.62 and dip to 0.20 at most between screws; a stray bump of
-# 0.36 came 2.5 s after a count, while real screws end at least 5.3 s apart. These
-# values sit in the middle of the range that counted 34 of 35 screws right, each within
-# ~2 s of its annotated end.
+# screw; counts closer than MIN_INTERVAL apart are one. First tuned on two annotated
+# cam-05 takes with model 3d_skeleton_01 (0.30 / 0.20: real screws peaked at 0.36-0.62,
+# dipped to 0.20 at most, and ended at least 5.3 s apart); HIGH raised to 0.40 for the
+# multi-head models' per-step progress lanes.
 SCREWS_PER_PANEL = 6
-SCREW_PROGRESS_HIGH = 0.30
+SCREW_PROGRESS_HIGH = 0.40
 SCREW_PROGRESS_LOW = 0.20
 SCREW_MIN_INTERVAL_S = 3.0
-# The wrench the force dete
-# ctors read: a ROS_TOPICS key (geometry_msgs/WrenchStamped),
-# published by 4_execution/eval/read_ur_live_data.py --publish-ros.
+# Connect Cables is done once its progress climbs to HIGH and falls back to LOW (or
+# recognition moves on to another step while it is up).
+CONNECT_CABLES_DONE_HIGH = 0.60
+CONNECT_CABLES_DONE_LOW = 0.15
+# Clamp Coupling is recognized too unreliably to wait for: it is done once this statistic
+# of its annotated duration (TASK_DURATION_STATS_PATH: p95 14.2 s, p90 10.6 s, mean
+# 6.9 s) has passed since it started or Connect Cables ended -- or once recognition shows
+# a task the transition table expects after it with at least this probability (Pull
+# Cables 0.25, Lift 0.30: the next panel) for SEQUENCE_CONFIRM_EVENTS updates in a row.
+CLAMP_COUPLING_DONE_STAT = "p95"
+DURATION_DONE_NEXT_MIN_PROBABILITY = 0.2
+# The wrench the force detectors read: a ROS_TOPICS key (geometry_msgs/WrenchStamped),
+# published by 4_execution/eval/read_ur_live_data.py --publish-ros -- which
+# run_system.py starts in its own window (--no-robot-live to skip it).
 FORCE_WRENCH_TOPIC = "ur_tcp_force"
+# How often that reader publishes the wrench to rosbridge (Hz).
+ROBOT_LIVE_DATA_ROS_HZ = 50.0
 # ScrewingMonitor thresholds (4_execution/src/force_monitors.py). Placeholders: tune
 # them on recorded trials with 4_execution/eval/force_logger.py and force_log_review.py.
 SCREWING_THRESHOLDS = {
@@ -287,6 +317,16 @@ DEMO_LIFT_ASK_AFTER_PULL_START_S = 45.0
 DEMO_HUMAN_PULL_BUFFER_S = 10.0
 # The task detectors (screw detection) in the demo: their signals count.
 DEMO_DETECTORS_MODE = "on"
+
+# -- Reactive mode (run_communication.py --reactive; 2_decision_making/reactive_task_manager.py) --
+# The robot offers nothing: it acts only when the human commands it ("pull the cables",
+# "lift the panel", "give me the connector", "leave"), and the command itself is the
+# go-ahead. No camera and no TCP force: the task tracker follows the robot's tasks and
+# what the human says, so a command is carried out on the right piece.
+# After handing an item over, the robot leaves the hand-over position this many seconds
+# later without asking -- for items HANDOVER_LEAVE_DELAY_S has no delay for ("cancel"
+# keeps it there).
+REACTIVE_HANDOVER_LEAVE_DELAY_S = 1.0
 
 UDP_HOST = "127.0.0.1"
 UDP_PORT = 5006
@@ -330,5 +370,7 @@ VOICE_ERROR_RETRY_SECONDS = 5.0
 test_vid_path = r"G:\.shortcut-targets-by-id\1nZZWQUKOdxeC-oo-NKucbuUj38ir4mZC\ITECH_Thesis\Videos\raw\cam-04\video__cam-04_uid-01_take-01.mp4"
 
 
-# ROBOT_IP = "169.254.130.206" 
-ROBOT_IP = "127.0.0.1"
+# The UR10e on the lab network. URSim in Docker: "127.0.0.1" (ports 30001-30004 are
+# published to the host).
+# ROBOT_IP = "169.254.130.206"
+ROBOT_IP = "192.168.1.10"

@@ -30,6 +30,14 @@ STATE_MODES = {
 }
 
 
+def listening_mode(context: VoiceContext) -> ListeningMode:
+    """How to listen in this context. With no robot task, only reactive mode listens: the
+    human commands the robot from idle there, while otherwise the robot asks first."""
+    if context.state is None and context.reactive:
+        return ListeningMode.CONTINUOUS
+    return STATE_MODES.get(context.state, ListeningMode.OFF)
+
+
 class CommunicationManager:
     def __init__(self, cli, parser, voice, tts, event_sink, state_provider,
                  guard_seconds=0.25, max_attempts=2, retry_seconds=5.0, logger=None,
@@ -108,7 +116,7 @@ class CommunicationManager:
                 })
         self._context = context
         self._state = state
-        self.mode = STATE_MODES.get(state, ListeningMode.OFF)
+        self.mode = listening_mode(context)
         self._generation += 1
         self._retry_at = None
         self.voice.stop_listening()

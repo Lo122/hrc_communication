@@ -1,7 +1,7 @@
 """
     Run communication, CLI, TaskManager, and ROS without realtime recognition.
     Usage:
-        uv run python run_communication.py [--host HOST] [--port PORT] [--demo]
+        uv run python run_communication.py [--host HOST] [--port PORT] [--demo | --reactive]
           [--debug-trigger] [--debug-step-id STEP_ID]
           [--debug-progress PROGRESS] [--debug-round-id ROUND_ID]
           [--log-dir DIR] [--run-name NAME] [--no-run-log]
@@ -18,6 +18,13 @@
     pull the cables, then asks about the lift -- and only then hands over to
     recognition, the trigger rules and the task detectors
     (2_decision_making/demo_opening.py).
+
+    --reactive runs the reactive system instead of the proactive one: the robot offers
+    nothing and asks nothing first -- it acts on the human's commands ("pull the
+    cables", "lift the panel", "give me the connector", "leave"). It needs no camera and
+    no TCP force: the task tracker follows the robot's tasks and what the human says
+    ("screw done", "cables connected", "clamped", "next piece"), so each command goes to
+    the right piece (2_decision_making/reactive_task_manager.py).
 """
 
 from __future__ import annotations
@@ -46,7 +53,10 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run communication and receive recognition events.")
     parser.add_argument("--host", default=config.EVENT_TRANSPORT_HOST, help="Host to bind for recognition events.")
     parser.add_argument("--port", type=int, default=config.EVENT_TRANSPORT_PORT, help="Port to bind for recognition events.")
-    parser.add_argument("--demo", action="store_true", help="Open with the scripted demo dialogue for the first panel.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--demo", action="store_true", help="Open with the scripted demo dialogue for the first panel.")
+    mode.add_argument("--reactive", action="store_true",
+                      help="Reactive system: the robot offers nothing and acts only on the human's commands.")
     parser.add_argument("--debug-trigger", action="store_true", help="Inject one fake human task update for communication debugging.")
     parser.add_argument("--debug-step-id", type=int, default=0, help="Human step id (config.STEP_NAMES index) for --debug-trigger; not a robot task id.")
     parser.add_argument("--debug-progress", type=float, default=1.0, help="Progress value for --debug-trigger.")
@@ -71,7 +81,7 @@ if __name__ == "__main__":
 
     receiver = UDPEventReceiver(args.host, args.port)
     run_dir = None if args.no_run_log else Path(args.log_dir) / (args.run_name or default_run_name())
-    system = build_system(demo=args.demo, run_dir=run_dir)
+    system = build_system(demo=args.demo, run_dir=run_dir, reactive=args.reactive)
     if run_dir is not None:
         print(f"Logging this run to {run_dir}")
     system.system_running = True
@@ -83,6 +93,11 @@ if __name__ == "__main__":
         when = (f"once recognition has run for {config.RECOGNITION_ACTIVATION_S:g} s"
                 if config.RECOGNITION_ACTIVATION_S > 0 else "now")
         print(f"HRC communication started in demo mode: asking to pull the first panel's cables {when}.")
+    elif args.reactive:
+        print('HRC communication started in reactive mode: the robot acts only on your commands -- '
+              '"pull the cables", "lift the panel", "give me the connector", "leave". Tell it what you '
+              'finish yourself ("screw done", "cables connected", "clamped", "next piece") so it '
+              'keeps track of the pieces.')
     else:
         print("HRC communication started. Waiting for recognition trigger...")
 

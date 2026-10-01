@@ -87,7 +87,8 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(connector["condition_state"]["Screw"]["status"], "WORKING")
         self.assertIn("Recognition ignored while the robot's lift leads.",
                       [entry["text"] for entry in snapshot["timeline"]])
-        self.assertEqual([d["name"] for d in snapshot["detectors"]], ["screw count", "force screw"])
+        self.assertEqual([d["name"] for d in snapshot["detectors"]],
+                         ["screw count", "force screw", "connect cables done", "clamp coupling done"])
 
     def test_leave_rule_says_when_no_panel_is_held(self):
         self.reply("screw done")  # Screw done, but the robot never held the panel

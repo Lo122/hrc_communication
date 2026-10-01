@@ -214,6 +214,52 @@ def roll_from_camera_pose(pose):
     return float(np.degrees(np.arctan2(sin_roll, cos_roll)))
 
 
+def _owned(array):
+    """The array, if it owns its memory -- record3d 1.4 hands back a fresh copy on every
+    get_rgb_frame()/get_depth_frame() call -- else a copy of it. A VIEW of a buffer the
+    native side reuses for the next frame must not be published: a consumer could read
+    a half-written frame, or one whose memory a disconnect freed."""
+    return array if array.flags["OWNDATA"] else np.array(array, copy=True)
+
+
+class _ReceiveStats:
+    """How Record3D's receive thread is keeping up, reported every window_s: frames per
+    second received, and the share of the time spent inside IPhoneCamera._on_new_frame.
+
+    The phone stamps no capture time, so the delay frames build up before they reach
+    Python cannot be measured directly -- and a frame's age (FrameSource) only counts
+    from its arrival here. A callback busy most of the time is the visible sign: the
+    receive thread cannot take the next frame while it runs, so frames queue in the USB
+    stream and the picture falls further behind. Only the receive thread calls note()."""
+
+    BUSY_WARN = 0.5
+
+    def __init__(self, window_s=10.0):
+        self.window_s = window_s
+        self._since = None
+        self._frames = 0
+        self._busy_s = 0.0
+
+    def note(self, started, finished):
+        if self._since is None:
+            self._since = started
+        self._frames += 1
+        self._busy_s += finished - started
+        elapsed = finished - self._since
+        if elapsed < self.window_s:
+            return
+        fps, busy = self._frames / elapsed, self._busy_s / elapsed
+        if busy > self.BUSY_WARN:
+            logger.warning(
+                "IPhoneCamera: receiving %.1f fps with the frame callback busy %.0f%% of the "
+                "time -- Record3D frames are likely queuing up and the picture lagging. Lower "
+                "the app's resolution or frame rate, or free up CPU.", fps, busy * 100)
+        else:
+            logger.debug("IPhoneCamera: receiving %.1f fps, frame callback busy %.0f%% of the time.",
+                         fps, busy * 100)
+        self._since, self._frames, self._busy_s = finished, 0, 0.0
+
+
 class IPhoneCamera:
     """Thread-safe wrapper around ``record3d.Record3DStream`` with auto-reconnect.
 
@@ -264,6 +310,7 @@ class IPhoneCamera:
         # Only the consumer thread reads these.
         self.last_seq = None
         self.last_received_at = None
+        self._receive_stats = _ReceiveStats()
         self._new_frame_event = threading.Event()
         self._connected_event = threading.Event()
         self._stop_event = threading.Event()
@@ -351,6 +398,7 @@ class IPhoneCamera:
             # connect rather than inheriting the dead stream's last-frame time.
             with self._lock:
                 self._last_frame_at = None
+            self._receive_stats = _ReceiveStats()  # not averaged across the gap
             self._connected_at = time.perf_counter()
             self._connected_event.set()
             return True
@@ -375,33 +423,26 @@ class IPhoneCamera:
         self.disconnect()
 
     def _on_new_frame(self, stream, generation):
+        """Take this frame's data -- and nothing more.
+
+        This runs on Record3D's own receive thread, which reads the next frame off the
+        USB stream only once this returns. Anything slow here backs frames up in that
+        stream, and the picture then lags further and further behind: the latest-only
+        slot below drops frames that were superseded, but cannot drop ones that have
+        not reached it yet. A full-size cv2.rotate of rgb and depth used to run here,
+        ~10 ms a frame, ~20-40 ms with recognition competing for the GIL -- more than
+        a 30 fps stream leaves. The rotation now waits for a reader (get_latest_frame),
+        and runs only on the frames one actually takes.
+        """
         if generation != self._generation:
             return  # stale callback from a stream a reconnect has already replaced
-        rgb = stream.get_rgb_frame()
-        depth = stream.get_depth_frame()  # metric depth if LiDAR device
+        started = time.perf_counter()
+        rgb = _owned(stream.get_rgb_frame())
+        depth = _owned(stream.get_depth_frame())  # metric depth if LiDAR device
         intrinsic_mat = _intrinsic_coeffs_to_matrix(stream.get_intrinsic_mat())  # per-frame, focus-corrected
         pose = stream.get_camera_pose()  # ARKit-tracked position + quaternion
-        if self._capture_rotate90:
-            # Rotate rgb+depth+intrinsic_mat together here, once, so EVERY
-            # caller downstream (calibration scripts, metric_depth_test.py,
-            # ...) transparently sees an already-upright, mutually
-            # consistent (frame, K) pair -- see module docstring on why this
-            # matters far more than the display-only rotate_frame below.
-            h, w = rgb.shape[:2]
-            flag = _ROTATE_FLAGS[self._capture_rotate90]
-            rgb = cv2.rotate(rgb, flag)      # allocates, so _latest owns its pixels
-            depth = cv2.rotate(depth, flag)
-            intrinsic_mat, _ = _rotate_intrinsics_90(intrinsic_mat, (w, h), self._capture_rotate90)
-        else:
-            # Unrotated, get_rgb_frame()/get_depth_frame() may hand back a VIEW of a
-            # buffer the native side reuses for the next frame. Publishing that view
-            # would let a consumer read a half-written frame, or one whose memory was
-            # freed by a disconnect. Rotation above copies as a side effect; with no
-            # rotation nothing else would.
-            rgb = np.array(rgb, copy=True)
-            depth = np.array(depth, copy=True)
         with self._lock:
-            self._latest = (rgb, depth, intrinsic_mat, pose)
+            self._latest = (rgb, depth, intrinsic_mat, pose)  # as the sensor delivers it
             self._frame_seq += 1
             self._latest_seq = self._frame_seq
             # Proof of life for the watchdog -- see _stale_after_sec.
@@ -410,6 +451,20 @@ class IPhoneCamera:
             # Set under the lock, paired with the clear in get_latest_frame, so a
             # frame arriving mid-handover cannot have its notification dropped.
             self._new_frame_event.set()
+        self._receive_stats.note(started, time.perf_counter())
+
+    def _upright(self, latest):
+        """(rgb, depth, intrinsic_mat, pose) turned by capture_rotate90 -- rgb, depth and
+        K together, so every caller (calibration scripts, recognition, ...) sees an
+        upright, mutually consistent (frame, K) pair; see the module docstring on why
+        this matters far more than the display-only rotate_frame below."""
+        if not self._capture_rotate90:
+            return latest
+        rgb, depth, intrinsic_mat, pose = latest
+        h, w = rgb.shape[:2]
+        flag = _ROTATE_FLAGS[self._capture_rotate90]
+        intrinsic_mat, _ = _rotate_intrinsics_90(intrinsic_mat, (w, h), self._capture_rotate90)
+        return cv2.rotate(rgb, flag), cv2.rotate(depth, flag), intrinsic_mat, pose
 
     def _on_stream_stopped(self, generation):
         if generation != self._generation:
@@ -457,8 +512,9 @@ class IPhoneCamera:
             self._stop_event.wait(self._reconnect_interval_sec)
 
     def get_latest_frame(self, timeout=None):
-        """Return the most recently received (rgb, depth, intrinsic_mat, pose), or None
-        (including while disconnected and waiting to reconnect -- see is_connected)."""
+        """Return the most recently received (rgb, depth, intrinsic_mat, pose), turned by
+        capture_rotate90, or None (including while disconnected and waiting to reconnect
+        -- see is_connected)."""
         if timeout is not None and not self._new_frame_event.wait(timeout=timeout):
             return None
         with self._lock:
@@ -467,10 +523,13 @@ class IPhoneCamera:
             # would discard the notification for any frame that landed in between,
             # so the NEXT call would block for the frame after that one.
             self._new_frame_event.clear()
-            if self._latest is not None:
+            latest = self._latest
+            if latest is not None:
                 self.last_seq = self._latest_seq
                 self.last_received_at = self._latest_at
-            return self._latest
+        # Outside the lock, on the reader's thread: the producer replaces _latest
+        # rather than changing it, so this snapshot stays whole.
+        return None if latest is None else self._upright(latest)
 
 
 class IPhoneVideoCaptureAdapter:

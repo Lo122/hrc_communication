@@ -155,6 +155,31 @@ mark { background: var(--mark-bg); color: inherit; border-radius: 3px; padding: 
 dl.det { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 4px 0 12px; font-size: 13px; }
 dl.det dt { color: var(--text-2); }
 dl.det dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+/* Manual control */
+.accepts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.accepts code { font-size: 11px; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; background: var(--bg); }
+#tasks td.cell { cursor: pointer; }
+#tasks td.picked { outline: 2px dashed var(--text); outline-offset: -3px; }
+.controls { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.controls fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 0; padding: 8px 10px 10px; min-width: 0; }
+.controls legend { font-size: 12px; font-weight: 600; color: var(--text-2); padding: 0 4px; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+.row label { font-size: 12px; color: var(--text-2); display: inline-flex; flex-direction: column; gap: 2px; }
+select, input[type="text"], input[type="number"] {
+  font: inherit; font-size: 13px; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; min-width: 0;
+}
+input[type="number"] { width: 5.5em; }
+button.small { font-size: 12px; padding: 1px 8px; }
+button.valid { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+button.danger { color: var(--critical); }
+.hint { font-size: 12px; color: var(--text-3); margin: 4px 0 0; }
+#results { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; font-size: 12px; max-height: 160px; overflow-y: auto; }
+#results .ok::before { content: "\2713 "; color: var(--good); }
+#results .err::before { content: "\2717 "; color: var(--critical); }
+#flash { font-size: 12px; min-height: 1.4em; margin-top: 6px; }
+#flash.err { color: var(--critical); }
 </style>
 </head>
 <body>
@@ -169,6 +194,7 @@ dl.det dd { margin: 0; font-variant-numeric: tabular-nums; }
   <section class="cards">
     <article class="card" id="human"></article>
     <article class="card" id="robot"></article>
+    <article class="card" id="link"></article>
     <article class="card" id="queue"></article>
     <article class="card" id="pool"></article>
   </section>
@@ -184,6 +210,57 @@ dl.det dd { margin: 0; font-variant-numeric: tabular-nums; }
       <span><i style="box-shadow:inset 0 0 0 2px var(--accent)"></i>robot active / queued / pooled</span>
     </div>
     <div class="scroll"><table id="tasks"></table></div>
+  </section>
+
+  <section class="panel" id="manual">
+    <h2>Manual control <small>set the state right when recognition or a detector got it wrong; each change is applied between the runtime's events and shows in the timeline</small></h2>
+    <div class="controls">
+      <fieldset>
+        <legend>Send an answer or robot report</legend>
+        <div class="row" id="event-buttons"></div>
+        <p class="hint">Outlined: what the active robot task accepts now. Yes, resume, restart, free drive, hand over and return home move the robot; they ask first.</p>
+      </fieldset>
+      <fieldset>
+        <legend>Tracked task <small class="muted">— click a cell in the task pool to pick it</small></legend>
+        <div class="row">
+          <label>piece<select id="m-piece"></select></label>
+          <label>task<select id="m-task"></select></label>
+          <label>status<select id="m-status">
+            <option value="NOT_DONE">not done</option><option value="PENDING">pending</option>
+            <option value="WORKING">working</option><option value="DONE">done</option></select></label>
+          <label>by<select id="m-executor"><option value="">-</option><option>Human</option><option>Robot</option></select></label>
+          <label>progress<input id="m-progress" type="number" min="0" max="1" step="0.05" placeholder="0-1"></label>
+          <button type="button" id="m-set-status">Set</button>
+        </div>
+        <div class="row">
+          <label>signal<input id="m-signal" type="text" list="m-signals" placeholder="screw count"></label>
+          <datalist id="m-signals"><option>screw count</option><option>TCP weight change</option><option>panel secured</option><option>progress</option></datalist>
+          <label>value<input id="m-value" type="text" placeholder="true / false / 0.5"></label>
+          <button type="button" id="m-set-signal">Set signal</button>
+          <button type="button" id="m-clear-signal">Clear</button>
+        </div>
+        <p class="hint">Set exactly: nothing before it is closed or inferred. Working by the human makes it their current task. The trigger rules are checked again afterwards, so the robot may offer what the new state allows.</p>
+      </fieldset>
+      <fieldset>
+        <legend>Robot tasks</legend>
+        <div class="row">
+          <label>robot task<select id="r-task"></select></label>
+          <label>piece<select id="r-piece"></select></label>
+          <button type="button" id="r-offer">Offer now</button>
+          <button type="button" id="r-pool">Add to pending pool</button>
+        </div>
+        <div class="row">
+          <button type="button" class="danger" id="r-clear-active">Forget active task</button>
+          <button type="button" class="danger" id="r-clear-held">Forget held panel</button>
+        </div>
+        <p class="hint">An offer asks the human first, like any offer. "Forget" only changes the decision layer, for a state that got stuck: the robot is not told (use cancel to stop it).</p>
+        <div id="flash" role="status"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Last commands</legend>
+        <ul id="results"></ul>
+      </fieldset>
+    </div>
   </section>
 
   <section class="panel">
@@ -227,6 +304,17 @@ const offset = (k) => (k === 0 ? "n" : k > 0 ? `n + ${k}` : `n - ${-k}`);
 
 function card(id, title, body) { $(id).innerHTML = `<h2>${esc(title)}</h2>${body}`; }
 
+function renderChoice(c) {
+  // The step selector: the model's step, the step the task sequence made of it, and
+  // [p, weight, score] of every task it weighed.
+  if (!c) return "-";
+  const scores = Object.entries(c.scores || {})
+    .map(([name, v]) => `${esc(name)} ${num(v[0])}×${num(v[1])}=${num(v[2])}`).join(", ");
+  const pick = c.selected === c.model ? esc(c.selected ?? "none")
+    : `${esc(c.model ?? "-")} → ${esc(c.selected ?? "none")}`;
+  return `${pick} <span class="muted">(${esc(c.reason)}${scores ? `; ${scores}` : ""})</span>`;
+}
+
 function renderHuman(s) {
   const h = s.human;
   if (!h) return card("human", "Human", `<p class="muted">No task tracker: is the task database loaded?</p>`);
@@ -239,30 +327,65 @@ function renderHuman(s) {
       <span>progress</span><b>${num(h.reference_progress)}</b>
       <span>on it for</span><b>${h.reference_seconds == null ? "-" : `${h.reference_seconds.toFixed(0)} s`}${h.reference_limit_s == null ? "" : ` of ${h.reference_limit_s.toFixed(0)} s${h.reference_seconds > h.reference_limit_s ? " (overran: recognition believed)" : ""}`}</b>
       <span>ignored</span><b>${esc(h.ignored_task ?? "-")}</b>
+      <span>step chosen</span><b>${renderChoice(h.recognition_choice)}</b>
       <span>recognition</span><b>${h.recognition_active ? "active" : "warming up: ignored"}</b>
       <span>human on piece</span><b>${esc(h.human_piece_id ?? "none")}</b>
       <span>first open piece</span><b>${esc(h.current_piece_id ?? "all done")}</b>
     </div>`);
 }
 
+const yesNo = (value) => (value == null ? "-" : value ? "yes" : "no");
+
 function renderRobot(s) {
   const r = s.robot, a = r.active;
+  const accepts = a ? Object.entries(a.accepts || {}) : [];
   const body = a
-    ? `<div class="big">${esc(a.task)}</div><div class="muted">piece ${esc(a.piece_id)}</div><div class="state">${esc(a.state)}</div>`
+    ? `<div class="big">${esc(a.task)}</div><div class="muted">piece ${esc(a.piece_id)} · ${esc(a.instance)}</div>
+       <div class="state">${esc(a.state)}</div>
+       <div class="kv">
+         <span>waiting for</span><b>${esc(a.waiting_for || "-")}</b>
+         <span>in this state</span><b>${a.seconds_in_state == null ? "-" : `${a.seconds_in_state.toFixed(0)} s`}</b>
+         <span>robot reported</span><b>running ${yesNo(a.running_reported)} · success ${yesNo(a.success_reported)}</b>
+         <span>free drive</span><b>${a.free_drive ? "on" : "off"}</b>
+         <span>speed</span><b>${num(a.speed)}</b>
+         ${a.delay_s != null ? `<span>delay</span><b>${num(a.delay_s, 0)} s</b>` : ""}
+       </div>
+       <div class="accepts" title="events this state accepts, and the state each leads to">${accepts.length
+         ? accepts.map(([event, next]) => `<code>${esc(event)} → ${esc(next)}</code>`).join("") : '<span class="muted">accepts no event</span>'}</div>`
     : `<div class="big muted">idle</div><div class="muted">no active robot task</div>`;
   card("robot", "Robot", `${body}
     <div class="kv">
       <span>holding panel</span><b>${r.held_piece_id != null ? "piece " + esc(r.held_piece_id) : "no"}</b>
       <span>asked next</span><b>${r.advance ? `${esc(r.advance.task)} (piece ${esc(r.advance.piece_id)}): ${esc(r.advance_answer ?? "no answer yet")}` : "-"}</b>
+      <span>mode</span><b>${s.mode === "reactive" ? "reactive: acts only on commands" : "proactive: offers tasks"}</b>
       <span>detectors</span><b>${esc(s.detector_mode)}</b>
       <span>demo opening</span><b>${r.demo_opening ? "running: recognition ignored" : "no"}</b>
     </div>`);
-  const queue = r.queue.map((e, i) => `<li>${i + 1}. ${esc(e.task_name)} <span class="muted">piece ${esc(e.piece_id)}</span>${e.requested ? '<span class="badge">asked for</span>' : ""}</li>`);
+  const queue = r.queue.map((e, i) => `<li>${i + 1}. ${esc(e.task_name)} <span class="muted">piece ${esc(e.piece_id)}</span>${e.requested ? '<span class="badge">asked for</span>' : ""}
+    <button type="button" class="small danger" data-command='${esc(JSON.stringify({ op: "queue_remove", index: i, task_name: e.task_name, piece_id: e.piece_id }))}'>remove</button></li>`);
   card("queue", `Offer queue (${queue.length})`, queue.length
     ? `<ul class="list">${queue.join("")}</ul>` : `<p class="muted">empty: offers wait here while the robot is busy</p>`);
-  const pool = r.pending_pool.map((t) => `<li>${esc(t.task)} <span class="muted">piece ${esc(t.piece_id)}</span><span class="badge">${esc(t.reason || t.state)}</span><small>${esc(t.instance)}</small></li>`);
+  const pool = r.pending_pool.map((t) => `<li>${esc(t.task)} <span class="muted">piece ${esc(t.piece_id)}</span><span class="badge">${esc(t.reason || t.state)}</span>
+    <button type="button" class="small" data-command='${esc(JSON.stringify({ op: "pool_offer", task_instance_id: t.instance }))}'>ask again</button>
+    <button type="button" class="small danger" data-command='${esc(JSON.stringify({ op: "pool_remove", task_instance_id: t.instance }))}'>remove</button>
+    <small>${esc(t.instance)}</small></li>`);
   card("pool", `Pending pool (${pool.length})`, pool.length
-    ? `<ul class="list">${pool.join("")}</ul>` : `<p class="muted">empty: refused or unanswered offers wait here</p>`);
+    ? `<ul class="list">${pool.join("")}</ul>` : `<p class="muted">empty: pending offers (later, no answer, a robot-only no) wait here</p>`);
+}
+
+function renderLink(s) {
+  // What the ROS link last heard from the robot itself.
+  const ros = s.robot.ros || {};
+  const w = ros.wrench;
+  const force = w ? `F (${w.force_n.map((v) => v.toFixed(1)).join(", ")}) N · ${w.age_s.toFixed(1)} s ago` : "no samples (is the live TCP reader running?)";
+  card("link", "Robot link (ROS)", `
+    <div class="big ${ros.connected ? "" : "muted"}">${ros.connected ? "connected" : "not connected"}</div>
+    <div class="kv">
+      <span>TCP force</span><b>${esc(force)}</b>
+      <span>torque</span><b>${w ? esc(w.torque_nm.map((v) => v.toFixed(2)).join(", ")) + " Nm" : "-"}</b>
+      <span>gripper</span><b>${ros.gripper_open == null ? "-" : ros.gripper_open ? "open" : "closed"}</b>
+      <span>joints</span><b>${ros.joints_rad ? esc(ros.joints_rad.map((v) => v.toFixed(2)).join(", ")) + " rad" : "-"}</b>
+    </div>`);
 }
 
 function robotMarks(s) {
@@ -304,7 +427,9 @@ function renderTasks(s) {
       Object.entries(t.signals).forEach(([k, v]) => flags.push(`${k} ${v}`));
       robot.forEach((m) => flags.push(m));
       const progress = t.status === "WORKING" && t.executor === "Human" ? ` <span class="num">${num(t.progress)}</span>` : "";
-      return `<td class="cell st-${t.status}${isRef ? " ref" : ""}${robot.length ? " robot" : ""}">
+      const picked = pickedCell && pickedCell.piece === p.piece_id && pickedCell.task === name;
+      return `<td class="cell st-${t.status}${isRef ? " ref" : ""}${robot.length ? " robot" : ""}${picked ? " picked" : ""}"
+        data-piece="${esc(p.piece_id)}" data-task="${esc(name)}" title="click to edit in Manual control">
         <span class="chip">${STATUS[t.status] || esc(t.status)}</span>${t.executor ? ` <span class="who">${esc(t.executor.toLowerCase())}</span>` : ""}${progress}
         ${flags.length ? `<div class="flags">${esc(flags.join(" · "))}</div>` : ""}</td>`;
     }).join("");
@@ -383,10 +508,144 @@ function renderTimeline(s) {
   $("timeline").innerHTML = items.join("") || `<li><span></span><span></span><span class="muted">nothing yet</span></li>`;
 }
 
+// -- manual control ------------------------------------------------------------------
+
+const EVENT_LABELS = {
+  H_ACCEPT: "yes", H_REFUSE: "no", H_DEFER: "later", H_CANCEL: "cancel", H_PAUSE: "pause",
+  H_RESUME: "resume", H_RESTART: "restart", H_DONE: "done (adjustment / recovery)",
+  H_SCREW_DONE: "screw done", H_HANDOVER: "hand over (gripper opens)", H_FREE_GO: "free drive",
+  H_RETURN_HOME: "return home", H_MANUAL_RECOVERY: "manual recovery", H_TASK_DONE: "human's task done",
+  H_NEXT_PIECE: "next piece", ROBOT_RUNNING: "robot: running", ROBOT_SUCCESS: "robot: success",
+  ROBOT_HOMED: "robot: homed",
+};
+// Sending these starts or moves the robot: they ask first.
+const MOVES_ROBOT = new Set(["H_ACCEPT", "H_RESUME", "H_RESTART", "H_FREE_GO", "H_HANDOVER", "H_RETURN_HOME"]);
+let pickedCell = null;
+
+function flash(text, ok) {
+  const el = $("flash");
+  el.textContent = text;
+  el.className = ok ? "" : "err";
+}
+
+async function send(command, confirmText) {
+  if (confirmText && !window.confirm(confirmText)) return;
+  try {
+    const response = await fetch("/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-HRC-Control": "1" },
+      body: JSON.stringify(command),
+    });
+    const reply = await response.json();
+    flash(response.ok ? `sent: ${command.op}${command.event_type ? " " + command.event_type : ""} (result below)` : `not sent: ${reply.error}`, response.ok);
+  } catch (err) {
+    flash("not sent: no connection to the runtime", false);
+  }
+}
+
+// Fill a select only when its options change, so a choice survives the twice-a-second render.
+function setOptions(select, values, labels = values) {
+  const key = values.join("|");
+  if (select.dataset.key === key) return;
+  const current = select.value;
+  select.innerHTML = values.map((v, i) => `<option value="${esc(v)}">${esc(labels[i])}</option>`).join("");
+  select.dataset.key = key;
+  if (values.map(String).includes(current)) select.value = current;
+}
+
+function renderManual(s) {
+  const events = s.manual ? s.manual.events : [];
+  const box = $("event-buttons");
+  if (box.dataset.key !== events.join("|")) {
+    box.innerHTML = events.map((e) => `<button type="button" class="small" data-event="${esc(e)}">${esc(EVENT_LABELS[e] || e)}</button>`).join("");
+    box.dataset.key = events.join("|");
+  }
+  const accepts = new Set(Object.keys((s.robot.active && s.robot.active.accepts) || {}));
+  box.querySelectorAll("button").forEach((b) => b.classList.toggle("valid", accepts.has(b.dataset.event)));
+
+  const pieces = s.pieces.map((p) => String(p.piece_id));
+  setOptions($("m-piece"), pieces);
+  setOptions($("r-piece"), pieces);
+  const piece = s.pieces.find((p) => String(p.piece_id) === $("m-piece").value) || s.pieces[0];
+  setOptions($("m-task"), piece ? piece.tasks.map((t) => t.name) : []);
+  setOptions($("r-task"), s.manual ? s.manual.robot_tasks : []);
+
+  const results = (s.manual ? s.manual.results : []).map((r) =>
+    `<li class="${r.ok ? "ok" : "err"}"><time>${clock(r.t)}</time> ${esc(r.op)}: ${esc(r.text)}</li>`);
+  $("results").innerHTML = results.join("") || `<li class="muted">none yet</li>`;
+}
+
+function pickCell(piece, task) {
+  // A click in the task pool: edit that task below, starting from how it stands now.
+  pickedCell = { piece: Number(piece), task };
+  $("m-piece").value = String(piece);
+  if (latest) renderManual(latest);
+  $("m-task").value = task;
+  const p = latest && latest.pieces.find((x) => String(x.piece_id) === String(piece));
+  const t = p && p.tasks.find((x) => x.name === task);
+  if (t) {
+    $("m-status").value = t.status;
+    $("m-executor").value = t.executor || "";
+    $("m-progress").value = t.status === "WORKING" ? num(t.progress) : "";
+  }
+  if (latest) renderTasks(latest);
+  $("manual").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function parseValue(text) {
+  const v = text.trim().toLowerCase();
+  if (v === "true" || v === "yes") return true;
+  if (v === "false" || v === "no") return false;
+  const n = Number(v);
+  return v !== "" && Number.isFinite(n) ? n : null;
+}
+
+function taskCommand(op) {
+  return { op, piece_id: Number($("m-piece").value), task_name: $("m-task").value };
+}
+
+$("tasks").addEventListener("click", (e) => {
+  const cell = e.target.closest("td[data-task]");
+  if (cell) pickCell(cell.dataset.piece, cell.dataset.task);
+});
+$("m-piece").addEventListener("change", () => latest && renderManual(latest));
+$("event-buttons").addEventListener("click", (e) => {
+  const name = e.target.dataset && e.target.dataset.event;
+  if (!name) return;
+  const command = { op: "event", event_type: name };
+  if (name === "H_TASK_DONE") command.task_name = $("m-task").value;
+  send(command, MOVES_ROBOT.has(name) ? `Send "${EVENT_LABELS[name] || name}"? This moves the robot.` : null);
+});
+$("m-set-status").addEventListener("click", () => {
+  const command = { ...taskCommand("task_status"), status: $("m-status").value, executor: $("m-executor").value || null };
+  const progress = $("m-progress").value;
+  if (progress !== "") command.progress = Number(progress);
+  send(command);
+});
+$("m-set-signal").addEventListener("click", () => {
+  const value = parseValue($("m-value").value);
+  if (value === null) { flash("a signal value is true, false or a number", false); return; }
+  send({ ...taskCommand("signal"), name: $("m-signal").value, value });
+});
+$("m-clear-signal").addEventListener("click", () => send({ ...taskCommand("signal"), name: $("m-signal").value, value: null }));
+$("r-offer").addEventListener("click", () => send({ op: "offer", task_name: $("r-task").value, piece_id: Number($("r-piece").value) }));
+$("r-pool").addEventListener("click", () => send({ op: "pool_add", task_name: $("r-task").value, piece_id: Number($("r-piece").value) }));
+$("r-clear-active").addEventListener("click", () => send({ op: "clear_active" },
+  "Forget the active robot task? The robot is NOT told: if it is moving, use cancel instead."));
+$("r-clear-held").addEventListener("click", () => send({ op: "clear_held" },
+  "Forget the held panel? Only do this when the robot really holds nothing."));
+// Buttons inside the re-rendered cards (queue, pool) carry their command.
+document.addEventListener("click", (e) => {
+  const button = e.target.closest("button[data-command]");
+  if (button) send(JSON.parse(button.dataset.command));
+});
+
 function render(s) {
   renderHuman(s);
   renderRobot(s);
+  renderLink(s);
   renderTasks(s);
+  renderManual(s);
   renderRules(s);
   renderDetectors(s);
   renderTimeline(s);

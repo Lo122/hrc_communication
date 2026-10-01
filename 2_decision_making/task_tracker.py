@@ -156,6 +156,41 @@ class TaskTracker:
                     items.append((task, probability))
         return sorted(items, key=lambda item: -1.0 if item[1] is None else -item[1])
 
+    def plausible(self, task: TrackedTask) -> bool:
+        """Whether the sequence lets the human move on to this task now: it is pending,
+        the transition table expects it after the reference task, or the reference task
+        has overrun its usual duration. _believes() without its logging."""
+        probability = self.transitions.probability(self.reference_task, task.task_name)
+        return (task.status == TaskStatus.PENDING
+                or probability >= self.pending_min_probability
+                or self.reference_overran())
+
+    def potential_tasks(self) -> list[TrackedTask]:
+        """The recognized tasks the human could be doing now, in database order: on the
+        human's piece, not done, a human's to do, and the reference task, working, or
+        plausible after it. What the step selector keeps of recognition's scores."""
+        piece_id = self.human_piece_id
+        if piece_id is None:
+            return []
+        potential = []
+        for name in self._task_order[piece_id]:
+            task = self._tasks[piece_id][name]
+            if (not self.is_recognized(name) or task.status == TaskStatus.DONE
+                    or not self.database.can_execute(name, HUMAN)):
+                continue
+            if (name == self.reference_task and piece_id == self.reference_piece_id
+                    or task.status == TaskStatus.WORKING or self.plausible(task)):
+                potential.append(task)
+        return potential
+
+    def sequence_weight(self, task_name: str) -> float:
+        """How much the sequence expects this task next: 1 for the reference task (the
+        human carries on), else P(task | reference task), the table's START row before
+        any task."""
+        if task_name == self.reference_task:
+            return 1.0
+        return self.transitions.probability(self.reference_task, task_name)
+
     def snapshot(self) -> dict:
         return {
             "current_piece_id": self.current_piece_id,
@@ -299,6 +334,74 @@ class TaskTracker:
         self._refresh_pending()
         return task
 
+    def hand_to_human(self, task_name: str, piece_id: int) -> TrackedTask | None:
+        """The human turned the robot's offer down and does the task themselves: it is
+        theirs again, no longer the robot's (not robot-offered), open until recognition,
+        the workflow or a done confirmation says otherwise."""
+        task = self.get(task_name, piece_id)
+        if task is None or task.status == TaskStatus.DONE:
+            return task
+        task.robot_offered = False
+        if task.executor == ROBOT:
+            self._set_status(task, TaskStatus.PENDING, None)
+        self._log("Robot task refused: the human does it.", piece_id=piece_id, task_name=task_name)
+        self._refresh_pending()
+        return task
+
+    def set_manually(self, task_name: str, piece_id: int, status: TaskStatus,
+                     executor: str | None = None, progress: float | None = None) -> TrackedTask:
+        """The operator says how this task stands (the live view's manual control). Set
+        exactly: no earlier task is closed, nothing is inferred. WORKING by the human
+        makes it the human's current (reference) task -- any other task they were on
+        goes back to pending -- and restarts its clock; DONE makes it the reference if
+        the human is on nothing else, as a confirmation would; not done / pending
+        clears who does it and how far it got. Raises ValueError for an unknown task
+        or an executor the database does not allow."""
+        task = self.get(task_name, piece_id)
+        if task is None:
+            raise ValueError(f"{task_name} is not on piece {piece_id}.")
+        if status in (TaskStatus.WORKING, TaskStatus.DONE):
+            if executor is None:
+                raise ValueError(f"Say who does {task_name} (Human or Robot).")
+            if not self.database.can_execute(task_name, executor):
+                raise ValueError(f"{executor} may not do {task_name}.")
+        else:
+            executor = None
+        task.inferred = False
+        if status == TaskStatus.WORKING and executor == HUMAN:
+            self._pull_back_human_work(keep=task)
+        self._set_status(task, status, executor)
+        now = self.clock()
+        if status == TaskStatus.WORKING:
+            task.started_at, task.finished_at = now, None
+            task.progress = 0.0 if progress is None else float(progress)
+        elif status == TaskStatus.DONE:
+            task.progress = 1.0
+        else:
+            task.robot_offered = False
+            task.progress, task.started_at, task.finished_at = 0.0, None, None
+
+        is_reference = (task_name, piece_id) == (self.reference_task, self.reference_piece_id)
+        if self.is_recognized(task_name) and executor == HUMAN and status == TaskStatus.WORKING:
+            self._set_reference(task_name, piece_id, task.progress)
+        elif self.is_recognized(task_name) and status == TaskStatus.DONE:
+            reference = self._reference()
+            if reference is None or reference.status != TaskStatus.WORKING or reference is task:
+                self._set_reference(task_name, piece_id, 1.0)
+        elif is_reference:
+            self.reference_progress = task.progress
+        self._log("Task set manually.", piece_id=piece_id, task_name=task_name,
+                  status=status.name, executor=executor, progress=task.progress)
+        self._refresh_pending()
+        return task
+
+    def clear_signal(self, task_name: str, piece_id: int, name: str) -> TrackedTask | None:
+        """Forget a detector signal on a task (the operator's manual control)."""
+        task = self.get(task_name, piece_id)
+        if task is not None and task.signals.pop(name, None) is not None:
+            self._log("Task signal cleared.", piece_id=piece_id, task_name=task_name, signal=name)
+        return task
+
     def set_signal(self, task_name: str, piece_id: int, name: str, value) -> TrackedTask | None:
         """A detector reported a signal on this task (not "Done signal": that goes
         through confirm_done)."""
@@ -366,7 +469,7 @@ class TaskTracker:
                        reference_task=self.reference_task, probability=probability,
                        seconds_on_reference=None if seconds is None else round(seconds, 1),
                        limit_s=limit)
-        if self.reference_overran():
+        if self.plausible(task):  # only the overrun is left to make it so
             self._log("Reference task overran its usual duration; recognized task believed "
                       "although the transition table does not expect it.", **context)
             return True

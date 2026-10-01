@@ -69,6 +69,9 @@ class EventType(Enum):
     H_NEXT_PIECE = auto()
     # The demo's scripted opening starts (2_decision_making/demo_opening.py).
     DEMO_START = auto()
+    # The operator changed the decision layer's state from the live view (payload "op"
+    # plus its fields): 2_decision_making/manual_control.py.
+    MANUAL_CONTROL = auto()
     # Recognition has run for config.RECOGNITION_ACTIVATION_S: its task updates count.
     RECOGNITION_ACTIVE = auto()
 
@@ -98,6 +101,10 @@ class EventType(Enum):
     H_HANDOVER = auto()
 
     RESPONSE_TIMEOUT = auto()
+    # The workflow starts a task a few seconds from now without asking (leaving the
+    # hand-over position): R_DEFER until DEFER_TIMEOUT. A human "later" is H_DEFER, which
+    # makes the task pending instead.
+    DELAYED_START = auto()
     DEFER_TIMEOUT = auto()
     # A robot offer scheduled for now (payload task_name, piece_id): TaskManager.schedule_offer.
     SCHEDULED_OFFER = auto()

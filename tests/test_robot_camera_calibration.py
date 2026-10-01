@@ -5,8 +5,12 @@ docstring of robot_camera_calibration.py: T_base_from_camera is *defined* by
 the composition, so its residual is zero by construction). Synthetic data is
 the only place the recovery can be checked against a known truth.
 """
+import io
+import json
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import cv2
@@ -243,6 +247,147 @@ class CameraUncertaintyTest(unittest.TestCase):
         distance = np.linalg.norm(
             self.T_base_from_camera[:3, 3] - self.T_base_from_marker[:3, 3])
         self.assertAlmostEqual(ratio, distance / (MARKER_LENGTH_M / np.sqrt(2)), places=9)
+
+
+class FakeRTDE:
+    """Stands in for RTDEReceiveInterface: the arm is wherever the test put it,
+    and the controller clock ticks on every read unless frozen."""
+
+    def __init__(self):
+        self.pose = [0.0] * 6
+        self.stamp = 0.0
+        self.frozen = False
+        self.reconnects = 0
+
+    def getTimestamp(self):
+        if not self.frozen:
+            self.stamp += 0.002
+        return self.stamp
+
+    def getActualTCPPose(self):
+        return list(self.pose)
+
+    def reconnect(self):
+        self.reconnects += 1
+        self.frozen = False
+
+
+class CollectTouchPointsTest(unittest.TestCase):
+    """The prompt loop, scripted: each step optionally moves the arm, then presses a key."""
+
+    def setUp(self):
+        self.marker = rcc.marker_corner_points(MARKER_LENGTH_M)
+        T = _transform(0.0, 0.0, 90.0, [0.4, 0.12, -0.14])
+        self.corners = [list(p) + [3.14, 0.0, 0.0] for p in tf.transform_points(T, self.marker)]
+        self.rtde = FakeRTDE()
+        self.status_lines = []
+
+    def collect(self, steps):
+        steps = list(steps)
+
+        def read_key(status=None):
+            move, key = steps.pop(0)
+            if move is not None:
+                self.rtde.pose = list(move)
+            if status is not None:
+                self.status_lines.append(status())
+            return key
+
+        with redirect_stdout(io.StringIO()):
+            poses = rcc.collect_touch_points(self.rtde, self.marker, read_key=read_key)
+        self.assertEqual(steps, [], "the loop asked for fewer keys than scripted")
+        return poses
+
+    def test_clean_touches_record_each_corner(self):
+        poses = self.collect((corner, "") for corner in self.corners)
+        np.testing.assert_allclose(poses, self.corners)
+
+    def test_a_repeated_enter_is_refused_not_recorded_as_the_next_corner(self):
+        """The failure seen on the robot: ENTER twice at C0 recorded C0 as C1 too,
+        and every later corner shifted by one."""
+        c0, c1, c2, c3 = self.corners
+        poses = self.collect([(c0, ""), (None, ""), (None, ""),  # 2nd ENTER: flagged, re-touch
+                              (c1, ""), (c2, ""), (c3, "")])
+        np.testing.assert_allclose(poses, self.corners)
+        self.assertIn("off C0 -200.0 mm", self.status_lines[1])
+
+    def test_k_keeps_a_flagged_touch(self):
+        c0, c1, c2, c3 = self.corners
+        off_c1 = list(np.asarray(c1) + 0.075 * (np.asarray(c1) - np.asarray(c0)))  # 15 mm long
+        poses = self.collect([(c0, ""), (off_c1, ""), (None, "k"), (c2, ""),
+                              (c3, ""), (None, "k")])  # C3's diagonal to it is off too
+        np.testing.assert_allclose(poses[1], off_c1)
+
+    def test_frozen_robot_data_records_nothing_and_reconnects(self):
+        self.rtde.frozen = True
+        poses = self.collect([(self.corners[0], "")] + [(corner, "") for corner in self.corners])
+        self.assertEqual(self.rtde.reconnects, 1)
+        np.testing.assert_allclose(poses, self.corners)
+
+    def test_live_line_says_when_robot_data_stops(self):
+        self.rtde.frozen = True
+        lines = []
+
+        def redraw_twice(status=None):
+            lines.extend([status(), status()])
+            return "q"
+        with redirect_stdout(io.StringIO()):
+            rcc.collect_touch_points(self.rtde, self.marker, read_key=redraw_twice)
+        self.assertEqual(lines[1], "    (robot data not updating)")
+
+    def test_r_drops_the_previous_corner_and_q_aborts(self):
+        c0, c1, c2, c3 = self.corners
+        poses = self.collect([(c0, ""), (c1, ""), (None, "r"), (c1, ""), (c2, ""), (c3, "")])
+        np.testing.assert_allclose(poses, self.corners)
+        self.assertIsNone(self.collect([(c0, ""), (None, "q")]))
+
+
+class OpticalUncertaintyTest(unittest.TestCase):
+    """Where the camera side goes wrong: a marker only a few pixels across."""
+
+    def setUp(self):
+        self.K = np.array([[473.6, 0.0, 320.0], [0.0, 473.6, 180.0], [0.0, 0.0, 1.0]])
+        self.dist = np.zeros(5)
+        # The 2026-09-29 view: 5.4 m away, ~16 deg off face-on.
+        self.T_far = _transform(180.0, -16.0, 1.5, [-0.92, 0.55, 5.29])
+
+    def test_a_distant_marker_is_a_few_pixels_and_moves_the_camera_by_decimetres(self):
+        side_px, median_m, p90_m = rcc.estimate_optical_uncertainty(
+            self.T_far, MARKER_LENGTH_M, self.K, self.dist)
+        self.assertAlmostEqual(side_px, 17.3, delta=1.0)
+        self.assertGreater(median_m, 0.1)
+        self.assertGreater(p90_m, median_m)
+
+    def test_higher_resolution_shrinks_it(self):
+        K_4k = self.K.copy()
+        K_4k[:2] *= 6.0
+        _s, low_res, _p = rcc.estimate_optical_uncertainty(
+            self.T_far, MARKER_LENGTH_M, self.K, self.dist)
+        _s, high_res, _p = rcc.estimate_optical_uncertainty(
+            self.T_far, MARKER_LENGTH_M, K_4k, self.dist)
+        self.assertLess(high_res, low_res / 4.0)
+
+
+class LoadTouchPosesTest(unittest.TestCase):
+
+    def test_round_trips_through_a_saved_result(self):
+        T_base_from_marker = _transform(0.0, 0.0, 15.0, [0.62, 0.05, 0.00])
+        marker = rcc.marker_corner_points(MARKER_LENGTH_M)
+        poses = np.hstack([tf.transform_points(T_base_from_marker, marker), np.zeros((4, 3))])
+        result = rcc.solve_robot_camera(poses, _transform(180.0, 0.0, 0.0, [0, 0, 2.0]),
+                                        MARKER_LENGTH_M)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = rcc.save_result(Path(tmp) / "r.json", result, poses, 0, MARKER_LENGTH_M,
+                                   "DICT_4X4_50", 0.2, extra={"capture_size": [640, 360]})
+            np.testing.assert_allclose(rcc.load_touch_poses(path), poses)
+            self.assertEqual(json.loads(path.read_text())["capture_size"], [640, 360])
+
+    def test_rejects_a_file_without_four_poses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "r.json"
+            path.write_text(json.dumps({"touch_poses_tcp": [[0.0] * 6] * 3}))
+            with self.assertRaises(ValueError):
+                rcc.load_touch_poses(path)
 
 
 class ReportingTest(unittest.TestCase):

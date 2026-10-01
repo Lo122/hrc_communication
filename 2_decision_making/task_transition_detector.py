@@ -3,8 +3,10 @@
 Recognition's step output says which task the human is probably on, and TaskManager
 does not ask it at all while a robot lift leads. A detector reports that something
 specific has happened, from a signal it can read reliably: the shape of recognition's
-Screw progress over one screw, or the TCP force while the robot holds a panel. Each
-report is a Signal on one task of one piece:
+Screw progress over one screw (or Connect Cables' over the whole task), the TCP force
+while the robot holds a panel, or -- for Clamp Coupling, which recognition shows too
+unreliably -- how long it has been going and whether the next panel's work has
+started. Each report is a Signal on one task of one piece:
 
     Signal("Screw", 1, "progress", 0.5)            how far the task is, in place of
                                                    recognition's progress
@@ -54,6 +56,8 @@ from force_monitors import ScrewingMonitor, ScrewingThresholds
 from task_database import DONE_SIGNAL, PANEL_SECURED, PROGRESS_SIGNAL
 
 SCREW = "Screw"
+CONNECT_CABLES = "Connect Cables"
+CLAMP_COUPLING = "Clamp Coupling"
 SCREW_COUNT = "screw count"
 TCP_WEIGHT_CHANGE = "TCP weight change"
 
@@ -79,7 +83,14 @@ class DetectorContext:
     held_piece_id: int | None      # the panel the robot holds, if any
     tracker: object | None         # task_tracker.TaskTracker
     wrench: list = field(default_factory=list)       # (t, [fx, fy, fz, tx, ty, tz]) since the last pass
-    recognition: list = field(default_factory=list)  # (t, task name, progress) since the last pass
+    # (t, task name, progress) since the last pass: the step TaskManager's selector chose
+    # from recognition's scores against the task sequence ("Non Related Task", 0 when
+    # no task fits), with that step's own progress.
+    recognition: list = field(default_factory=list)
+    # (t, task name) since the last pass: the model's own stable step, before the
+    # sequence had a say -- for what the sequence would filter out (the next panel's
+    # tasks while this panel still has one open).
+    model_steps: list = field(default_factory=list)
     # Latest value each detector has reported, by (task, piece, signal); kept by
     # TaskTransitionDetectors, whether or not TaskManager acted on it.
     reported: dict = field(default_factory=dict)
@@ -112,6 +123,36 @@ class Detector:
         return Signal(task_name, piece_id, name, value, self.name, details)
 
 
+class ProgressCycle:
+    """One climb of a task's progress to high, then a fall to low -- with hysteresis, so
+    jitter in between is nothing. feed() and interrupt() say when a cycle ends."""
+
+    def __init__(self, high: float, low: float):
+        self.high, self.low = high, low
+        self.under_way = False
+        self.progress: float | None = None
+
+    def feed(self, progress: float) -> bool:
+        """The task's progress now. True when this completes a cycle."""
+        self.progress = progress
+        if progress >= self.high:
+            self.under_way = True
+        elif self.under_way and progress <= self.low:
+            self.under_way = False
+            return True
+        return False
+
+    def interrupt(self) -> bool:
+        """Recognition moved on to another step: a cycle under way ends here (True)."""
+        ended = self.under_way
+        self.reset()
+        return ended
+
+    def reset(self) -> None:
+        self.under_way = False
+        self.progress = None
+
+
 class ScrewCountDetector(Detector):
     """Screws counted from the shape of recognition's Screw progress.
 
@@ -139,16 +180,16 @@ class ScrewCountDetector(Detector):
     def _start_over(self, piece_id: int | None) -> None:
         self._piece = piece_id
         self._count = 0
-        self._under_way = False
+        self._cycle = ProgressCycle(self.high, self.low)
         self._last_counted_at: float | None = None
-        self._progress: float | None = None
         self._secured_reported = False
 
     def status(self) -> dict:
+        progress = self._cycle.progress
         return {
             "piece": self._piece,
-            "screw progress now": None if self._progress is None else round(self._progress, 2),
-            "screw under way": self._under_way,
+            "screw progress now": None if progress is None else round(progress, 2),
+            "screw under way": self._cycle.under_way,
             "screws counted": f"{self._count} of {self.screws_per_panel}",
             "panel secured reported": self._secured_reported,
         }
@@ -161,24 +202,18 @@ class ScrewCountDetector(Detector):
             self._start_over(piece)
         screw = context.task(SCREW, piece) if piece is not None else None
         if piece is None or (screw is not None and screw.status == TaskStatus.DONE):
-            self._under_way = False
+            self._cycle.reset()
             return []
         signals = []
         for t, task_name, progress in context.recognition:
             if task_name != SCREW:
-                if self._under_way:
+                if self._cycle.interrupt():
                     signals += self._count_one(t, f"recognition moved on to {task_name}")
-                self._progress = None
-                continue
-            self._progress = progress
-            if progress >= self.high:
-                self._under_way = True
-            elif self._under_way and progress <= self.low:
+            elif self._cycle.feed(progress):
                 signals += self._count_one(t, "progress fell back")
         return signals
 
     def _count_one(self, t: float, why: str) -> list[Signal]:
-        self._under_way = False
         if self._last_counted_at is not None and t - self._last_counted_at < self.min_interval_s:
             return []
         if self._count >= self.screws_per_panel:
@@ -192,6 +227,131 @@ class ScrewCountDetector(Detector):
             self._secured_reported = True
             signals.append(self.signal(SCREW, self._piece, PANEL_SECURED, True, screws=self._count))
         return signals
+
+
+class ProgressDoneDetector(Detector):
+    """A task done from the shape of recognition's progress for it: one climb to high and
+    fall to low -- or recognition moving on to another step after the climb -- as for
+    Connect Cables.
+
+    Works on the piece the human is on and starts over when that changes; reports "Done
+    signal" there once, unless the task is done already.
+    """
+
+    def __init__(self, task_name: str, *, high: float, low: float, name: str | None = None):
+        self.task_name = task_name
+        self.name = name or f"{task_name.lower()} done"
+        self.high, self.low = high, low
+        self._start_over(None)
+
+    def _start_over(self, piece_id: int | None) -> None:
+        self._piece = piece_id
+        self._cycle = ProgressCycle(self.high, self.low)
+        self._reported = False
+
+    def status(self) -> dict:
+        progress = self._cycle.progress
+        return {
+            "piece": self._piece,
+            "progress now": None if progress is None else round(progress, 2),
+            "under way": self._cycle.under_way,
+            "done reported": self._reported,
+        }
+
+    def update(self, context: DetectorContext) -> list[Signal]:
+        piece = context.tracker.human_piece_id if context.tracker is not None else None
+        if piece != self._piece:
+            self._start_over(piece)
+        task = context.task(self.task_name, piece) if piece is not None else None
+        if task is None or task.status == TaskStatus.DONE or self._reported:
+            self._cycle.reset()
+            return []
+        for _t, task_name, progress in context.recognition:
+            if task_name != self.task_name:
+                ended, why = self._cycle.interrupt(), f"recognition moved on to {task_name}"
+            else:
+                ended, why = self._cycle.feed(progress), "progress fell back"
+            if ended:
+                self._reported = True
+                return [self.signal(self.task_name, piece, DONE_SIGNAL, True, why=why)]
+        return []
+
+
+class DurationDoneDetector(Detector):
+    """A task recognition shows too unreliably to wait for, done by time or by what
+    follows it -- as for Clamp Coupling.
+
+    Its clock starts when the task starts (first recognized) or the task before it
+    (after_task) ends on the same piece, whichever is first -- so it runs even if
+    recognition never shows the task. The task is done once limit_s have passed since,
+    or once the model's own step (DetectorContext.model_steps, not what the sequence
+    made of it) is one of next_tasks for confirm_events updates in a row.
+
+    Works on the piece the human is on and starts over when that changes; reports "Done
+    signal" there once, unless the task is done already.
+    """
+
+    def __init__(self, task_name: str, *, limit_s: float, after_task: str | None = None,
+                 next_tasks=(), confirm_events: int = 3, name: str | None = None):
+        self.task_name = task_name
+        self.name = name or f"{task_name.lower()} done"
+        self.limit_s = float(limit_s)
+        self.after_task = after_task
+        self.next_tasks = tuple(next_tasks)
+        self.confirm_events = max(int(confirm_events), 1)
+        self._start_over(None)
+
+    def _start_over(self, piece_id: int | None) -> None:
+        self._piece = piece_id
+        self._started: float | None = None
+        self._next_seen = 0
+        self._reported = False
+        self._now: float | None = None
+
+    def status(self) -> dict:
+        running = (None if self._started is None or self._now is None
+                   else round(self._now - self._started, 1))
+        return {
+            "piece": self._piece,
+            "seconds since start": running,
+            "limit s": round(self.limit_s, 1),
+            "next task seen": f"{self._next_seen} of {self.confirm_events} "
+                              f"({', '.join(self.next_tasks) or '-'})",
+            "done reported": self._reported,
+        }
+
+    def update(self, context: DetectorContext) -> list[Signal]:
+        self._now = context.now
+        piece = context.tracker.human_piece_id if context.tracker is not None else None
+        if piece != self._piece:
+            self._start_over(piece)
+        task = context.task(self.task_name, piece) if piece is not None else None
+        if task is None or task.status == TaskStatus.DONE or self._reported:
+            return []
+        self._started = self._start_time(context, task, piece)
+        if self._started is None:  # neither it nor the task before it has got that far
+            self._next_seen = 0
+            return []
+        for _t, model_task in context.model_steps:
+            self._next_seen = self._next_seen + 1 if model_task in self.next_tasks else 0
+            if self._next_seen >= self.confirm_events:
+                return self._done(piece, f"recognition shows {model_task}, which follows it")
+        if context.now - self._started >= self.limit_s:
+            return self._done(piece, f"{self.limit_s:.1f} s since it started")
+        return []
+
+    def _start_time(self, context: DetectorContext, task, piece: int) -> float | None:
+        times = [task.started_at]
+        if self.after_task is not None:
+            before = context.task(self.after_task, piece)
+            if before is not None and before.status == TaskStatus.DONE:
+                times.append(before.finished_at)
+        times = [t for t in times if t is not None]
+        return min(times) if times else None
+
+    def _done(self, piece: int, why: str) -> list[Signal]:
+        self._reported = True
+        return [self.signal(self.task_name, piece, DONE_SIGNAL, True, why=why)]
 
 
 class ForceScrewDetector(Detector):
@@ -350,7 +510,7 @@ class TaskTransitionDetectors:
 
 def build_detectors() -> TaskTransitionDetectors:
     """The detectors config.py sets up, in the order they run."""
-    return TaskTransitionDetectors([
+    detectors = [
         ScrewCountDetector(screws_per_panel=config.SCREWS_PER_PANEL,
                            high=config.SCREW_PROGRESS_HIGH, low=config.SCREW_PROGRESS_LOW,
                            min_interval_s=config.SCREW_MIN_INTERVAL_S),
@@ -359,7 +519,33 @@ def build_detectors() -> TaskTransitionDetectors:
                            weight_change_n=config.TCP_WEIGHT_CHANGE_N,
                            weight_range_n=config.TCP_WEIGHT_RANGE_N,
                            weight_steady_s=config.TCP_WEIGHT_STEADY_S),
-    ])
+        ProgressDoneDetector(CONNECT_CABLES, high=config.CONNECT_CABLES_DONE_HIGH,
+                             low=config.CONNECT_CABLES_DONE_LOW),
+    ]
+    clamp = _clamp_coupling_detector()
+    if clamp is not None:
+        detectors.append(clamp)
+    return TaskTransitionDetectors(detectors)
+
+
+def _clamp_coupling_detector() -> DurationDoneDetector | None:
+    """Clamp Coupling's done-by-time detector: its limit from the annotated durations,
+    its next tasks from the transition table. None, logged, if either can't be read."""
+    from task_sequence_model import TransitionModel, load_duration_stat
+
+    root = Path(__file__).resolve().parents[1]
+    try:
+        limit_s = load_duration_stat(root / config.TASK_DURATION_STATS_PATH,
+                                     config.CLAMP_COUPLING_DONE_STAT)[CLAMP_COUPLING]
+        transitions = TransitionModel.from_csv(root / config.TASK_TRANSITION_TABLE_PATH)
+    except (OSError, KeyError, ValueError) as exc:
+        _logger.warning("No %s done detector: %s", CLAMP_COUPLING, exc)
+        return None
+    next_tasks = [name for name, probability in transitions.ranked_next(CLAMP_COUPLING)
+                  if name != CLAMP_COUPLING
+                  and probability >= config.DURATION_DONE_NEXT_MIN_PROBABILITY]
+    return DurationDoneDetector(CLAMP_COUPLING, limit_s=limit_s, after_task=CONNECT_CABLES,
+                                next_tasks=next_tasks, confirm_events=config.SEQUENCE_CONFIRM_EVENTS)
 
 
 def signal_payload(signal: Signal) -> dict:

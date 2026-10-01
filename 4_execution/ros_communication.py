@@ -59,6 +59,9 @@ class ROSCommunication:
         self.latest_gripper_open = None
         self.wrench_topic = wrench_topic
         self._wrench: deque[tuple[float, list[float]]] = deque(maxlen=WRENCH_BUFFER)
+        # The newest wrench sample, (t, [fx, fy, fz, tx, ty, tz]), kept for displays --
+        # reading it does not take it from the task detectors (drain_wrench).
+        self.latest_wrench: tuple[float, list[float]] | None = None
 
         if auto_connect:
             self.connect()
@@ -293,7 +296,8 @@ class ROSCommunication:
             wrench = [float(force[axis]) for axis in "xyz"] + [float(torque[axis]) for axis in "xyz"]
         except (KeyError, TypeError, ValueError):
             return
-        self._wrench.append((time.time(), wrench))
+        self.latest_wrench = (time.time(), wrench)
+        self._wrench.append(self.latest_wrench)
 
     def _emit_robot_status_event(self, event_type: EventType, message) -> None:
         event = Event(

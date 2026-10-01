@@ -8,13 +8,22 @@ shows, refreshed twice a second:
   - the human's reference task and the robot's active task, queue and pending pool;
   - each trigger rule and why it does or does not offer its task right now;
   - what the detectors see;
-  - a timeline of what the layer did: events, state transitions, log messages.
+  - a timeline of what the layer did: events, state transitions, log messages;
+  - the robot's own state: what its active task waits for and which events that state
+    accepts, and what the ROS link last heard (connection, gripper, joints, TCP force).
 
-The page only reads. build_snapshot() runs on the thread that runs TaskManager
-(HRCSystem.process_events, via DecisionView.update) and only while someone has the
-page open; the server thread serves the latest finished snapshot as /state.json and
-never touches live state. The page itself is decision_view.html, read on every
-request, so it can be edited while the runtime runs.
+build_snapshot() runs on the thread that runs TaskManager (HRCSystem.process_events,
+via DecisionView.update) and only while someone has the page open; the server thread
+serves the latest finished snapshot as /state.json and never touches live state.
+
+The page's manual control changes state -- for when recognition or a detector got it
+wrong, as they do in a study: it POSTs a command to /command, which the server only
+checks and hands on (submit); HRCSystem queues it as a MANUAL_CONTROL event and
+TaskManager applies it between the other events (manual_control.py). The server is
+bound to this machine, and a command needs a header only this page sends.
+
+The page itself is decision_view.html, read on every request, so it can be edited
+while the runtime runs.
 """
 
 from __future__ import annotations
@@ -31,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 import config
+from manual_control import EVENT_TYPES, OPS
 from task_database import ROBOT
 
 PAGE = Path(__file__).resolve().parent / "decision_view.html"
@@ -44,6 +54,31 @@ UNLOGGED_EVENTS = {"HUMAN_LOCATION_UPDATE"}
 UNLOGGED_MESSAGES = {"Task status."}
 
 ROBOT_TASK_NAMES = {task_id: name for name, task_id in config.TRACKED_TO_ROBOT_TASK.items()}
+
+# What a robot task in each state waits for, in words (the page also lists the events
+# the state machine accepts there).
+WAITING_FOR = {
+    "R_WAITING_RESPONSE": "the human's yes / no / later",
+    "R_ACCEPTED": "the robot to report it is running",
+    "R_EXECUTING": "the robot to report success",
+    "R_PAUSED": "resume (or cancel)",
+    "R_REDO": "the robot to report it is running again",
+    "R_DEFER": "its delay to run out (then it starts)",
+    "R_WAITING_FREE_DRIVE": "yes / no to free drive",
+    "R_FREE_DRIVE": "the human's \"adjustment done\"",
+    "R_HOLDING": "screw done, or the panel looking secured",
+    "R_WAITING_HANDOVER": "the human to take the item",
+    "R_HOLDING_HANDOVER": "the human to ask for the item",
+    "R_RECOVERY_EVALUATING": "whether it can return home",
+    "R_WAITING_HOME_PERMISSION": "home / no (manual recovery)",
+    "R_MANUAL_RECOVERY": "\"done\" after the manual recovery",
+}
+
+# A command POSTed to /command must carry this header. A page on another site cannot
+# add it without the browser asking first, and this server never says yes -- so only
+# this page (same origin) can change anything.
+CONTROL_HEADER = "X-HRC-Control"
+MAX_COMMAND_BYTES = 4096
 
 
 # -- timeline -------------------------------------------------------------------
@@ -117,12 +152,51 @@ def _event_text(event) -> tuple[str, str]:
 
 # -- snapshot -------------------------------------------------------------------
 
-def _robot_task(task) -> dict | None:
+def _robot_task(task, state_machine=None) -> dict | None:
+    """A robot task for the page; with the state machine, also what its state waits for
+    ({event: next state})."""
     if task is None:
         return None
+    now = time.time()
     return {"instance": task.task_instance_id, "task": ROBOT_TASK_NAMES.get(task.task_id, str(task.task_id)),
             "task_id": task.task_id, "piece_id": task.piece_id, "state": task.state.name,
-            "reason": task.pending_reason, "updated_at": task.updated_at}
+            "reason": task.pending_reason, "updated_at": task.updated_at,
+            "seconds_in_state": None if task.updated_at is None else round(now - task.updated_at, 1),
+            "waiting_for": WAITING_FOR.get(task.state.name, ""),
+            "accepts": ({} if state_machine is None
+                        else state_machine.events_from(task.state, task.task_id)),
+            "speed": task.speed, "free_drive": task.free_drive_active,
+            "running_reported": task.robot_running_received,
+            "success_reported": task.robot_success_received,
+            "delay_s": task.defer_seconds}
+
+
+def _ros_status(ros) -> dict:
+    """What the ROS link knows of the robot itself, for the page. Read only."""
+    client = getattr(ros, "client", None)
+    wrench = getattr(ros, "latest_wrench", None)
+    force = None
+    if isinstance(wrench, tuple) and len(wrench) == 2:
+        t, values = wrench
+        force = {"age_s": round(time.time() - t, 1), "force_n": [round(v, 1) for v in values[:3]],
+                 "torque_nm": [round(v, 2) for v in values[3:6]]}
+    joints = getattr(ros, "latest_joint_positions", None)
+    gripper = getattr(ros, "latest_gripper_open", None)
+    return {"connected": bool(client is not None and getattr(client, "is_connected", False) is True),
+            "joints_rad": [round(v, 3) for v in joints] if isinstance(joints, list) else None,
+            "gripper_open": gripper if isinstance(gripper, bool) else None,
+            "wrench": force}
+
+
+def _choice(choice) -> dict | None:
+    """The step selector's last pick (sequence_step_selector.StepChoice): the model's
+    step, the one chosen, why, and {task: [p, weight, score]} of the tasks it weighed."""
+    if choice is None:
+        return None
+    return {"model": choice.model_task, "selected": choice.task_name, "reason": choice.reason,
+            "progress": round(choice.progress, 3),
+            "scores": {name: [round(value, 3) for value in values]
+                       for name, values in choice.scores.items()}}
 
 
 def build_snapshot(manager, *, timeline=None, detectors=None) -> dict:
@@ -132,9 +206,10 @@ def build_snapshot(manager, *, timeline=None, detectors=None) -> dict:
     held = manager.held_piece_id
     snapshot = {
         "time": time.time(),
+        "mode": getattr(manager, "mode", "proactive"),
         "detector_mode": config.TASK_DETECTORS_MODE,
         "robot": {
-            "active": _robot_task(manager.active_task),
+            "active": _robot_task(manager.active_task, getattr(manager, "state_machine", None)),
             # Asked while the active task runs; its answer is kept until that one succeeds.
             "advance": _robot_task(manager.advance_task),
             "advance_answer": manager.advance_answer,
@@ -142,6 +217,13 @@ def build_snapshot(manager, *, timeline=None, detectors=None) -> dict:
             "held_piece_id": held,
             "queue": [dict(entry) for entry in manager.waiting_triggers],
             "pending_pool": [_robot_task(task) for task in manager.pending_pool.list_all()],
+            "ros": _ros_status(getattr(manager, "ros", None)),
+        },
+        "manual": {
+            "results": list(getattr(manager, "manual_results", [])),
+            "events": list(EVENT_TYPES),
+            "robot_tasks": [name for name in config.TRACKED_TO_ROBOT_TASK
+                            if tracker is None or tracker.database.can_execute(name, ROBOT)],
         },
         "human": None,
         "pieces": [],
@@ -163,6 +245,7 @@ def build_snapshot(manager, *, timeline=None, detectors=None) -> dict:
             "reference_limit_s": tracker.reference_limit(),
             "ignored_task": tracker.ignored_task,
             "status_line": tracker.status_line(),
+            "recognition_choice": _choice(getattr(manager, "last_recognition", None)),
         }
         for piece in tracker.database.pieces:
             tasks = []
@@ -199,14 +282,30 @@ def build_snapshot(manager, *, timeline=None, detectors=None) -> dict:
 class DecisionView:
     """Serves decision_view.html and the latest snapshot; see the module docstring."""
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, submit=None):
         self._lock = threading.Lock()
         self._state = b'{"waiting": true}'
         self._wanted_at = 0.0
         self._built_at = 0.0
+        # submit(payload): hands a manual-control command to the thread that runs
+        # TaskManager (HRCSystem queues it as a MANUAL_CONTROL event). None: read only.
+        self._submit = submit
         view = self
 
         class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                if self.path.split("?", 1)[0] != "/command":
+                    self.send_error(404)
+                    return
+                status, reply = view._command(self.headers, self.rfile)
+                body = json.dumps(reply).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_GET(self):
                 path = self.path.split("?", 1)[0]
                 if path in ("/", "/index.html"):
@@ -255,6 +354,32 @@ class DecisionView:
         state = json.dumps(build(), default=str).encode("utf-8")
         with self._lock:
             self._state = state
+
+    def set_submit(self, submit) -> None:
+        """Accept manual-control commands from now on, handing each to submit(payload)."""
+        self._submit = submit
+
+    def _command(self, headers, stream) -> tuple[int, dict]:
+        """One POSTed manual-control command: checked here, applied by TaskManager later
+        (manual_control.py), on its own thread. The outcome shows in the next snapshot."""
+        if headers.get(CONTROL_HEADER) != "1":
+            return 403, {"error": f"missing the {CONTROL_HEADER} header"}
+        if self._submit is None:
+            return 503, {"error": "manual control is not connected"}
+        try:
+            length = int(headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not 0 < length <= MAX_COMMAND_BYTES:
+            return 400, {"error": "empty or oversized command"}
+        try:
+            payload = json.loads(stream.read(length))
+        except (ValueError, UnicodeDecodeError):
+            return 400, {"error": "not JSON"}
+        if not isinstance(payload, dict) or payload.get("op") not in OPS:
+            return 400, {"error": f"unknown command; one of {', '.join(OPS)}"}
+        self._submit(payload)
+        return 202, {"queued": payload["op"]}
 
     def close(self) -> None:
         self.server.shutdown()

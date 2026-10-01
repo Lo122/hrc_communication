@@ -236,37 +236,58 @@ class WorkflowTests(WorkflowHarness):
                 self.assertEqual([(entry["task_name"], entry["piece_id"]) for entry in self.manager.waiting_triggers],
                                  [("Bring Tool", 1), ("Pull Cables", 2), ("Lift", 2)])
 
-    def test_defer_uses_task_duration_and_old_timer_cannot_affect_new_prompt(self):
+    def test_later_makes_the_task_pending_without_a_timer_and_old_timers_cannot_affect_it(self):
         self.hold()
         self.reply("screw done")
-        leave_id = self.manager.active_task.task_instance_id
-        with patch.dict(config.TASK_TIMINGS, {2: {"defer_seconds": 9}, 3: {"response_timeout_seconds": 30}}):
-            self.output.show_message.side_effect = lambda message, **kwargs: self.timer.start_defer_timer.assert_not_called()
+        leave = self.manager.active_task
+        with patch.dict(config.TASK_TIMINGS, {3: {"response_timeout_seconds": 30}}):
             self.reply("later")
-            self.output.show_message.side_effect = None
-            self.timer.start_defer_timer.assert_called_with(leave_id, 9)
+            self.timer.start_defer_timer.assert_not_called()  # no start in 5 s: pending
+            self.assertEqual((leave.state, self.manager.pending_pool.list_all()), (S.R_PENDING, [leave]))
+            self.assertIn('say or type "leave"', self.output.show_message.call_args.args[0])
+            self.reply("leave")  # asked again, dispatched only on a fresh yes
             self.assertEqual(self.udp.send.call_count, 1)
-            self.emit(E.DEFER_TIMEOUT, task_instance_id=leave_id)
+            self.reply("yes")
+            self.assertEqual(self.udp.send.call_count, 2)
             self.complete_robot()
             connector = self.manager.active_task
             self.timer.start_response_timer.assert_called_with(connector.task_instance_id, 30)
-            self.emit(E.RESPONSE_TIMEOUT, task_instance_id=leave_id)
-            self.emit(E.DEFER_TIMEOUT, task_instance_id=leave_id)
+            self.emit(E.RESPONSE_TIMEOUT, task_instance_id=leave.task_instance_id)
+            self.emit(E.DEFER_TIMEOUT, task_instance_id=leave.task_instance_id)
             self.assertIs(self.manager.active_task, connector)
             self.assertEqual(connector.state, S.R_WAITING_RESPONSE)
 
-    def test_cancel_deferred_leave_does_not_start_connector(self):
+    def test_later_to_the_leave_keeps_holding_and_starts_nothing_else(self):
         self.hold()
         self.reply("screw done")
+        leave = self.manager.active_task
         self.reply("later")
-        leave_id = self.manager.active_task.task_instance_id
-        self.reply("cancel")
-        self.timer.cancel_defer_timer.assert_called_once()
-        self.emit(E.DEFER_TIMEOUT, task_instance_id=leave_id)
-        self.assertEqual(self.manager.active_task.state, S.R_HOLDING)
+        self.emit(E.DEFER_TIMEOUT, task_instance_id=leave.task_instance_id)  # nothing to time out
+        self.assertIsNone(self.manager.active_task)
+        self.assertEqual(self.manager.held_piece_id, 1)  # still holding the panel
         self.ros.publish_cancel.assert_not_called()
-        self.assertEqual(self.udp.send.call_count, 1)
+        self.assertEqual(self.udp.send.call_count, 1)  # only the lift was dispatched
         self.assertEqual(self.output.show_permission_request.call_count, 2)
+
+    def test_no_to_a_task_the_human_can_do_hands_it_to_them(self):
+        self.trigger()  # the lift is offered
+        lift = self.manager.active_task
+        self.reply("no")
+        self.assertEqual((lift.state, self.manager.pending_pool.list_all()), (S.R_REFUSED, []))
+        self.assertIsNone(self.manager.active_task)
+        self.assertFalse(self.tracker.get("Lift", 1).robot_offered)  # the human's again
+        self.assertIn("Okay, you do this one", self.output.show_message.call_args.args[0])
+        self.trigger(PULL, 0.9)
+        self.assertIsNone(self.manager.active_task)  # and the robot does not ask again
+
+    def test_no_to_leaving_the_panel_keeps_it_pending(self):
+        """Only the robot can leave the panel it holds: a no waits pending, as before."""
+        self.hold()
+        self.reply("screw done")
+        leave = self.manager.active_task
+        self.reply("no")
+        self.assertEqual((leave.state, self.manager.pending_pool.list_all()), (S.R_REFUSED, [leave]))
+        self.assertEqual(self.manager.held_piece_id, 1)
 
     def test_retry_leave_keeps_context_and_rejects_previous_attempt_timers(self):
         self.hold()
@@ -425,6 +446,24 @@ class WorkflowTests(WorkflowHarness):
         self.assertEqual(len(publisher.update(RecognitionResult(0, CONNECT, 0.16, 0, 0.9, 0.3))), 1)
         scaled = TaskUpdatePublisher(progress_scale=100.0).update(RecognitionResult(0, SCREW, 150.0, 0, 1, 0))
         self.assertEqual(scaled[0].payload["progress"], 1.0)
+
+    def test_task_update_publisher_carries_every_steps_scores_and_publishes_when_they_move(self):
+        publisher = TaskUpdatePublisher(publish_delta=0.05, progress_scale=1.0, probability_delta=0.05)
+        n = len(config.STEP_NAMES)
+        probabilities, lanes = [0.1] * n, [0.2] * n
+        first = publisher.update(RecognitionResult(0, SCREW, 0.1, 0, 0.9, 0.0, probabilities, lanes))
+        self.assertEqual((first[0].payload["step_probabilities"], first[0].payload["step_progress"]),
+                         (probabilities, lanes))
+        jitter = [0.12] + [0.1] * (n - 1)
+        self.assertEqual(publisher.update(RecognitionResult(0, SCREW, 0.1, 0, 0.9, 0.1, jitter, lanes)), [])
+        moved = list(jitter)
+        moved[PULL] = 0.3  # only the scores moved: the decision layer may now pick another step
+        self.assertEqual(len(publisher.update(RecognitionResult(0, SCREW, 0.1, 0, 0.9, 0.2, moved, lanes))), 1)
+        lane_moved = list(lanes)
+        lane_moved[CONNECT] = 0.3
+        self.assertEqual(len(publisher.update(RecognitionResult(0, SCREW, 0.1, 0, 0.9, 0.3, moved, lane_moved))), 1)
+        without = publisher.update(RecognitionResult(0, CONNECT, 0.1, 0, 1.0, 0.4))
+        self.assertNotIn("step_probabilities", without[0].payload)
 
     def test_speed_and_pause_controls_remain_available(self):
         self.reply("screw done")  # No panel held: offers Bring Tool.
@@ -693,12 +732,38 @@ class DemoOpeningTests(WorkflowHarness):
         self.complete_robot()
         self.assertEqual(lift.state, S.R_FREE_DRIVE)
 
-    def test_later_to_the_lift_while_pulling_defers_it_after_the_pull(self):
+    def test_later_to_the_lift_while_pulling_makes_it_pending_until_asked(self):
         _, lift = self.robot_pulls_and_asks_about_the_lift()
         self.reply("later")
+        self.assertIsNone(self.manager.advance_task)
+        self.assertEqual((lift.state, self.manager.pending_pool.list_all()), (S.R_PENDING, [lift]))
+        self.assertIn('say or type "lift the panel"', self.output.show_message.call_args.args[0])
+        self.assertFalse(self.manager.demo_opening)
         self.emit(E.ROBOT_SUCCESS)
-        self.assertEqual(lift.state, S.R_DEFER)
-        self.timer.start_defer_timer.assert_called_with(lift.task_instance_id, config.DEFER_SECONDS)
+        self.assertIsNone(self.manager.active_task)  # nothing starts after the pull by itself
+        self.timer.start_defer_timer.assert_not_called()
+        self.reply("lift the panel")
+        self.assertIs(self.manager.active_task, lift)
+        self.assertEqual(lift.state, S.R_WAITING_RESPONSE)
+
+    def test_no_to_the_pull_is_the_humans_task_not_a_pending_one(self):
+        pull = self.manager.active_task
+        self.reply("no")
+        self.assertEqual((pull.state, self.manager.pending_pool.list_all()), (S.R_REFUSED, []))
+        cables = self.tracker.get("Pull Cables", 1)
+        self.assertEqual((cables.status, cables.executor, cables.robot_offered), (T.WORKING, "Human", False))
+        self.assertIn("Okay, you do this one", self.output.show_message.call_args.args[0])
+        self.assertTrue(self.manager.demo_opening)  # the lift is asked once the human has pulled
+
+    def test_later_to_the_pull_makes_it_pending_and_ends_the_opening(self):
+        pull = self.manager.active_task
+        self.reply("later")
+        self.assertEqual((pull.state, self.manager.pending_pool.list_all()), (S.R_PENDING, [pull]))
+        self.timer.start_defer_timer.assert_not_called()
+        self.assertFalse(self.manager.demo_opening)  # recognition takes over meanwhile
+        self.reply("pull the cables")
+        self.assertIs(self.manager.active_task, pull)
+        self.assertEqual(pull.state, S.R_WAITING_RESPONSE)
 
     def test_unanswered_lift_is_asked_again_after_the_pull(self):
         _, lift = self.robot_pulls_and_asks_about_the_lift()
@@ -713,7 +778,7 @@ class DemoOpeningTests(WorkflowHarness):
         _, lift = self.robot_pulls_and_asks_about_the_lift()
         self.reply("no")
         self.assertIsNone(self.manager.advance_task)
-        self.assertEqual((lift.state, self.manager.pending_pool.list_all()), (S.R_REFUSED, [lift]))
+        self.assertEqual((lift.state, self.manager.pending_pool.list_all()), (S.R_REFUSED, []))
         self.assertEqual((self.status("Lift"), self.tracker.get("Lift", 1).executor), (T.WORKING, "Human"))
         self.assertFalse(self.manager.demo_opening)
         self.emit(E.ROBOT_SUCCESS)
@@ -767,6 +832,44 @@ class DemoOpeningTests(WorkflowHarness):
         self.fire_scheduled_offer()  # comes late: nothing more
         self.assertIs(self.manager.active_task, lift)
         self.assertIsNone(self.manager.advance_task)
+
+
+class SequenceSelectionTests(WorkflowHarness):
+    """The human's step comes from recognition's scores against the task sequence."""
+
+    def scored(self, step=PULL, progress=0.3, lanes=None, **named):
+        payload = {"step_id": step, "round_id": 0, "progress": progress,
+                   "step_probabilities": [named.get(name.replace(" ", "_"), 0.02)
+                                          for name in config.STEP_NAMES]}
+        if lanes is not None:
+            payload["step_progress"] = lanes
+        self.manager.handle_event(Event(E.HUMAN_TASK_UPDATE, "recognition", payload=payload))
+
+    def test_the_expected_second_option_wins_over_a_ruled_out_first(self):
+        self.tracker.start_task("Screw", 1)
+        lanes = [0.0] * len(config.STEP_NAMES)
+        lanes[SCREW] = 0.35
+        self.scored(PULL, lanes=lanes, Pull_Cables=0.6, Screw=0.45)
+        self.assertEqual((self.tracker.reference_task, self.tracker.reference_progress), ("Screw", 0.35))
+        self.assertEqual(self.manager.last_recognition.model_task, "Pull Cables")
+        logged = [c.args[0] for c in self.manager.logger.log_message.call_args_list]
+        self.assertIn("Recognition step chosen by the task sequence.", logged)
+
+    def test_without_scores_the_models_step_is_taken_as_before(self):
+        self.tracker.start_task("Screw", 1)
+        self.trigger(PULL, 0.8)  # the table allows Pull Cables after Screw (0.30): a repeat
+        self.assertEqual(self.tracker.reference_task, "Pull Cables")
+
+    def test_no_task_high_enough_changes_nothing(self):
+        self.tracker.start_task("Screw", 1)
+        self.scored(config.STEP_NAMES.index("Non Related Task"), Non_Related_Task=0.9, Screw=0.1)
+        self.assertIsNone(self.manager.last_recognition.task_name)
+        self.assertEqual((self.tracker.reference_task, self.status("Screw")), ("Screw", T.WORKING))
+
+    def test_the_choice_is_made_while_the_lift_leads_for_the_detectors(self):
+        self.hold()
+        self.scored(PLACE, Place=0.7, Screw=0.5)  # Place is done: the robot placed the panel
+        self.assertEqual(self.manager.last_recognition.task_name, "Screw")
 
 
 class RecognitionWarmUpTests(WorkflowHarness):
@@ -865,8 +968,8 @@ class HandoverTests(WorkflowHarness):
         leave = self.manager.active_task
         self.assertEqual((leave.task_id, leave.state), (config.TASK_LEAVE_HANDOVER, S.R_DEFER))
         self.assertEqual(self.output.show_permission_request.call_count, asked)  # no question
-        self.assertIn("I will move away in 2 seconds", self.output.show_message.call_args.args[0])
-        self.timer.start_defer_timer.assert_called_with(leave.task_instance_id, 2.0)
+        self.assertIn("I'm moving away.", self.output.show_message.call_args.args[0])
+        self.timer.start_defer_timer.assert_called_with(leave.task_instance_id, 1.0)
         sent = self.udp.send.call_count
         self.emit(E.DEFER_TIMEOUT, task_instance_id=leave.task_instance_id)
         self.assertEqual(self.udp.send.call_count, sent + 1)
@@ -985,11 +1088,19 @@ class NamedRequestTests(WorkflowHarness):
     def test_pending_lift_is_asked_again_by_name(self):
         self.trigger()
         lift = self.manager.active_task
-        self.reply("no")
+        self.reply("later")
         self.assertIn('say or type "lift the panel"', self.output.show_message.call_args.args[0])
         self.reply("lift")
         self.assertIs(self.manager.active_task, lift)
         self.assertEqual(lift.state, S.R_WAITING_RESPONSE)
+
+    def test_a_refused_lift_can_still_be_asked_for_by_name(self):
+        self.trigger()
+        self.reply("no")  # the human lifts it -- until they change their mind
+        self.assertEqual(self.manager.pending_pool.list_all(), [])
+        self.reply("lift")
+        self.assertEqual((self.manager.active_task.task_id, self.manager.active_task.state),
+                         (config.TASK_LIFT_PANEL, S.R_WAITING_RESPONSE))
 
     def test_leave_without_a_held_panel_or_pending_leave(self):
         self.reply("leave")

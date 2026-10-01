@@ -23,9 +23,11 @@ from ros_communication import ROSCommunication
 from state_machine import StateMachine
 from task_manager import TaskManager
 from task_tracker import build_task_tracking
+from sequence_step_selector import StepChoice
 from task_transition_detector import (DONE_SIGNAL, PANEL_SECURED, PROGRESS_SIGNAL, SCREW_COUNT, TCP_WEIGHT_CHANGE,
-                                      Detector, DetectorContext, ForceScrewDetector, ScrewCountDetector,
-                                      Signal, TaskTransitionDetectors)
+                                      Detector, DetectorContext, DurationDoneDetector, ForceScrewDetector,
+                                      ProgressDoneDetector, ScrewCountDetector, Signal,
+                                      TaskTransitionDetectors, build_detectors)
 
 T0 = 1000.0
 HZ = 125.0
@@ -354,6 +356,98 @@ class TaskSignalHandlingTests(unittest.TestCase):
         self.output.show_message.assert_not_called()
 
 
+class ProgressDoneDetectorTests(unittest.TestCase):
+    """Connect Cables: done once its progress climbs to 0.60 and falls back to 0.15."""
+
+    def setUp(self):
+        self.tracker, _ = build_task_tracking(ROOT, logger=Mock())
+        self.detector = ProgressDoneDetector("Connect Cables", high=0.60, low=0.15)
+
+    def feed(self, samples, chunk=4):
+        seen = []
+        for i in range(0, len(samples), chunk):
+            part = samples[i:i + chunk]
+            seen += self.detector.update(DetectorContext(part[-1][0], None, None, self.tracker,
+                                                         recognition=part))
+        return seen
+
+    @staticmethod
+    def connecting(values, task="Connect Cables"):
+        return [(T0 + 0.2 * i, task, value) for i, value in enumerate(values)]
+
+    def test_one_climb_and_fall_is_done_once(self):
+        seen = self.feed(self.connecting([0.0, 0.3, 0.5, 0.65, 0.4, 0.1, 0.3, 0.7, 0.05]))
+        self.assertEqual([(s.task_name, s.piece_id, s.name) for s in seen],
+                         [("Connect Cables", 1, DONE_SIGNAL)])
+        self.assertEqual(seen[0].details["why"], "progress fell back")
+        self.assertEqual(self.detector.name, "connect cables done")
+
+    def test_jitter_below_the_climb_is_nothing(self):
+        self.assertEqual(self.feed(self.connecting([0.1, 0.4, 0.55, 0.2, 0.05, 0.5, 0.1])), [])
+
+    def test_recognition_moving_on_after_the_climb_is_done_too(self):
+        seen = self.feed(self.connecting([0.2, 0.62]) + [(T0 + 1.0, "Clamp Coupling", 0.1)])
+        self.assertEqual(seen[0].details["why"], "recognition moved on to Clamp Coupling")
+
+    def test_nothing_once_the_task_is_done(self):
+        self.tracker.confirm_done("Connect Cables", piece_id=1)
+        self.assertEqual(self.feed(self.connecting([0.0, 0.7, 0.1])), [])
+
+
+class DurationDoneDetectorTests(unittest.TestCase):
+    """Clamp Coupling: done by time after it (or Connect Cables before it) got going, or
+    once the model shows what follows it -- recognition hardly ever shows it itself."""
+
+    def setUp(self):
+        self.tracker, _ = build_task_tracking(ROOT, logger=Mock())
+        self.detector = DurationDoneDetector("Clamp Coupling", limit_s=14.0, after_task="Connect Cables",
+                                             next_tasks=("Pull Cables", "Lift"), confirm_events=3)
+
+    def update(self, now, model_steps=()):
+        return self.detector.update(DetectorContext(now, None, None, self.tracker,
+                                                    model_steps=list(model_steps)))
+
+    def connected(self) -> float:
+        self.tracker.confirm_done("Connect Cables", piece_id=1)
+        return self.tracker.get("Connect Cables", 1).finished_at
+
+    def test_done_by_time_after_connect_cables_without_clamp_coupling_ever_recognized(self):
+        done_at = self.connected()
+        self.assertEqual(self.update(done_at + 13.9), [])
+        seen = self.update(done_at + 14.1)
+        self.assertEqual([(s.task_name, s.piece_id, s.name) for s in seen],
+                         [("Clamp Coupling", 1, DONE_SIGNAL)])
+        self.assertEqual(seen[0].details["why"], "14.0 s since it started")
+        self.assertEqual(self.update(done_at + 30.0), [])  # once
+
+    def test_done_once_the_model_shows_the_next_panels_task_three_times_running(self):
+        done_at = self.connected()
+        self.assertEqual(self.update(done_at + 1, [(0, "Pull Cables"), (1, "Pull Cables"),
+                                                   (2, "Screw"), (3, "Pull Cables")]), [])
+        seen = self.update(done_at + 2, [(4, "Lift"), (5, "Pull Cables")])
+        self.assertEqual(seen[0].details["why"], "recognition shows Pull Cables, which follows it")
+
+    def test_nothing_before_it_or_connect_cables_got_going(self):
+        self.assertEqual(self.update(T0 + 1e6, [(t, "Pull Cables") for t in range(5)]), [])
+
+    def test_its_own_start_counts_too(self):
+        self.tracker.start_task("Clamp Coupling", 1)  # closes Connect Cables too, at the same time
+        started = self.tracker.get("Clamp Coupling", 1).started_at
+        self.assertEqual(self.update(started + 13.9), [])
+        self.assertEqual(self.update(started + 14.1)[0].name, DONE_SIGNAL)
+
+    def test_nothing_once_the_task_is_done(self):
+        done_at = self.connected()
+        self.tracker.confirm_done("Clamp Coupling", piece_id=1)
+        self.assertEqual(self.update(done_at + 100.0, [(t, "Lift") for t in range(5)]), [])
+
+    def test_built_from_the_annotated_duration_and_the_transition_table(self):
+        clamp = next(d for d in build_detectors().detectors if d.name == "clamp coupling done")
+        self.assertAlmostEqual(clamp.limit_s, 14.173, places=2)  # p95 of 93 annotated blocks
+        self.assertEqual(set(clamp.next_tasks), {"Pull Cables", "Lift"})
+        self.assertEqual(clamp.after_task, "Connect Cables")
+
+
 class RuntimeWiringTests(unittest.TestCase):
     def make_system(self):
         from communication_runtime import HRCSystem
@@ -381,7 +475,9 @@ class RuntimeWiringTests(unittest.TestCase):
 
     def test_recognition_updates_reach_the_detectors_next_pass(self):
         system = self.make_system()
-        system.task_manager = Mock(active_task=None, held_piece_id=None, tracker=None)
+        # No step choice (an update without scores, or no tracker): the model's own step.
+        system.task_manager = Mock(active_task=None, held_piece_id=None, tracker=None,
+                                   last_recognition=None)
         system.communication = Mock()
         system.detectors.update.return_value = []
         system.event_queue.put(Event(E.HUMAN_TASK_UPDATE, "recognition", timestamp=5.0, payload={
@@ -391,9 +487,29 @@ class RuntimeWiringTests(unittest.TestCase):
         self.assertEqual(system.detectors.update.call_args.args[0].recognition, [])
         system.task_manager.handle_event.assert_called()  # TaskManager still gets it too
         system.process_events()
-        self.assertEqual(system.detectors.update.call_args.args[0].recognition, [(5.0, "Screw", 0.62)])
+        context = system.detectors.update.call_args.args[0]
+        self.assertEqual(context.recognition, [(5.0, "Screw", 0.62)])
+        self.assertEqual(context.model_steps, [(5.0, "Screw")])
         system.process_events()
         self.assertEqual(system.detectors.update.call_args.args[0].recognition, [])
+
+    def test_detectors_follow_the_step_the_sequence_chose(self):
+        system = self.make_system()
+        system.communication = Mock()
+        system.detectors.update.return_value = []
+        choices = iter([StepChoice("Screw", 0.55, "Pull Cables", "by the sequence"),
+                        StepChoice(None, 0.0, "Place", "no plausible task scores high enough")])
+        system.task_manager = Mock(active_task=None, held_piece_id=None, tracker=None)
+        system.task_manager.handle_event.side_effect = (
+            lambda event: setattr(system.task_manager, "last_recognition", next(choices)))
+        for t, step in ((5.0, "Pull Cables"), (6.0, "Place")):
+            system.event_queue.put(Event(E.HUMAN_TASK_UPDATE, "recognition", timestamp=t, payload={
+                "step_id": config.STEP_NAMES.index(step), "progress": 0.1, "round_id": 0}))
+        system.process_events()
+        system.process_events()
+        context = system.detectors.update.call_args.args[0]
+        self.assertEqual(context.recognition, [(5.0, "Screw", 0.55), (6.0, "Non Related Task", 0.0)])
+        self.assertEqual(context.model_steps, [(5.0, "Pull Cables"), (6.0, "Place")])
 
     def test_screw_progress_cycles_end_the_holding_through_the_runtime(self):
         from communication_runtime import HRCSystem
@@ -437,6 +553,44 @@ class RuntimeWiringTests(unittest.TestCase):
         self.assertEqual(tracker.get("Screw", 1).status, T.WORKING)  # recognition or "screw done" decides
         self.assertIn("The panel looks secured.", [c.args[0] for c in output.show_message.call_args_list])
         self.assertNotEqual(tracker.get("Connect Cables", 1).status, T.WORKING)  # ignored while holding
+
+    def test_the_next_panels_task_ends_clamp_coupling_and_is_then_chosen_there(self):
+        """While piece 1's Clamp Coupling is open the sequence filters Pull Cables out (it
+        is done there); the model showing it still ends Clamp Coupling, and the human then
+        moves on to piece 2's Pull Cables."""
+        from communication_runtime import HRCSystem
+
+        system = HRCSystem.__new__(HRCSystem)
+        system.event_queue = EventQueue()
+        system.logger = Mock()
+        system.ros = Mock(drain_wrench=Mock(return_value=[]))
+        system.communication = Mock()
+        tracker, policy = build_task_tracking(ROOT, logger=Mock())
+        system.task_manager = TaskManager(StateMachine(), PendingTaskPool(), Mock(), MessageManager(), Mock(),
+                                          GHDispatcher(Mock()), Mock(), Mock(),
+                                          task_tracker=tracker, trigger_policy=policy)
+        system.detectors = build_detectors()
+        tracker.confirm_done("Connect Cables", piece_id=1)
+        pull = config.STEP_NAMES.index("Pull Cables")
+        scores = [0.02] * len(config.STEP_NAMES)
+        scores[pull] = 0.8
+
+        def pull_cables():
+            system.event_queue.put(Event(E.HUMAN_TASK_UPDATE, "recognition", payload={
+                "step_id": pull, "progress": 0.3, "round_id": 0, "step_probabilities": scores}))
+            system.process_events()
+
+        with patch.object(config, "TASK_DETECTORS_MODE", "on"):
+            for _ in range(3):
+                pull_cables()
+                self.assertIsNone(system.task_manager.last_recognition.task_name)  # filtered
+            system.process_events()  # the detectors' pass sees the third
+            system.process_events()  # their done signal is handled
+            self.assertEqual(tracker.get("Clamp Coupling", 1).status, T.DONE)
+            self.assertEqual(tracker.human_piece_id, 2)
+            for _ in range(3):  # confirm_events: a switch away from the reference task
+                pull_cables()
+        self.assertEqual((tracker.reference_task, tracker.reference_piece_id), ("Pull Cables", 2))
 
     def test_ros_buffers_wrench_until_drained(self):
         ros = ROSCommunication(auto_connect=False, wrench_topic="/UR10e/TCPForce/live")

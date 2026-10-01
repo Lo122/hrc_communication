@@ -42,6 +42,30 @@ class DebugArgumentTests(unittest.TestCase):
         self.assertIn("--demo", run_system._communication_args(args))
         self.assertEqual(recognition_args, ["--camera"])
 
+    def test_the_launcher_starts_the_live_tcp_reader_with_the_run_log(self):
+        import run_system
+        with patch.object(sys, "argv", ["run_system.py", "--robot-ip", "192.168.1.10",
+                                        "--run-name", "r1", "--camera"]):
+            args, recognition_args = run_system._parse_args()
+        self.assertEqual(recognition_args, ["--camera"])  # the robot flags stay with the launcher
+        self.assertFalse(args.no_robot_live)
+        live = run_system._robot_live_args(args)
+        self.assertEqual(live[:5], ["--ip", "192.168.1.10", "--publish-ros", "--ros-hz",
+                                    str(config.ROBOT_LIVE_DATA_ROS_HZ)])
+        self.assertEqual(Path(live[live.index("--log-file") + 1]),
+                         Path(args.log_dir) / "r1" / run_system.ROBOT_LIVE_LOG)
+        self.assertTrue(run_system.ROBOT_LIVE_SCRIPT.exists())
+
+    def test_the_live_reader_can_be_skipped_and_logs_nowhere_without_a_run_log(self):
+        import run_system
+        with patch.object(sys, "argv", ["run_system.py", "--no-robot-live", "--no-run-log",
+                                        "--video-source", "clip.mp4"]):
+            args, recognition_args = run_system._parse_args()
+        self.assertTrue(args.no_robot_live)
+        self.assertEqual(args.robot_ip, config.ROBOT_IP)
+        self.assertNotIn("--log-file", run_system._robot_live_args(args))
+        self.assertEqual(recognition_args, ["--video-source", "clip.mp4"])
+
 
 if __name__ == "__main__":
     unittest.main()

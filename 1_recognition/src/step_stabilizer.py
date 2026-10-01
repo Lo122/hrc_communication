@@ -37,6 +37,14 @@ class StepIdStabilizer:
         self.pending_step_id = None
         self.pending_count = 0
 
+    @property
+    def smoothed_probabilities(self):
+        """The mean of the recent probabilities -- what the stable step is chosen from --
+        or None before the first update."""
+        if not self.prob_history:
+            return None
+        return np.mean(np.stack(self.prob_history), axis=0)
+
     @staticmethod
     def _default_transitions(num_steps):
         transitions = {}

@@ -4,12 +4,17 @@ legacy (AssistLSTM) -- config.json with "feature_keys", best_model.pth, one norm
     (best_model/3d_skeleton*). One softmax over the steps, one progress value, an
     optional mistake softmax. Fed one feature vector per loop frame, window_size frames.
 
-multi-head (GRU/LSTM) -- config.json with "heads", feature_selection.json,
-    model_weights.pth, standardization.npz (best_model/S3_10fps_8s_bg05). Four heads:
-    independent task sigmoids (multi-label), a progress lane per task, a mistake logit
-    and a background logit ("nobody is working"). Fed one feature vector every
-    1/model_rate_hz seconds -- the rate the model was trained at, whatever the loop
-    runs at.
+multi-head (GRU/LSTM) -- four heads: independent task sigmoids (multi-label), a
+    progress lane per task, a mistake logit and a background logit ("nobody is
+    working"). Fed one feature vector every sample period -- the rate the model was
+    trained at, whatever the loop runs at. The same network comes in two layouts:
+      export -- config.json with "heads", feature_selection.json, model_weights.pth,
+        standardization.npz (best_model/S3_10fps_8s_bg05); rate from "model_rate_hz".
+      training run -- config.json with "feature_keys" and an idle head in its
+        "loss_weights", best_model.pth, a per-panel norm_stats.npz
+        (best_model/3d_skeleton_05, _06); rate input_fps / sample_interval. The
+        checkpoint names the parameters lstm/step_head/progress_head/mistake_head/
+        idle_head; they are renamed onto multihead_models' rnn/heads.* on load.
 
 Both predict a StepPrediction over config.STEP_NAMES, so the stabilizer, the round
 bookkeeping and the decision layer see the same step ids whichever format runs.
@@ -38,9 +43,25 @@ COMPOSITE_FEATURE_KEYS = {"pol_angles": ("polar_azimuth", "polar_elevation")}
 # it (the training corpus says "No Related Task").
 IDLE_STEP_NAMES = ("Non Related Task", "No Related Task")
 
-# Transforms a multi-head model's feature_selection.json may ask for -- all of them
-# applied in MultiHeadStepModel.feature_vector.
+# Transforms a multi-head model's feature_selection.json (or a training run's
+# "feature_transforms") may ask for -- all of them applied in
+# MultiHeadStepModel.feature_vector.
 KNOWN_TRANSFORMS = {"polar_azimuth", "ratios", "standardisation"}
+
+# A training run's checkpoint names -> multihead_models.py's, for the same network.
+TRAINING_RUN_KEY_PREFIXES = {
+    "lstm.": "rnn.",
+    "gru.": "rnn.",
+    "shared.": "heads.shared.",
+    "step_head.": "heads.task.",
+    "progress_head.": "heads.prog.",
+    "mistake_head.": "heads.mist.",
+    "idle_head.": "heads.bg.",
+}
+
+# The frame rate a training run's windows were cut at, when its config doesn't say
+# (3d_skeleton_06 does: "input_fps": 30; the dataset is 30 fps throughout).
+TRAINING_RUN_DEFAULT_FPS = 30.0
 
 
 @dataclass
@@ -55,12 +76,17 @@ class StepPrediction:
     mistake_probabilities: [P(no mistake), P(mistake), ...], or None without a
         mistake head.
     idle_probability: the background head's P(nobody is working); None for legacy.
+    task_probabilities: each step's own probability, 0-1 independently of the others
+        -- the multi-head task sigmoids, with P(idle) at the idle step. Unlike
+        step_scores they are not scaled by 1 - P(idle). None for legacy, whose
+        softmax step_scores already are its probabilities.
     """
 
     step_scores: np.ndarray
     progress: float | np.ndarray
     mistake_probabilities: np.ndarray | None = None
     idle_probability: float | None = None
+    task_probabilities: np.ndarray | None = None
 
     @property
     def raw_step_id(self) -> int:
@@ -90,6 +116,8 @@ class StepPrediction:
             values.append(self.mistake_probabilities)
         if self.idle_probability is not None:
             values.append(np.atleast_1d(self.idle_probability))
+        if self.task_probabilities is not None:
+            values.append(self.task_probabilities)
         return all(np.all(np.isfinite(value)) for value in values)
 
 
@@ -136,12 +164,23 @@ def open_step_model(model_dir: str | Path, *, model_path=None, model_config_path
         model_config = json.load(file)
     if "heads" in model_config and (model_dir / "feature_selection.json").exists():
         return MultiHeadStepModel(model_dir, model_config)
+    if is_multi_head_training_run(model_config):
+        return MultiHeadStepModel(model_dir, model_config)
     if "feature_keys" in model_config:
         return LegacyStepModel(model_dir, model_config, model_path=model_path,
                                norm_path=norm_path, feature_keys=feature_keys)
     raise ValueError(
         f"Unknown step model format in {model_dir}: config.json has neither 'heads' (with "
         f"feature_selection.json beside it) nor 'feature_keys'.")
+
+
+def is_multi_head_training_run(model_config: dict) -> bool:
+    """A training run's config for the 4-head network (best_model/3d_skeleton_05):
+    'feature_keys' like the legacy format, but trained with an idle head."""
+    return "feature_keys" in model_config and (
+        "idle" in model_config.get("loss_weights", {})
+        or "idle_target" in model_config
+        or "idle" in model_config.get("decoding", {}))
 
 
 class LegacyStepModel(StepModel):
@@ -238,39 +277,27 @@ class LegacyStepModel(StepModel):
 
 class MultiHeadStepModel(StepModel):
     """The 4-head GRU/LSTM (best_model/multihead_models.py): multi-label task sigmoids,
-    per-task progress lanes, a mistake logit and a background logit."""
+    per-task progress lanes, a mistake logit and a background logit. Reads either
+    layout (module docstring); everything after reading the directory is shared."""
 
     format = MULTI_HEAD
 
     def __init__(self, model_dir: Path, model_config: dict):
         self.model_dir = model_dir
         self.model_config = model_config
-        with (model_dir / "feature_selection.json").open("r", encoding="utf-8") as file:
-            selection = json.load(file)
-        self.panels = list(selection["panels"])
-        unknown = set(selection.get("transforms", {})) - KNOWN_TRANSFORMS
-        if unknown:
-            raise ValueError(f"{model_dir.name}: unsupported feature transforms {sorted(unknown)}.")
-        if selection.get("joints_dropped"):
-            raise ValueError(f"{model_dir.name}: dropped joints {selection['joints_dropped']} "
-                             f"are not supported; the extractor emits every joint.")
-
-        stats = np.load(model_dir / "standardization.npz", allow_pickle=True)
-        self.mean = np.asarray(stats["mean"], dtype=np.float32)
-        self.std = np.asarray(stats["std"], dtype=np.float32)
-        columns = [str(name) for name in stats["columns"]]
         self.input_dim = int(model_config["input_dim"])
-        if columns != list(selection["column_order"]) or len(columns) != self.input_dim:
-            raise ValueError(f"{model_dir.name}: standardization.npz columns do not match "
-                             f"feature_selection.json's column_order ({self.input_dim} inputs).")
-        # Per panel, as the vector is built -- azimuth becomes a sin and a cos block.
-        self.panel_sizes = dict(selection["columns_per_panel"])
+        # Set by the layout reader: panels, panel_sizes (per panel, as the vector is
+        # built -- azimuth becomes a sin and a cos block), mean, std, window_size,
+        # sample_period_s, classes, and for load(): _network, _weight_files, _key_prefixes.
+        if (model_dir / "feature_selection.json").exists():
+            self._read_export()
+        else:
+            self._read_training_run()
+        if self.mean.size != self.input_dim or sum(self.panel_sizes.values()) != self.input_dim:
+            raise ValueError(f"{model_dir.name}: the feature panels add up to "
+                             f"{sum(self.panel_sizes.values())} columns and the stats to "
+                             f"{self.mean.size}; config.json says {self.input_dim} inputs.")
 
-        window = selection["window"]
-        self.window_size = int(window["samples"])
-        self.sample_period_s = 1.0 / float(window["model_rate_hz"])
-
-        self.classes = list(model_config["classes"])
         self.step_labels = list(config.STEP_NAMES)
         missing = [name for name in self.classes if name not in self.step_labels]
         if missing:
@@ -283,23 +310,115 @@ class MultiHeadStepModel(StepModel):
         self.idle_step = self.step_labels.index(idle[0])
         self._torch = self._device = self._model = None
 
+    def _read_export(self) -> None:
+        """best_model/S3_10fps_8s_bg05: feature_selection.json + standardization.npz."""
+        name = self.model_dir.name
+        with (self.model_dir / "feature_selection.json").open("r", encoding="utf-8") as file:
+            selection = json.load(file)
+        self.panels = list(selection["panels"])
+        self._check_transforms(selection.get("transforms", {}))
+        if selection.get("joints_dropped"):
+            raise ValueError(f"{name}: dropped joints {selection['joints_dropped']} "
+                             f"are not supported; the extractor emits every joint.")
+
+        stats = np.load(self.model_dir / "standardization.npz", allow_pickle=True)
+        self.mean = np.asarray(stats["mean"], dtype=np.float32)
+        self.std = np.asarray(stats["std"], dtype=np.float32)
+        columns = [str(column) for column in stats["columns"]]
+        if columns != list(selection["column_order"]):
+            raise ValueError(f"{name}: standardization.npz columns do not match "
+                             f"feature_selection.json's column_order.")
+        self.panel_sizes = dict(selection["columns_per_panel"])
+
+        window = selection["window"]
+        self.window_size = int(window["samples"])
+        self.sample_period_s = 1.0 / float(window["model_rate_hz"])
+        self.classes = list(self.model_config["classes"])
+
+        self._network = (self.model_config.get("architecture", "gru"),
+                         int(self.model_config.get("hidden_dim", 128)),
+                         int(self.model_config.get("num_layers", 1)))
+        self._weight_files = ["model_weights.pth", "model_bundle.pt"]
+        self._key_prefixes = {}
+
+    def _read_training_run(self) -> None:
+        """best_model/3d_skeleton_05: feature_keys in config.json + a per-panel
+        norm_stats.npz ("<panel>_mean" / "<panel>_std", azimuth as its 32 sin/cos
+        columns) + best_model.pth."""
+        name, cfg = self.model_dir.name, self.model_config
+        self.panels = list(cfg["feature_keys"])
+        self._check_transforms(cfg.get("feature_transforms", {}))
+
+        norm_path = self.model_dir / cfg.get("normalization_file", "norm_stats.npz")
+        stats = np.load(norm_path, allow_pickle=True)
+        missing = [panel for panel in self.panels
+                   if f"{panel}_mean" not in stats.files or f"{panel}_std" not in stats.files]
+        if missing:
+            raise ValueError(f"{name}: {norm_path.name} has no stats for panels {missing}.")
+        means = [np.asarray(stats[f"{panel}_mean"], dtype=np.float32).reshape(-1)
+                 for panel in self.panels]
+        stds = [np.asarray(stats[f"{panel}_std"], dtype=np.float32).reshape(-1)
+                for panel in self.panels]
+        self.panel_sizes = {panel: mean.size for panel, mean in zip(self.panels, means)}
+        self.mean, self.std = np.concatenate(means), np.concatenate(stds)
+
+        if cfg.get("mode", "seq2one") != "seq2one" or int(cfg.get("predict_offset", 0)) != 0:
+            raise ValueError(f"{name}: only seq2one models predicting the window's last "
+                             f"frame run online (mode {cfg.get('mode')!r}, predict_offset "
+                             f"{cfg.get('predict_offset')}).")
+        fps = float(cfg.get("input_fps", TRAINING_RUN_DEFAULT_FPS))
+        self.window_size = int(cfg["window_size"])
+        self.sample_period_s = int(cfg.get("sample_interval", 1)) / fps
+
+        num_tasks = int(cfg["num_steps"])
+        self.classes = list(cfg.get("task_names") or [
+            step for step in config.STEP_NAMES if step not in IDLE_STEP_NAMES][:num_tasks])
+        if len(self.classes) != num_tasks:
+            raise ValueError(f"{name}: {num_tasks} task heads but {len(self.classes)} task "
+                             f"names ({self.classes}).")
+
+        self._network = (str(cfg.get("model", "LSTM")).lower(), int(cfg.get("hidden_dim", 128)),
+                         int(cfg.get("num_layers", 1)))
+        self._weight_files = [file for file in (cfg.get("model_file"), "best_model.pth",
+                                                "model_weights.pth") if file]
+        self._key_prefixes = TRAINING_RUN_KEY_PREFIXES
+
+    def _check_transforms(self, transforms: dict) -> None:
+        unknown = set(transforms) - KNOWN_TRANSFORMS
+        if unknown:
+            raise ValueError(f"{self.model_dir.name}: unsupported feature transforms "
+                             f"{sorted(unknown)}.")
+
     def load(self, torch, device) -> None:
         definition_dir = str(self.model_dir.parent)
         if definition_dir not in sys.path:
             sys.path.insert(0, definition_dir)
-        from multihead_models import build
+        from multihead_models import GRUNet, LSTMNet, build
 
-        architecture = self.model_config.get("architecture", "gru")
-        if int(self.model_config.get("num_layers", 1)) > 1 and architecture == "lstm":
-            architecture = "lstm2"
-        model = build(architecture, self.input_dim, n_tasks=len(self.classes)).to(device)
-        weights = self.model_dir / "model_weights.pth"
-        state = (torch.load(weights, map_location=device) if weights.exists()
-                 else torch.load(self.model_dir / "model_bundle.pt", map_location=device,
-                                 weights_only=False)["state_dict"])
-        model.load_state_dict(state)
+        architecture, hidden_dim, num_layers = self._network
+        networks = {"lstm": LSTMNet, "gru": GRUNet}
+        model = (networks[architecture](self.input_dim, hidden_dim, num_layers, len(self.classes))
+                 if architecture in networks
+                 else build(architecture, self.input_dim, n_tasks=len(self.classes))).to(device)
+        model.load_state_dict(self._state_dict(torch, device))
         model.eval()
         self._torch, self._device, self._model = torch, device, model
+
+    def _state_dict(self, torch, device) -> dict:
+        """The first weights file present, its keys renamed onto multihead_models'."""
+        path = next((self.model_dir / file for file in self._weight_files
+                     if (self.model_dir / file).exists()), None)
+        if path is None:
+            raise FileNotFoundError(f"{self.model_dir.name}: none of {self._weight_files} found.")
+        state = torch.load(path, map_location=device, weights_only=path.suffix != ".pt")
+        for wrapper in ("state_dict", "model_state_dict"):  # a bundle or a training checkpoint
+            if isinstance(state.get(wrapper), dict):
+                state = state[wrapper]
+        renamed = {}
+        for key, value in state.items():
+            prefix = next((p for p in self._key_prefixes if key.startswith(p)), None)
+            renamed[key if prefix is None else self._key_prefixes[prefix] + key[len(prefix):]] = value
+        return renamed
 
     def feature_vector(self, features: dict) -> np.ndarray:
         blocks = []
@@ -332,7 +451,10 @@ class MultiHeadStepModel(StepModel):
         scores = np.zeros(self.num_steps, dtype=np.float32)
         scores[self.class_steps] = tasks * (1.0 - idle)
         scores[self.idle_step] = idle
+        probabilities = np.zeros(self.num_steps, dtype=np.float32)
+        probabilities[self.class_steps] = tasks
+        probabilities[self.idle_step] = idle
         progress = np.zeros(self.num_steps, dtype=np.float32)
         progress[self.class_steps] = np.clip(lanes, 0.0, 1.0)  # a linear head: clip to 0-1
         return StepPrediction(scores, progress, np.array([1.0 - mistake, mistake], dtype=np.float32),
-                              idle_probability=idle)
+                              idle_probability=idle, task_probabilities=probabilities)

@@ -8,11 +8,15 @@ from events import RobotTaskState as S
 
 @dataclass(frozen=True)
 class VoiceContext:
-    """Snapshot taken on the runtime thread, never a mutable RobotTask."""
+    """Snapshot taken on the runtime thread, never a mutable RobotTask.
+
+    reactive: the robot acts only on the human's commands (reactive mode), so they may
+    command it at any time -- it listens while idle, too."""
 
     state: S | None
     task_id: int | None = None
     task_instance_id: str | None = None
+    reactive: bool = False
 
 
 BASE_INSTRUCTIONS = """You interpret spoken human intent for a robot collaboration task.
@@ -113,10 +117,34 @@ STATE_CONTEXTS = {
 }
 
 
+# Reactive mode: the robot offers nothing, and the human may command it at any time.
+REACTIVE_DESCRIPTION = (
+    "The robot acts only when the human commands it; it never offers a task. A request "
+    "for the robot to pull the cables, lift the panel, bring or hand over the pipe "
+    "connector, or release the panel and move away is the matching command. Describing "
+    "one's own work is not a command."
+)
+REACTIVE_COMMANDS = ("pull the cables", "lift the panel", "give me the connector", "leave")
+REACTIVE_STATE_CONTEXTS = {
+    None: ("The robot is idle and waits for the human's command.", ()),
+    S.R_HOLDING: (
+        "The robot is holding the panel while the human screws it in place. It releases "
+        "the panel and moves away only when the human says leave. A general completion "
+        "reply such as done, finished or I'm done means screwing is finished: output "
+        "screw done. Finishing adjustment alone does not mean screwing is finished.",
+        ("screw done", "cancel"),
+    ),
+}
+
+
 def build_instructions(context: VoiceContext, question: str | None = None) -> str:
-    description, commands = STATE_CONTEXTS.get(
+    contexts = {**STATE_CONTEXTS, **REACTIVE_STATE_CONTEXTS} if context.reactive else STATE_CONTEXTS
+    description, commands = contexts.get(
         context.state, ("No voice interaction is currently active.", ()),
     )
+    if context.reactive:
+        description = f"{REACTIVE_DESCRIPTION}\n{description}"
+        commands = (*commands, *(command for command in REACTIVE_COMMANDS if command not in commands))
     task = TASK_DESCRIPTIONS.get(context.task_id, "unspecified robot task")
     state = context.state.name if context.state is not None else "none"
     parts = [

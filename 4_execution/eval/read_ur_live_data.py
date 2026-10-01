@@ -130,8 +130,8 @@ except ImportError:  # pragma: no cover - depends on deployment environment
 # Config
 # ---------------------------------------------------------------------------
 
-ROBOT_IP = "127.0.0.1"  # URSim in Docker: use localhost, since 30001-30004 are
-# published to the host (see `docker ps`); a real UR10e uses its LAN IP instead.
+ROBOT_IP = config.ROBOT_IP  # the lab UR10e; --ip 127.0.0.1 for URSim in Docker (ports
+# 30001-30004 are published to the host, see `docker ps`).
 
 # --- latency management ---------------------------------------------------
 # Three independent rates, on purpose:

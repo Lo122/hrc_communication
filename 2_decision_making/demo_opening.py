@@ -10,14 +10,17 @@ lift is settled:
            DEMO_LIFT_ASK_AFTER_PULL_START_S after it starts, the robot asks about the
            lift while still pulling: a yes lifts the panel the moment the cables are
            pulled (TaskManager._offer_in_advance).
-    no  -> the human pulls them. After Pull Cables' duration limit (the tracker's,
-           p95 of the annotations) plus DEMO_HUMAN_PULL_BUFFER_S the robot asks
-           about the lift.
+    no  -> the human pulls them (not pending: the robot does not ask again). After
+           Pull Cables' duration limit (the tracker's, p95 of the annotations) plus
+           DEMO_HUMAN_PULL_BUFFER_S the robot asks about the lift.
+    later -> the pull is pending until the human asks for it ("pull the cables"); the
+           opening is over, and the lift follows the pull as its chain's next task.
   "Would you like me to lift the panel?"
     yes -> the usual lift: free drive, holding, screw done, leave.
     no  -> the human lifts it.
+    later -> the lift is pending until the human asks for it ("lift the panel").
 
-Once the lift is answered (or deferred, or left unanswered) the opening is over:
+Once the lift is answered (or left unanswered: pending too) the opening is over:
 recognition, the trigger rules and the task detectors take over -- screw detection,
 the pipe connector, the tool, the next panel -- and the human can ask for robot
 tasks as always. Yes, no and later are the usual H_ACCEPT / H_REFUSE / H_DEFER.
@@ -39,8 +42,9 @@ TASK_NAMES = {task_id: name for name, task_id in config.TRACKED_TO_ROBOT_TASK.it
 
 # The lift question settled one way or another: the opening is over.
 LIFT_SETTLED = {S.R_ACCEPTED, S.R_DEFER, S.R_REFUSED, S.R_PENDING}
-# The robot's pull stopped short: nothing left to script.
-PULL_STOPPED = {S.R_RECOVERY_EVALUATING, S.R_CANCELED}
+# The robot's pull stopped short, or waits pending (later, or no answer): nothing left
+# to script.
+PULL_STOPPED = {S.R_RECOVERY_EVALUATING, S.R_CANCELED, S.R_PENDING}
 
 
 class DemoOpening:
@@ -75,7 +79,8 @@ class DemoOpening:
                 wait = manager.tracker.duration_limits.get(PULL, 0.0) + self.human_pull_buffer_s
                 self._schedule_lift(manager, wait, "the human pulls the cables")
             elif state in PULL_STOPPED:
-                self._end(manager, "the robot's cable pull was stopped")
+                self._end(manager, "the robot's cable pull is pending" if state == S.R_PENDING
+                          else "the robot's cable pull was stopped")
         elif name == LIFT and state in LIFT_SETTLED:
             if state == S.R_REFUSED:
                 manager.tracker.start_task(LIFT, self.piece_id, HUMAN)

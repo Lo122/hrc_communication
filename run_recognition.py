@@ -28,11 +28,13 @@ Usage:
 
     uv run python run_recognition.py `
         --video-source 6 `
-        --model-dir 1_recognition/best_model/3d_skeleton_03 `
+        --model-dir 1_recognition/best_model/S3_10fps_8s_bg05 `
         --intrinsics-file intrinsics_640x360_obs.json `
         --extrinsics-file extrinsics_3840x2160_obs.json `
-        --body-calibration 1_recognition/calib_data/body_uid-09.json `
+        --body-calibration 1_recognition/calib_data/body_uid-08.json `
         --fp16 `
+        --show-probabilities `
+        --loop-hz 10 `
         --record 1_recognition/results/recognition_test/detection_test.mp4 `
         --record-raw 1_recognition/results/recognition_test/detection_test_raw.mp4
 
@@ -185,7 +187,9 @@ def _parse_args() -> argparse.Namespace:
                               "otherwise K and the world frame will be wrong.")
     parser.add_argument("--extrinsics-file", default=None,
                          help="Extrinsics file name inside calib_data/, overriding the default for "
-                              "the chosen source. Use iphone_extrinsics_synthetic.json to run "
+                              "the chosen source. A robot-camera calibration "
+                              "(robot_camera_calibration_<...>.json) works too: its marker is the "
+                              "world. Use iphone_extrinsics_synthetic.json to run "
                               "without an ArUco calibration (idealised level camera -- fine for "
                               "checking the pipeline, not for real measurements).")
     parser.add_argument("--intrinsics-file", default=None,
@@ -248,7 +252,7 @@ def _parse_args() -> argparse.Namespace:
                               "1.0 = the recording's own rate). 2.0 drops twice as many frames "
                               "per inference, i.e. simulates a model half as fast, without "
                               "touching the frame timestamps the features are fit against.")
-    parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR), help="Model directory: legacy (config.json, best_model.pth, a norm .npz) or multi-head (config.json, feature_selection.json, model_weights.pth, standardization.npz, e.g. 1_recognition/best_model/S3_10fps_8s_bg05) -- told apart by its files.")
+    parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR), help="Model directory: legacy (config.json, best_model.pth, a norm .npz), multi-head export (config.json, feature_selection.json, model_weights.pth, standardization.npz, e.g. 1_recognition/best_model/S3_10fps_8s_bg05) or multi-head training run (config.json with an idle head in its loss_weights, best_model.pth, norm_stats.npz, e.g. 1_recognition/best_model/3d_skeleton_05) -- told apart by its files.")
     parser.add_argument("--host", default=config.EVENT_TRANSPORT_HOST, help="Communication event receiver host.")
     parser.add_argument("--port", type=int, default=config.EVENT_TRANSPORT_PORT, help="Communication event receiver port.")
     parser.add_argument("--no-display", action="store_true", help="Disable the recognition video preview window.")
@@ -287,8 +291,9 @@ def _parse_args() -> argparse.Namespace:
                               "fading trail.")
     parser.add_argument("--show-probabilities", action="store_true",
                          help="Show a live line-graph preview window of each task step's "
-                              "softmax probability and the progress value over time -- see "
-                              "step_probability_plot.py. Independent of --no-display.")
+                              "probability (softmax for a legacy model, each task's own 0-1 "
+                              "sigmoid plus P(idle) for a multi-head one) and the progress over "
+                              "time -- see step_probability_plot.py. Independent of --no-display.")
     parser.add_argument("--probability-history-seconds", type=float, default=12.0,
                          help="--show-probabilities only. How many seconds of history the "
                               "line graph keeps on screen.")
@@ -626,11 +631,17 @@ if __name__ == "__main__":
                             recognition_manager.num_steps,
                             history_seconds=args.probability_history_seconds,
                             step_labels=recognition_manager.step_labels,
-                            probability_title=("step scores: P(task) x P(working); idle = P(idle)"
+                            probability_title=("P(task): independent sigmoids, each 0-1; "
+                                               "idle = P(idle)"
                                                if multi_head else "task step probabilities"))
+                    # A multi-head model's own per-task sigmoids, not the step scores the
+                    # stabilizer ranks: those are scaled by 1 - P(idle), which drags every
+                    # task line down together whenever idle is up.
+                    task_probabilities = recognition_manager.last_task_probabilities
                     probability_plot.update(
                         probs_timestamp,
-                        recognition_manager.last_step_probabilities,
+                        (task_probabilities if task_probabilities is not None
+                         else recognition_manager.last_step_probabilities),
                         recognition_manager.last_progress,
                         recognition_manager.last_step_progress)
                     last_plotted_probabilities_timestamp = probs_timestamp

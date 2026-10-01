@@ -41,11 +41,17 @@ class CommandParser:
         "next piece": EventType.H_NEXT_PIECE,
         # Ready to take the item the robot brought: it opens the gripper.
         "hand over": EventType.H_HANDOVER,
-        "give me the tool": EventType.H_HANDOVER,
-        "give me the coupling": EventType.H_HANDOVER,
-        "give me the pipe coupling": EventType.H_HANDOVER,
-        "give me the connector": EventType.H_HANDOVER,
-        "give me the pipe connector": EventType.H_HANDOVER,
+    }
+
+    # Asking for an item -> H_HANDOVER {task_name: the task that brings it}. Ready to take
+    # the item the robot holds out, it opens the gripper; in reactive mode, with no item
+    # held out, it asks the robot to bring it (ReactiveTaskManager._handle_handover).
+    _HANDOVER_ALIASES = {
+        "give me the tool": "Bring Tool",
+        "give me the coupling": "Bring Connector",
+        "give me the pipe coupling": "Bring Connector",
+        "give me the connector": "Bring Connector",
+        "give me the pipe connector": "Bring Connector",
     }
 
     # Human confirms a task is finished -> H_TASK_DONE {task_name} (task database names).
@@ -82,10 +88,14 @@ class CommandParser:
         "pull the cables": "Pull Cables",
         "pull cables": "Pull Cables",
         "lift the panel": "Lift",
+        "lift a panel": "Lift",
+        "lift panel": "Lift",
         "lift": "Lift",
         "bring the tool": "Bring Tool",
         "bring tool": "Bring Tool",
         "bring the connector": "Bring Connector",
+        "bring the pipe connector": "Bring Connector",
+        "bring me the connector": "Bring Connector",
         "bring connector": "Bring Connector",
         "take the tool back": "Bring back Tool",
         "bring back tool": "Bring back Tool",
@@ -94,7 +104,7 @@ class CommandParser:
     @classmethod
     def phrases(cls) -> list[str]:
         """Every command phrase, for the voice recognizer's grammar."""
-        return [*cls._ALIASES, *cls._TASK_DONE_ALIASES, *cls._ROBOT_REQUEST_ALIASES]
+        return [*cls._ALIASES, *cls._HANDOVER_ALIASES, *cls._TASK_DONE_ALIASES, *cls._ROBOT_REQUEST_ALIASES]
 
     def parse(self, raw_text: str, source: str = "human_cli") -> Event | None:
         text = raw_text.strip().lower()
@@ -114,6 +124,8 @@ class CommandParser:
         if text in self._ROBOT_REQUEST_ALIASES:
             return Event(EventType.H_REQUEST_ROBOT_TASK, source,
                          payload={"task_name": self._ROBOT_REQUEST_ALIASES[text]})
+        if text in self._HANDOVER_ALIASES:
+            return Event(EventType.H_HANDOVER, source, payload={"task_name": self._HANDOVER_ALIASES[text]})
 
         event_type = self._ALIASES.get(text)
         if event_type is None:

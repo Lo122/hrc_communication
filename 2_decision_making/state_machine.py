@@ -9,9 +9,13 @@ class StateMachine:
 
     _TRANSITIONS = {
         (RobotTaskState.R_WAITING_RESPONSE, EventType.H_ACCEPT): RobotTaskState.R_ACCEPTED,
+        # No: the human does the task (or, one only the robot can do, it waits pending).
         (RobotTaskState.R_WAITING_RESPONSE, EventType.H_REFUSE): RobotTaskState.R_REFUSED,
-        (RobotTaskState.R_WAITING_RESPONSE, EventType.H_DEFER): RobotTaskState.R_DEFER,
+        # Later: pending until the human asks for it -- no timer.
+        (RobotTaskState.R_WAITING_RESPONSE, EventType.H_DEFER): RobotTaskState.R_PENDING,
         (RobotTaskState.R_WAITING_RESPONSE, EventType.RESPONSE_TIMEOUT): RobotTaskState.R_PENDING,
+        # The workflow's own delayed start (leaving the hand-over position).
+        (RobotTaskState.R_WAITING_RESPONSE, EventType.DELAYED_START): RobotTaskState.R_DEFER,
         # The human did the offered task themselves; the offer is withdrawn.
         (RobotTaskState.R_WAITING_RESPONSE, EventType.H_TASK_DONE): RobotTaskState.R_CANCELED,
         # A pending task is offered again, never dispatched without a fresh H_ACCEPT.
@@ -74,6 +78,13 @@ class StateMachine:
         task_id: int | None = None,
     ) -> bool:
         return self.get_next_state(current_state, event_type, task_id) is not None
+
+    def events_from(self, current_state: RobotTaskState,
+                    task_id: int | None = None) -> dict[str, str]:
+        """{event name: next state name} for every event the state accepts -- what a
+        task in this state waits for (the live view shows it)."""
+        return {event_type.name: next_state.name for event_type in EventType
+                if (next_state := self.get_next_state(current_state, event_type, task_id)) is not None}
 
     def get_next_state(
         self,

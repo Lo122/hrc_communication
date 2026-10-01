@@ -14,9 +14,33 @@ REQUEST_PHRASES = {
     config.TASK_LEAVE_HANDOVER: "leave",
 }
 
+# A commanded robot action, for reactive mode's replies; {panel} names the piece.
+COMMAND_ACTIONS = {
+    config.TASK_PULL_CABLES: "pull the cables of {panel}",
+    config.TASK_LIFT_PANEL: "lift {panel}",
+    config.TASK_BRING_CONNECTOR: "bring the pipe connector for {panel}",
+    config.TASK_BRING_CLAMPING_TOOL: "bring the clamping tool for {panel}",
+    config.TASK_RETURN_CLAMPING_TOOL: "take the clamping tool back from {panel}",
+    config.TASK_LEAVE: "release {panel} and move away",
+    config.TASK_LEAVE_HANDOVER: "move away from the hand-over position",
+}
+
+
+def panel_name(piece_id: int, location: str | None = None, *, spoken=False) -> str:
+    """'the middle panel (piece 2)'; spoken 'the middle panel'. 'panel 2' without a location."""
+    if not location:
+        return f"panel {piece_id}"
+    return f"the {location} panel" if spoken else f"the {location} panel (piece {piece_id})"
+
 
 class MessageManager:
-    """Centralizes detailed CLI text and concise speech without changing state."""
+    """Centralizes detailed CLI text and concise speech without changing state.
+
+    reactive: the robot acts only on the human's commands (reactive_task_manager.py),
+    so the texts that promise a question ask for a command instead."""
+
+    def __init__(self, reactive: bool = False):
+        self.reactive = reactive
 
     def get_permission_message(self, task_id: int, *, spoken=False) -> str:
         if spoken:
@@ -71,13 +95,14 @@ class MessageManager:
                 f'say or type "give me the {item}".')
 
     def get_handed_over_message(self, task, leave_in: float | None = None, *, spoken=False) -> str:
-        """leave_in: the robot leaves on its own this many seconds from now."""
+        """leave_in: the robot leaves on its own this many seconds from now. The delay is
+        kept short and not said -- a countdown sounds too explicit."""
         item = config.HANDOVER_ITEMS[task.task_id]
         if spoken:
-            leaving = "" if leave_in is None else f" Moving away in {leave_in:g} seconds."
+            leaving = "" if leave_in is None else " I'm moving away."
             return f"Here is the {item}.{leaving}"
         leaving = ("" if leave_in is None else
-                   f" I will move away in {leave_in:g} seconds. Say or type cancel to keep me here.")
+                   " I'm moving away. Say or type cancel to keep me here.")
         return f"Opening the gripper. Here is the {item}.{leaving}"
 
     def get_left_handover_message(self, *, spoken=False) -> str:
@@ -102,9 +127,13 @@ class MessageManager:
         return "I have released the panel and moved away from it."
 
     def get_holding_message(self, *, spoken=False) -> str:
+        if self.reactive:
+            if spoken:
+                return 'Holding the panel. Say "leave" to release it.'
+            return 'I will keep holding the panel. Say or type "leave" when I should release it and move away.'
         if spoken:
-            return 'Holding the panel. Say "screw done" when finished.'
-        return 'I will keep holding the panel. When screwing is finished, say or type "screw done". I will then ask before releasing the panel.'
+            return 'Holding the panel.'
+        return 'I will keep holding the panel. I will then ask before releasing the panel.'
 
     def get_pending_message(self, task, *, spoken=False) -> str:
         if spoken:
@@ -113,35 +142,28 @@ class MessageManager:
                 config.TASK_LEAVE_HANDOVER: " Staying here.",
             }.get(task.task_id, "")
             return "Task pending." + staying
-        reason = "No reply received." if task.pending_reason == "timeout" else "Okay."
+        reason = {"timeout": "No reply received.", "later": "Okay, later."}.get(task.pending_reason, "Okay.")
         staying = {
             config.TASK_LEAVE: " I will keep holding the panel.",
             config.TASK_LEAVE_HANDOVER: " I will stay at the hand-over position.",
         }.get(task.task_id, "")
         phrase = REQUEST_PHRASES.get(task.task_id, f"execute {task.task_instance_id}")
+        if self.reactive:
+            return f'{reason} This task is pending.{staying} Say or type "{phrase}" when I should do it.'
         return f'{reason} This task is pending.{staying} To be asked again when ready, say or type "{phrase}".'
 
-    def get_defer_message(self, task, duration: float, *, spoken=False) -> str:
+    def get_human_does_message(self, task, *, spoken=False) -> str:
+        """A no to a task the human can do: they do it, and the robot does not ask again."""
         if spoken:
-            action = {
-                config.TASK_LEAVE: "Releasing the panel",
-                config.TASK_LEAVE_HANDOVER: "Moving away",
-            }.get(task.task_id, "Starting")
-            return f"{action} in {duration:g} seconds. Say cancel to cancel."
-        staying = {
-            config.TASK_LEAVE: " I will keep holding the panel until then.",
-            config.TASK_LEAVE_HANDOVER: " I will stay here until then.",
-        }.get(task.task_id, "")
-        return f"Okay, I will start in {duration:g} seconds.{staying} Say or type cancel to cancel the delayed task."
+            return "Okay, you do it."
+        phrase = REQUEST_PHRASES.get(task.task_id, f"execute {task.task_instance_id}")
+        return f'Okay, you do this one. If you want me to do it after all, say or type "{phrase}".'
 
     def get_advance_acknowledgement(self, event_type: EventType, *, spoken=False) -> str:
-        """A yes or later to a task asked while the current one still runs."""
-        later = event_type == EventType.H_DEFER
+        """A yes to a task asked while the current one still runs (a no or later is
+        answered at once: get_human_does_message / get_pending_message)."""
         if spoken:
-            return "Okay, a little after this task." if later else "Okay, right after this task."
-        if later:
-            return (f"Okay, I will start {config.DEFER_SECONDS:g} seconds after the current task is finished. "
-                    "Say or type cancel then to cancel it.")
+            return "Okay, right after this task."
         return "Okay, I will start as soon as the current task is finished."
 
     def get_return_home_permission_message(self, *, spoken=False) -> str:
@@ -158,8 +180,8 @@ class MessageManager:
         if spoken:
             return {
                 EventType.H_ACCEPT: "Task accepted.",
-                EventType.H_REFUSE: "Task pending.",
-                EventType.H_DEFER: "Task deferred.",
+                EventType.H_REFUSE: "Okay, you do it.",
+                EventType.H_DEFER: "Task pending.",
                 EventType.H_PAUSE: "Paused.",
                 EventType.H_RESUME: "Resumed.",
                 EventType.H_RESTART: "Restarting.",
@@ -175,8 +197,8 @@ class MessageManager:
             }.get(event_type, "Command processed.")
         messages = {
             EventType.H_ACCEPT: "Robot task accepted.",
-            EventType.H_REFUSE: "Robot task moved to pending.",
-            EventType.H_DEFER: "Robot task deferred.",
+            EventType.H_REFUSE: "Robot task refused; the human does it.",
+            EventType.H_DEFER: "Robot task moved to pending.",
             EventType.H_PAUSE: "The robot task has been paused.",
             EventType.H_RESUME: "The robot task has resumed.",
             EventType.H_RESTART: "The robot task is restarting.",
@@ -191,6 +213,57 @@ class MessageManager:
             EventType.H_MANUAL_RECOVERY: "Manual recovery started.",
         }
         return messages.get(event_type, "Command processed.")
+
+    # -- reactive mode: replies to the human's commands ---------------------------------
+
+    def get_command_message(self, task_id: int, piece_id: int, location: str | None = None,
+                            *, queued=False, spoken=False) -> str:
+        """The robot carries out a command (queued: after the current task), naming the
+        piece it resolved, so a wrong one can be canceled straight away."""
+        action = COMMAND_ACTIONS[task_id].format(panel=panel_name(piece_id, location, spoken=spoken))
+        if queued:
+            return f"Okay, I will {action} after this task." if spoken else \
+                f"Okay, I will {action} after the current task."
+        return f"Okay, I will {action}." if spoken else f"Okay, I will {action}. Say or type cancel to stop me."
+
+    def get_already_queued_message(self, task_id: int, piece_id: int, location: str | None = None,
+                                   *, spoken=False) -> str:
+        if spoken:
+            return "That is next already."
+        action = COMMAND_ACTIONS[task_id].format(panel=panel_name(piece_id, location))
+        return f"I will {action} after the current task already."
+
+    def get_queued_skipped_message(self, task_id: int, piece_id: int, location: str | None = None,
+                                   *, spoken=False) -> str:
+        """A queued command whose task was done (or started) meanwhile."""
+        if spoken:
+            return "Skipping that, it is done already."
+        action = COMMAND_ACTIONS[task_id].format(panel=panel_name(piece_id, location))
+        return f"I will not {action} after all: it is already done or under way."
+
+    def get_nothing_left_message(self, task_name: str, *, spoken=False) -> str:
+        if spoken:
+            return "Nothing left to do for that."
+        return f"{task_name} is already done or under way on every panel left."
+
+    def get_screw_done_holding_message(self, *, spoken=False) -> str:
+        if spoken:
+            return 'Screwing done. Say "leave" to release the panel.'
+        return 'Okay, screwing is done. I keep holding the panel: say or type "leave" when I should release it.'
+
+    def get_cannot_leave_message(self, task, *, spoken=False) -> str:
+        """"leave" with no panel held and no leave pending: what the robot is doing instead."""
+        state = task.state if task is not None else None
+        if state in (RobotTaskState.R_WAITING_FREE_DRIVE, RobotTaskState.R_FREE_DRIVE):
+            if spoken:
+                return 'Say "done" after the adjustment first.'
+            return 'Free drive is on. Say or type "done" once the panel is adjusted; I then hold it until you say "leave".'
+        if state in (RobotTaskState.R_WAITING_HANDOVER, RobotTaskState.R_HOLDING_HANDOVER):
+            item = config.HANDOVER_ITEMS[task.task_id]
+            if spoken:
+                return f'Say "give me the {item}" to take it first.'
+            return f'I am holding the {item} out to you. Say or type "give me the {item}" to take it, or cancel.'
+        return "I am not holding a panel."
 
     def get_invalid_event_message(
         self,

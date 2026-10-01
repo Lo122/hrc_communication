@@ -30,6 +30,7 @@ from tts_manager import NullTTSManager, TTSManager
 from voice_interface import NullVoiceInterface, VoiceInterface
 from voice_context import VoiceContext
 from pending_task import PendingTaskPool
+from reactive_task_manager import ReactiveTaskManager
 from ros_communication import ROSCommunication
 from state_machine import StateMachine
 from task_manager import RECOGNITION_SOURCE, TaskManager
@@ -39,6 +40,8 @@ from timer_manager import TimerManager
 from udp_sender import UDPSender
 
 RECOGNITION_EVENTS = (EventType.HUMAN_TASK_UPDATE, EventType.RECOGNITION_TRIGGER)
+# The step the detectors see when no task the sequence allows fits the scores.
+IDLE_STEP = "Non Related Task"
 # What a run directory gets from the communication side (run_recognition.py writes
 # its frames.csv / events.csv / run.json / run.log beside them).
 COMMUNICATION_LOG = "communication_events.jsonl"
@@ -51,14 +54,25 @@ class HRCSystem:
     demo: the first panel opens with a scripted dialogue (demo_opening.py) instead of
     recognition -- start it with start_demo() -- and the task detectors run in
     config.DEMO_DETECTORS_MODE.
+    reactive: the robot offers nothing and acts only on the human's commands
+    (reactive_task_manager.py). It runs without recognition and without the task
+    detectors (no camera, no TCP force): the task tracker follows the robot's tasks and
+    what the human says, so a command goes to the right piece. Voice input listens while
+    the robot is idle, too.
     run_dir: log this run there -- communication_events.jsonl (every event, transition
     and message) and timeline.csv (the same, readable) -- instead of appending to
     config.LOG_FILE_PATH."""
 
-    def __init__(self, demo: bool = False, run_dir: str | Path | None = None):
+    def __init__(self, demo: bool = False, run_dir: str | Path | None = None, reactive: bool = False):
+        if demo and reactive:
+            raise ValueError("The demo opening is proactive: it cannot run in reactive mode.")
+        self.reactive = reactive
         if demo:
             # Read by the detectors, the ROS wrench subscription and the decision view.
             config.TASK_DETECTORS_MODE = config.DEMO_DETECTORS_MODE
+        if reactive:
+            # No camera and no TCP force: no detectors, no wrench subscription.
+            config.TASK_DETECTORS_MODE = "off"
         self.event_queue = EventQueue()
 
         self.run_dir = Path(run_dir) if run_dir is not None else None
@@ -73,7 +87,7 @@ class HRCSystem:
             self.logger = TimelineLogger(self.logger)
         self.command_parser = CommandParser()
         self.cli = CLIInterface(self.command_parser)
-        self.message_manager = MessageManager()
+        self.message_manager = MessageManager(reactive=reactive)
 
         if config.VOICE_ENABLED:
             self.voice = VoiceInterface(
@@ -116,7 +130,9 @@ class HRCSystem:
         self.pending_pool = PendingTaskPool()
         self.state_machine = StateMachine()
         self.task_tracker, self.trigger_policy = build_task_tracking(ROOT, logger=self.logger)
-        self.task_manager = TaskManager(
+        if reactive:
+            self.trigger_policy = None  # nothing is offered: the tracker only finds the piece
+        self.task_manager = (ReactiveTaskManager if reactive else TaskManager)(
             state_machine=self.state_machine,
             pending_pool=self.pending_pool,
             timer_manager=self.timer_manager,
@@ -136,6 +152,10 @@ class HRCSystem:
         # Last, so a failure above never leaves its port taken.
         self.decision_view = (DecisionView.start(config.DECISION_VIEW_HOST, config.DECISION_VIEW_PORT)
                               if config.DECISION_VIEW_PORT else None)
+        if self.decision_view is not None:
+            # The page's manual control: applied by TaskManager between the other events.
+            self.decision_view.set_submit(lambda payload: self.event_queue.put(
+                Event(EventType.MANUAL_CONTROL, "decision_view", payload=payload)))
 
     def start_demo(self) -> None:
         """Open the demo: the robot offers to pull the first panel's cables -- once
@@ -163,9 +183,10 @@ class HRCSystem:
     def _current_voice_context(self) -> VoiceContext:
         manager = getattr(self, "task_manager", None)
         task = manager.active_task if manager else None
+        reactive = getattr(self, "reactive", False)
         if task is None:
-            return VoiceContext(None)
-        return VoiceContext(task.state, task.task_id, task.task_instance_id)
+            return VoiceContext(None, reactive=reactive)
+        return VoiceContext(task.state, task.task_id, task.task_instance_id, reactive=reactive)
 
     def process_events(self) -> None:
         """Run the task detectors, then handle all queued recognition, CLI, timer,
@@ -173,8 +194,8 @@ class HRCSystem:
         self._run_detectors()
         while not self.event_queue.empty():
             event = self.event_queue.get()
-            self._note_recognition(event)
             self.task_manager.handle_event(event)
+            self._note_recognition(event)  # after: the step TaskManager chose for it
             self.communication.sync_state(self._current_state())
         self.communication.poll()
         view = getattr(self, "decision_view", None)
@@ -190,8 +211,10 @@ class HRCSystem:
             return
         manager = self.task_manager
         recognition, self._recognition = getattr(self, "_recognition", []), []
+        model_steps, self._model_steps = getattr(self, "_model_steps", []), []
         context = DetectorContext(time.time(), manager.active_task, manager.held_piece_id,
-                                  manager.tracker, self.ros.drain_wrench(), recognition)
+                                  manager.tracker, self.ros.drain_wrench(), recognition,
+                                  model_steps)
         for signal in detectors.update(context):
             if config.TASK_DETECTORS_MODE == "on":
                 self.event_queue.put(signal_event(signal))
@@ -200,19 +223,32 @@ class HRCSystem:
                                         {"source": signal.source, **signal_payload(signal)})
 
     def _note_recognition(self, event) -> None:
-        """Keep recognition's raw (task, progress) stream for the detectors' next pass:
-        they read it even while TaskManager ignores recognition for a robot lift -- but
-        not while recognition's model still warms up."""
+        """Keep recognition's (task, progress) stream for the detectors' next pass: the
+        step TaskManager chose for this update against the task sequence, and the model's
+        own step. They read it even while TaskManager ignores recognition for a robot
+        lift -- but not while recognition's model still warms up."""
         if getattr(self, "detectors", None) is None or event.event_type not in RECOGNITION_EVENTS:
             return
         manager = getattr(self, "task_manager", None)
         if event.source == RECOGNITION_SOURCE and manager is not None and not manager.recognition_active:
             return
         step = event.payload.get("step_id")
-        if isinstance(step, int) and 0 <= step < len(config.STEP_NAMES):
-            self._recognition = getattr(self, "_recognition", [])
-            self._recognition.append((event.timestamp, config.STEP_NAMES[step],
-                                      float(event.payload.get("progress") or 0.0)))
+        if not (isinstance(step, int) and 0 <= step < len(config.STEP_NAMES)):
+            return
+        model_task = config.STEP_NAMES[step]
+        progress = float(event.payload.get("progress") or 0.0)
+        choice = getattr(manager, "last_recognition", None)
+        if choice is not None:
+            # No task the sequence allows fits: the human is on none, as far as the
+            # detectors go (a climb under way ends as "recognition moved on").
+            task_name = choice.task_name if choice.task_name is not None else IDLE_STEP
+            progress = choice.progress if choice.task_name is not None else 0.0
+        else:
+            task_name = model_task
+        self._recognition = getattr(self, "_recognition", [])
+        self._recognition.append((event.timestamp, task_name, progress))
+        self._model_steps = getattr(self, "_model_steps", [])
+        self._model_steps.append((event.timestamp, model_task))
 
     def close(self) -> None:
         """Release communication resources."""
@@ -225,6 +261,6 @@ class HRCSystem:
         self.logger.close()
 
 
-def build_system(demo: bool = False, run_dir: str | Path | None = None) -> HRCSystem:
+def build_system(demo: bool = False, run_dir: str | Path | None = None, reactive: bool = False) -> HRCSystem:
     """Build the communication-side HRC runtime."""
-    return HRCSystem(demo=demo, run_dir=run_dir)
+    return HRCSystem(demo=demo, run_dir=run_dir, reactive=reactive)

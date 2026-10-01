@@ -59,7 +59,7 @@ Webcam:
         --aruco-dict DICT_4X4_50 `
         --capture-width 3840 --capture-height 2160 `
         --output 1_recognition/calib_data/extrinsics_3840x2160_obs.json `
-        --ground-z -0.70
+        --ground-z -0.62
 
     # both back to back
     uv run python 1_recognition/setup/calibrate_camera.py full --camera-index 0 `
@@ -87,15 +87,15 @@ Record3D / iPhone:
         --intrinsics 1_recognition/calib_data/iphone_intrinsics.json `
         --output 1_recognition/calib_data/iphone_extrinsics.json `
         --aruco-dict DICT_4X4_50 `
-        --marker-id 0 --marker-length-mm 200 --ground-z -0.70
+        --marker-id 0 --marker-length-mm 200 --ground-z -0.65
 
     # both back to back (add --use-reported-intrinsics to skip the board)
     uv run python 1_recognition/setup/calibrate_camera.py iphone-full `
         --capture-rotate90 270 `
         --use-reported-intrinsics --num-samples 60 `
         --method marker --marker-id 0 --marker-length-mm 200 --aruco-dict DICT_4X4_50 `
-        --board-rpy-deg 90 0 0 `
-        --ground-z -0.70 `
+        --ground-z -0.62 `
+        --board-rpy-deg 90 0 0
         --intrinsics-output 1_recognition/calib_data/iphone_intrinsics.json `
         --extrinsics-output 1_recognition/calib_data/iphone_extrinsics.json
         """

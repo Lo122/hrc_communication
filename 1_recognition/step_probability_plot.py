@@ -1,5 +1,6 @@
 """Live preview window: a rolling line graph of each task step's probability (a
-softmax, or a multi-head model's step scores) plus the progress-head output -- one
+softmax, or a multi-head model's independent per-task sigmoids and P(idle)) plus the
+progress-head output -- one
 line, or one per step for a model with a progress lane per task -- over the last few
 seconds --
 so you can watch the LSTM's raw per-frame output change over time instead of

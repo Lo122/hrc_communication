@@ -207,6 +207,7 @@ class DebugView:
         status_line: str = "",
         mistake_id: int | None = None,
         mistake_score: float | None = None,
+        idle_probability: float | None = None,
     ) -> None:
         """Draw and display one frame. Raises KeyboardInterrupt when the
         user presses q, which is how the run loop is asked to stop."""
@@ -245,7 +246,8 @@ class DebugView:
         display = self._draw_overlay(
             display, raw_step_id=raw_step_id, stable_step_id=stable_step_id,
             progress=progress, confidence=confidence, world_xyz=world_xyz,
-            status_line=status_line, mistake_id=mistake_id, mistake_score=mistake_score)
+            status_line=status_line, mistake_id=mistake_id, mistake_score=mistake_score,
+            idle_probability=idle_probability)
 
         self._write_frame(display)
 
@@ -292,6 +294,7 @@ class DebugView:
         status_line: str,
         mistake_id: int | None = None,
         mistake_score: float | None = None,
+        idle_probability: float | None = None,
     ):
         """Burn live model output + absolute human position as text onto the
         top-left corner of the display frame, for debugging without needing
@@ -315,6 +318,10 @@ class DebugView:
                 f"Stable step: {self._step_label(stable_step_id)}",
                 f"Progress: {progress:.2f}  Confidence: {confidence:.2f}",
             ]
+            # Multi-head models: every task score is P(task) x (1 - P(idle)), so a high
+            # idle is why no task gets near 1 -- show it rather than leave that a puzzle.
+            if idle_probability is not None:
+                step_lines.append(f"Idle (bg head): {idle_probability:.2f}")
         else:
             step_lines = [status_line]
 

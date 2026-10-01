@@ -12,6 +12,13 @@ measurements of that one marker are combined:
 That is the transform Grasshopper needs to turn a camera-frame human position
 into a robot-frame tool-drop location.
 
+The result file is also an extrinsics file for recognition: pass its name as
+--extrinsics-file (run_recognition.py / run_system.py). The marker is then the world
+-- human positions are reported in its frame -- and T_world_from_robot_base places
+the robot in it (camera_utils/calibration_io.py's load_extrinsics). The floor is not
+measured here: add "ground_z" (the floor's z in the marker frame, in m) to the file
+if the marker is not on the floor.
+
 Robot state is read over RTDE, not ROS: these are a handful of one-shot pose
 reads, and rosbridge would add a hop and a running node for nothing.
 
@@ -47,12 +54,28 @@ Procedure
    each labelled corner in turn, pressing ENTER at each. 'r' redoes the last
    one. The script only READS the robot: it never enables Freedrive itself and
    never takes control, so it also works while the robot is in Local mode.
+   While it waits, a live line shows the TCP and how far it is from where this
+   corner should be relative to the ones already recorded -- aim for zeros. A
+   touch that is off (the arm didn't move, a double ENTER, the wrong corner) is
+   refused unless you keep it with 'k'.
+
+The optical side degrades fast with distance: the marker's tilt comes from a few
+pixels of foreshortening. The script prints how far corner noise moves the solved
+camera; at 640x360 a 200 mm marker 5 m away spans ~17 px and moves it by decimetres.
+Capture at the camera's full resolution with the matching intrinsics. The touches
+stay valid while the marker stays put, so --touches <earlier result> redoes only
+the camera side.
 
 Usage:
     uv run python 1_recognition/setup/calibration/robot_camera_calibration.py `
         --intrinsics 1_recognition/calib_data/intrinsics_640x360_obs.json `
         --camera-index 6 --marker-id 0 --marker-length-mm 200 `
         --robot-ip 192.168.1.10
+
+    # camera side only, reusing an earlier run's touches:
+    uv run python 1_recognition/setup/calibration/robot_camera_calibration.py `
+        --intrinsics 1_recognition/calib_data/intrinsics_3840x2160_obs.json `
+        --camera-index 6 --touches 1_recognition/calib_data/robot_camera_calibration_<...>.json
 """
 import argparse
 import json
@@ -62,6 +85,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
+try:
+    import msvcrt  # Windows: poll the console, so the live TCP line can refresh while waiting
+except ImportError:
+    msvcrt = None
 
 if __package__ in (None, ""):
     # src/ for camera_utils, setup/ for the sibling calibration package, repo
@@ -98,6 +126,17 @@ TOUCH_DISTANCE_TOLERANCE_M = 0.005
 # Orientation spread across the four touches, above which the caveat about a
 # wrong TCP offset becomes detectable rather than invisible (see module docstring).
 ORIENTATION_SPREAD_WARN_DEG = 10.0
+
+# Typical sub-pixel ArUco corner noise, for the optical uncertainty estimate. It
+# matches the ~0.25 px reprojection error these solves report.
+CORNER_NOISE_PX = 0.25
+
+# Camera-position uncertainty (either side) above which the result is flagged.
+CAMERA_UNCERTAINTY_WARN_M = 0.010
+
+# The live TCP line is cut to this width so it never wraps: a wrapped line
+# can't be redrawn in place with '\r'.
+STATUS_WIDTH = 79
 
 
 def marker_corner_points(marker_length_m):
@@ -139,6 +178,64 @@ def solve_marker_pose_with_error(corners_2d, marker_length_m, K, dist):
     return tf.rvec_tvec_to_transform(rvec, tvec), error_px
 
 
+def estimate_optical_uncertainty(T_camera_from_marker, marker_length_m, K, dist,
+                                 noise_px=CORNER_NOISE_PX, trials=300, seed=0):
+    """How far corner noise moves the SOLVED CAMERA POSITION -- the optical
+    counterpart of estimate_camera_uncertainty. Returns (marker_side_px,
+    median_m, p90_m).
+
+    Monte Carlo: project the marker through the accepted pose, jitter the corners
+    by noise_px, re-solve, and measure where the camera lands. A small marker is
+    the failure case: its tilt comes from a pixel or two of foreshortening, and
+    IPPE's mirrored solution fits almost as well, so the solve can flip. That
+    shows up as a p90 far above the median.
+    """
+    object_points = marker_corner_points(marker_length_m)
+    rvec, _ = cv2.Rodrigues(np.asarray(T_camera_from_marker, dtype=np.float64)[:3, :3])
+    tvec = np.asarray(T_camera_from_marker, dtype=np.float64)[:3, 3]
+    pixels, _ = cv2.projectPoints(object_points, rvec, tvec, K, dist)
+    pixels = pixels.reshape(4, 2)
+    side_px = float(np.mean(np.linalg.norm(pixels - np.roll(pixels, -1, axis=0), axis=1)))
+
+    camera_in_marker = tf.invert_transform(T_camera_from_marker)[:3, 3]
+    rng = np.random.default_rng(seed)
+    errors = []
+    for _ in range(trials):
+        noisy = pixels + rng.normal(0.0, noise_px, pixels.shape)
+        ok, rvec_i, tvec_i = cv2.solvePnP(
+            object_points, noisy, K, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        if ok:
+            solved = tf.invert_transform(tf.rvec_tvec_to_transform(rvec_i, tvec_i))[:3, 3]
+            errors.append(np.linalg.norm(solved - camera_in_marker))
+    if not errors:
+        return side_px, float("inf"), float("inf")
+    return side_px, float(np.median(errors)), float(np.percentile(errors, 90))
+
+
+CORNER_COLOUR = (0, 128, 255)
+
+
+def draw_corner_label(display, pixel, center, s, lines):
+    """Draw a corner's text lines, (text, font scale) each, just outside the marker in
+    that corner's direction -- so the four labels of a small marker don't pile up on
+    top of each other and the marker itself stays visible. s: preview_scale."""
+    direction = np.asarray(pixel, dtype=np.float64) - center
+    direction /= max(np.linalg.norm(direction), 1e-6)
+    anchor = np.asarray(pixel, dtype=np.float64) + direction * 8 * s
+    font, thickness = cv2.FONT_HERSHEY_SIMPLEX, max(int(1 * s), 1)
+    sizes = [cv2.getTextSize(text, font, scale * s, thickness)[0] for text, scale in lines]
+    gap = int(4 * s)
+    block_h = sum(h for _w, h in sizes) + gap * (len(lines) - 1)
+    # Above the marker, the block ends at the anchor; below it, it starts there.
+    y = anchor[1] - block_h if direction[1] < 0 else anchor[1]
+    for (text, scale), (w, h) in zip(lines, sizes):
+        y += h
+        x = anchor[0] if direction[0] >= 0 else anchor[0] - w  # left corners: right-aligned
+        cv2.putText(display, text, (int(x), int(y)), font, scale * s, CORNER_COLOUR, thickness,
+                    cv2.LINE_AA)
+        y += gap
+
+
 def capture_marker_corners_live(camera_index, detector, marker_id, marker_length_m,
                                  K, dist, capture_size=None,
                                  preview_width=DEFAULT_PREVIEW_WIDTH):
@@ -172,28 +269,23 @@ def capture_marker_corners_live(camera_index, detector, marker_id, marker_length
 
             if corners_2d is not None:
                 cv2.polylines(display, [corners_2d.astype(np.int32)], True, (0, 255, 0),
-                              max(int(2 * s), 1))
+                              max(int(1 * s), 1))
+                center = corners_2d.mean(axis=0)
                 for label, pixel, marker_xyz in zip(CORNER_LABELS, corners_2d, marker_points):
-                    point = tuple(pixel.astype(int))
-                    cv2.circle(display, point, max(int(7 * s), 1), (0, 128, 255), -1)
-                    cv2.putText(display, label,
-                                (point[0] + int(10 * s), point[1] - int(6 * s)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7 * s, (0, 128, 255),
-                                max(int(2 * s), 1))
-                    cv2.putText(display,
-                                f"({marker_xyz[0]:+.3f}, {marker_xyz[1]:+.3f})",
-                                (point[0] + int(10 * s), point[1] + int(16 * s)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45 * s, (0, 128, 255),
-                                max(int(1 * s), 1))
+                    cv2.circle(display, tuple(pixel.astype(int)), max(int(3 * s), 1), CORNER_COLOUR, -1)
+                    draw_corner_label(display, pixel, center, s, [
+                        (label, 0.45),
+                        (f"({marker_xyz[0]:+.3f}, {marker_xyz[1]:+.3f})", 0.32),
+                    ])
                 cv2.putText(display, "SPACE to accept this corner order",
-                            (int(10 * s), int(30 * s)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8 * s, (0, 255, 0),
-                            max(int(2 * s), 1))
+                            (int(10 * s), int(24 * s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55 * s, (0, 255, 0),
+                            max(int(1 * s), 1))
             else:
                 cv2.putText(display, f"marker id={marker_id} not found",
-                            (int(10 * s), int(30 * s)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8 * s, (0, 0, 255),
-                            max(int(2 * s), 1))
+                            (int(10 * s), int(24 * s)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55 * s, (0, 0, 255),
+                            max(int(1 * s), 1))
 
             show_preview("robot-camera calibration - mark the corner order", display,
                          preview_width)
@@ -225,20 +317,96 @@ def connect_robot(robot_ip):
     return RTDEReceiveInterface(robot_ip)
 
 
-def collect_touch_points(rtde_r, marker_points, labels=CORNER_LABELS):
+def wait_for_key(status=None, period_s=0.1):
+    """One key press, lower-cased, with ENTER as "". status() gives the text of a
+    live line, redrawn until the key comes.
+
+    Keys pressed earlier are dropped first, so a double ENTER, or ENTERs typed
+    while RTDE was connecting, can't record a corner on their own. Where the
+    console can't be polled (not Windows) this falls back to input(), with the
+    status shown once.
+    """
+    if msvcrt is None:
+        if status is not None:
+            print(status())
+        return input("    > ").strip().lower()[:1]
+
+    while msvcrt.kbhit():
+        msvcrt.getwch()
+    while True:
+        if status is not None:
+            print("\r" + status().ljust(STATUS_WIDTH)[:STATUS_WIDTH], end="", flush=True)
+        if msvcrt.kbhit():
+            key = msvcrt.getwch()
+            if key in ("\x00", "\xe0"):  # arrows and F-keys: a prefix, then a code
+                msvcrt.getwch()
+                continue
+            if key == "\x03":
+                raise KeyboardInterrupt
+            if status is not None:
+                print()
+            return "" if key in ("\r", "\n") else key.lower()
+        time.sleep(period_s)
+
+
+def read_fresh_pose(rtde_r, wait_s=0.05):
+    """The current TCP pose, or None if RTDE has stopped updating. A frozen
+    connection keeps returning its last pose, which would record every later
+    corner at the same point -- the controller timestamp is what tells."""
+    stamp = rtde_r.getTimestamp()
+    time.sleep(wait_s)
+    if rtde_r.getTimestamp() == stamp:
+        return None
+    return list(rtde_r.getActualTCPPose())
+
+
+def touch_distance_errors(point, recorded_poses, marker_points):
+    """For the corner after recorded_poses: measured minus expected distance
+    from each recorded corner, in metres, in recording order."""
+    target = marker_points[len(recorded_poses)]
+    return [
+        float(np.linalg.norm(np.asarray(point[:3]) - np.asarray(pose[:3]))
+              - np.linalg.norm(target - marker_points[j]))
+        for j, pose in enumerate(recorded_poses)
+    ]
+
+
+def collect_touch_points(rtde_r, marker_points, labels=CORNER_LABELS, read_key=wait_for_key,
+                         tolerance_m=TOUCH_DISTANCE_TOLERANCE_M):
     """Prompt for one TCP touch per marker corner. Returns the full (N, 6) TCP
     poses -- position and axis-angle orientation, as getActualTCPPose gives
-    them. Orientation is kept for the spread check, not for the fit.
+    them -- or None if aborted. Orientation is kept for the spread check, not
+    for the fit.
+
+    Each touch is checked against the corners already recorded as it is taken,
+    not only at the end: a touch that repeats the previous one or lands on the
+    wrong corner would otherwise shift every later corner by one.
     """
     poses = []
+    last_stamp = None
+
+    def status():
+        """The live line: the TCP, and how far it is off each recorded corner."""
+        nonlocal last_stamp
+        stamp = rtde_r.getTimestamp()
+        if stamp == last_stamp:
+            return "    (robot data not updating)"
+        last_stamp = stamp
+        pose = rtde_r.getActualTCPPose()
+        line = f"    TCP ({pose[0]:+.4f}, {pose[1]:+.4f}, {pose[2]:+.4f}) m"
+        errors = touch_distance_errors(pose, poses, marker_points)
+        if errors:
+            line += " | off " + " ".join(
+                f"{labels[j]} {e * 1000:+.1f}" for j, e in enumerate(errors)) + " mm"
+        return line
+
     index = 0
     while index < len(marker_points):
         label = labels[index]
         marker_xyz = marker_points[index]
-        answer = input(
-            f"  Touch {label} at marker ({marker_xyz[0]:+.3f}, {marker_xyz[1]:+.3f}, "
-            f"{marker_xyz[2]:+.3f}) -- ENTER to record, 'r' to redo the previous, "
-            f"'q' to abort: ").strip().lower()
+        print(f"  Touch {label} at marker ({marker_xyz[0]:+.3f}, {marker_xyz[1]:+.3f}, "
+              f"{marker_xyz[2]:+.3f}) -- ENTER records, 'r' redoes the previous, 'q' aborts")
+        answer = read_key(status)
         if answer == "q":
             return None
         if answer == "r":
@@ -249,13 +417,38 @@ def collect_touch_points(rtde_r, marker_points, labels=CORNER_LABELS):
                 poses.pop()
                 print(f"    Dropped {labels[index]}; touch it again.")
             continue
+        if answer != "":
+            continue
 
-        pose = list(rtde_r.getActualTCPPose())
+        pose = read_fresh_pose(rtde_r)
+        if pose is None:
+            print("    Robot data is not updating, so nothing was recorded. Reconnecting...")
+            rtde_r.reconnect()
+            continue
+        errors = touch_distance_errors(pose, poses, marker_points)
+        off = [(labels[j], e) for j, e in enumerate(errors) if abs(e) > tolerance_m]
+        if off:
+            print(f"    {label} at ({pose[0]:+.4f}, {pose[1]:+.4f}, {pose[2]:+.4f}) m is off: "
+                  + ", ".join(f"{other} {e * 1000:+.1f} mm" for other, e in off)
+                  + " -- the arm didn't move, or the wrong corner?")
+            print("    'k' keeps it anyway, any other key touches it again.")
+            if read_key() != "k":
+                continue
         poses.append(pose)
         print(f"    {label} = ({pose[0]:+.4f}, {pose[1]:+.4f}, {pose[2]:+.4f}) m")
         index += 1
 
     return np.array(poses, dtype=np.float64)
+
+
+def load_touch_poses(path):
+    """The (4, 6) TCP touch poses saved in an earlier result file."""
+    with open(path) as f:
+        poses = np.asarray(json.load(f)["touch_poses_tcp"], dtype=np.float64)
+    if poses.shape != (len(CORNER_LABELS), 6):
+        raise ValueError(f"{path}: expected {len(CORNER_LABELS)} touch poses of 6 values, "
+                         f"got shape {poses.shape}")
+    return poses
 
 
 def orientation_spread_deg(poses):
@@ -372,7 +565,7 @@ def format_grasshopper_block(T_base_from_camera):
 
 
 def save_result(path, result, touch_poses, marker_id, marker_length_m, aruco_dict,
-                 reprojection_error_px, notes=""):
+                 reprojection_error_px, notes="", extra=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
@@ -395,6 +588,7 @@ def save_result(path, result, touch_poses, marker_id, marker_length_m, aruco_dic
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "notes": notes,
     })
+    data.update(extra or {})
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
     return path
@@ -402,16 +596,20 @@ def save_result(path, result, touch_poses, marker_id, marker_length_m, aruco_dic
 
 def run_robot_camera_calibration(intrinsics_path, camera_index, marker_id, marker_length_mm,
                                   aruco_dict, robot_ip, output, capture_size=None,
-                                  preview_width=DEFAULT_PREVIEW_WIDTH):
-    """Full procedure. Returns the result dict, or None if it was aborted."""
+                                  preview_width=DEFAULT_PREVIEW_WIDTH, touches_path=None):
+    """Full procedure. Returns the result dict, or None if it was aborted.
+    touches_path: reuse the touch poses of an earlier result file instead of
+    touching again -- valid only while the marker hasn't moved since."""
     K, dist, image_size = load_intrinsics(intrinsics_path)
     marker_length_m = marker_length_mm / 1000.0
     detector = make_aruco_detector(aruco_dict)
+    reused_touches = load_touch_poses(touches_path) if touches_path else None
 
-    logger.warning(
-        "Before touching: the TCP on the pendant must be set to your touch pin's TIP. "
-        "Left at the flange, every point is offset by the tool vector, and with a "
-        "constant tool orientation that offset passes every check here.")
+    if reused_touches is None:
+        logger.warning(
+            "Before touching: the TCP on the pendant must be set to your touch pin's TIP. "
+            "Left at the flange, every point is offset by the tool vector, and with a "
+            "constant tool orientation that offset passes every check here.")
 
     capture_size = capture_size or image_size
     corners_2d, T_camera_from_marker, reprojection_error_px = capture_marker_corners_live(
@@ -423,12 +621,31 @@ def run_robot_camera_calibration(intrinsics_path, camera_index, marker_id, marke
     logger.info("T_camera_from_marker solved, mean reprojection error %.2f px",
                 reprojection_error_px)
 
-    rtde_r = connect_robot(robot_ip)
-    try:
-        print("\nHold the pendant's Freedrive button and touch each corner in turn.")
-        touch_poses = collect_touch_points(rtde_r, marker_corner_points(marker_length_m))
-    finally:
-        rtde_r.disconnect()
+    side_px, optical_m, optical_p90_m = estimate_optical_uncertainty(
+        T_camera_from_marker, marker_length_m, K, dist)
+    logger.info("Optical side: the marker spans %.1f px; %.2f px of corner noise moves the "
+                "solved camera by ~%.0f mm (median), %.0f mm in the worst 10%%.",
+                side_px, CORNER_NOISE_PX, optical_m * 1000.0, optical_p90_m * 1000.0)
+    if optical_m > CAMERA_UNCERTAINTY_WARN_M:
+        logger.warning(
+            "That is over %.0f mm. Capture at a higher resolution (the intrinsics for it set "
+            "the capture size), bring the marker closer to the camera, or use a bigger one.%s",
+            CAMERA_UNCERTAINTY_WARN_M * 1000.0,
+            "" if reused_touches is not None else
+            " The touches stay valid while the marker stays put: --touches <the file this "
+            "run saves> redoes only the camera side.")
+
+    if reused_touches is not None:
+        logger.info("Reusing the touches in %s -- valid only if the marker hasn't moved since.",
+                    touches_path)
+        touch_poses = reused_touches
+    else:
+        rtde_r = connect_robot(robot_ip)
+        try:
+            print("\nHold the pendant's Freedrive button and touch each corner in turn.")
+            touch_poses = collect_touch_points(rtde_r, marker_corner_points(marker_length_m))
+        finally:
+            rtde_r.disconnect()
 
     if touch_poses is None:
         logger.error("Touch collection aborted.")
@@ -452,11 +669,11 @@ def run_robot_camera_calibration(intrinsics_path, camera_index, marker_id, marke
                 "radius, so that %.2f mm residual is roughly %.1f mm of uncertainty in "
                 "the camera position.",
                 lever_ratio, result["touch_rms_m"] * 1000.0, uncertainty_m * 1000.0)
-    if uncertainty_m > 0.010:
+    if uncertainty_m > CAMERA_UNCERTAINTY_WARN_M:
         logger.warning(
-            "That is over 10 mm. A bigger marker is the effective fix -- the error scales "
+            "That is over %.0f mm. A bigger marker is the effective fix -- the error scales "
             "as 1/marker_length, so doubling the marker halves it, while touching twice as "
-            "carefully is far harder.")
+            "carefully is far harder.", CAMERA_UNCERTAINTY_WARN_M * 1000.0)
 
     logger.info("Tool orientation spread across touches: %.1f deg", spread)
     if spread < ORIENTATION_SPREAD_WARN_DEG:
@@ -466,8 +683,17 @@ def run_robot_camera_calibration(intrinsics_path, camera_index, marker_id, marke
             "above -- confirm the TCP is your pin tip before trusting this result.",
             spread, ORIENTATION_SPREAD_WARN_DEG)
 
-    saved = save_result(output, result, touch_poses, marker_id, marker_length_m,
-                        aruco_dict, reprojection_error_px)
+    saved = save_result(
+        output, result, touch_poses, marker_id, marker_length_m, aruco_dict,
+        reprojection_error_px,
+        notes=f"touches reused from {Path(touches_path).name}" if touches_path else "",
+        extra={
+            "capture_size": [int(v) for v in capture_size],
+            "corners_px": np.asarray(corners_2d, dtype=np.float64).reshape(4, 2).tolist(),
+            "marker_side_px": side_px,
+            "optical_position_uncertainty_m": optical_m,
+            "optical_position_uncertainty_p90_m": optical_p90_m,
+        })
     logger.info("Saved to %s", saved)
     print()
     print(format_grasshopper_block(result["T_base_from_camera"]))
@@ -507,6 +733,10 @@ def main(argv=None):
     parser.add_argument("--output", default=None,
                         help="Where to write the result. Defaults to a timestamped file in "
                              "1_recognition/calib_data/.")
+    parser.add_argument("--touches", default=None,
+                        help="Reuse the touch poses of an earlier result file and redo only "
+                             "the camera side (no robot needed). Valid only while the marker "
+                             "hasn't moved since those touches.")
     args = parser.parse_args(argv)
 
     robot_ip = args.robot_ip
@@ -518,8 +748,9 @@ def main(argv=None):
     try:
         result = run_robot_camera_calibration(
             args.intrinsics, args.camera_index, args.marker_id, args.marker_length_mm,
-            args.aruco_dict, robot_ip, output, preview_width=args.preview_width)
-    except (IOError, OSError, RuntimeError) as exc:
+            args.aruco_dict, robot_ip, output, preview_width=args.preview_width,
+            touches_path=args.touches)
+    except (IOError, OSError, RuntimeError, ValueError, KeyError) as exc:
         logger.error("%s", exc)
         return 1
     return 0 if result is not None else 1

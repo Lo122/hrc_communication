@@ -188,11 +188,17 @@ class RecognitionManager:
         self.last_mistake_id: int | None = None
         self.last_mistake_score: float | None = None
         self.last_progress: float | None = None
-        # Multi-head models only (None for the legacy format): progress per step, and
-        # the background head's P(nobody is working).
+        # Multi-head models only (None for the legacy format): progress per step, the
+        # background head's P(nobody is working), and each step's own 0-1 probability
+        # (the task sigmoids, not scaled by 1 - P(idle) as last_step_probabilities is).
         self.last_step_progress: np.ndarray | None = None
         self.last_idle_probability: float | None = None
+        self.last_task_probabilities: np.ndarray | None = None
         self.last_step_probabilities_timestamp: float | None = None
+        # The overlay's step readout, held between predictions: a model fed at its own
+        # rate skips loop frames (S3 at 10 Hz in a 13 fps loop: 1 in 4), and redrawing
+        # those without it made the text flicker between the readout and "Buffering".
+        self._last_readout: dict[str, Any] = {}
 
         self.round_id = 0
         self.piece_id = 0
@@ -430,6 +436,7 @@ class RecognitionManager:
         self.last_progress = progress
         self.last_step_progress = prediction.step_progress
         self.last_idle_probability = prediction.idle_probability
+        self.last_task_probabilities = prediction.task_probabilities
         self.last_step_probabilities_timestamp = frame_timestamp
         stable_step_id = self._stable_step_id(probabilities)
         self.last_raw_step_id = raw_step_id
@@ -460,6 +467,7 @@ class RecognitionManager:
             piece_id=self.piece_id,
             confidence=confidence,
             timestamp=frame_timestamp,
+            **self._step_outputs(probabilities, prediction.step_progress),
         )
         logger.info("Raw step: %s | Stable step: %s | Progress: %.3f | Confidence: %.3f",
                     raw_step_id, stable_step_id, progress, confidence)
@@ -510,10 +518,16 @@ class RecognitionManager:
     def _show(self, frame, pipeline_out, **prediction) -> None:
         """Hand one frame to the debug view, adding the context it cannot know:
         the latest world position, and what to say when there is no prediction yet."""
-        # Mistake comes from the manager rather than the call sites: it is refreshed on
-        # every frame the LSTM runs on, independently of whether a step was confirmed.
+        if "raw_step_id" in prediction:
+            self._last_readout = {key: prediction.get(key) for key in
+                                  ("raw_step_id", "stable_step_id", "progress", "confidence")}
+        else:  # no prediction this frame: keep showing the last one
+            prediction = {**self._last_readout, **prediction}
+        # Mistake and idle come from the manager rather than the call sites: they are
+        # refreshed on every frame the LSTM runs on, whether or not a step was confirmed.
         prediction.setdefault("mistake_id", self.last_mistake_id)
         prediction.setdefault("mistake_score", self.last_mistake_score)
+        prediction.setdefault("idle_probability", self.last_idle_probability)
         self._view.show(frame, pipeline_out, world_xyz=self.last_world_xyz,
                         status_line=self._status_line(), **prediction)
 
@@ -535,8 +549,26 @@ class RecognitionManager:
             piece_id=self.piece_id,
             confidence=input_data.get("confidence", 0.0),
             timestamp=input_data.get("timestamp", time.time()),
+            step_probabilities=input_data.get("step_probabilities"),
+            step_progress=input_data.get("step_progress"),
         )
         return result
+
+    def _step_outputs(self, probabilities, step_progress) -> dict:
+        """Every step's score and own progress for the decision layer, which picks the
+        step from them against the task sequence (sequence_step_selector.py). The
+        stabilizer's smoothed scores -- what the stable step came from, and steadier
+        than one frame's. Only over config.STEP_NAMES, the ids the decision layer uses."""
+        if list(self.step_labels or []) != list(config.STEP_NAMES):
+            return {}
+        smoothed = (self.step_stabilizer.smoothed_probabilities
+                    if self.step_stabilizer is not None else None)
+        scores = probabilities if smoothed is None else smoothed
+        return {
+            "step_probabilities": [float(value) for value in scores],
+            "step_progress": (None if step_progress is None
+                              else [float(value) for value in step_progress]),
+        }
 
     def _load_required_steps_per_round(self) -> set[int]:
         # Informational only: the decision layer's TaskTracker owns which piece is current.
