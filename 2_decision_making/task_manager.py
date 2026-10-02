@@ -781,6 +781,7 @@ class TaskManager:
 
     def _build_task(self, context: dict, task_id: int) -> RobotTask:
         """A new robot task waiting for permission, retaining its human context."""
+        last_speed = self.active_task.speed if self.active_task is not None else config.DEFAULT_SPEED
         now = time.time()
         return RobotTask(
             task_instance_id=self._build_task_instance_id(context["round_id"], task_id, context["piece_id"]),
@@ -789,7 +790,7 @@ class TaskManager:
             piece_id=context["piece_id"],
             round_id=context["round_id"],
             state=RobotTaskState.R_WAITING_RESPONSE,
-            speed=config.DEFAULT_SPEED,
+            speed=last_speed,
             progress=context.get("progress", 0.0),
             created_at=now,
             updated_at=now,
