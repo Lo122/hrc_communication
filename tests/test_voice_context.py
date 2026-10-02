@@ -45,14 +45,14 @@ class ContextRoutingTests(unittest.TestCase):
         self.comm.tts.speak.assert_called_once_with(short)
         self.assertNotEqual(full, short)
         self.assertIn(full, self.instructions())
-        self.assertTrue(self.voice.start_listening.call_args.kwargs["beep"])
+        self.assertFalse(self.voice.start_listening.call_args.kwargs["beep"])
         original = self.instructions()
         for outcome in (O.NO_SPEECH, O.UNRECOGNIZED):
             self.voice.start_listening.call_args.args[1](outcome, "test")
             self.comm.poll()
             self.assertEqual(self.instructions(), original)
 
-    def test_short_free_drive_question_preserves_context_and_beep(self):
+    def test_short_free_drive_question_preserves_context_without_beep(self):
         from message_manager import MessageManager
 
         messages = MessageManager()
@@ -63,7 +63,7 @@ class ContextRoutingTests(unittest.TestCase):
         self.comm.cli.show_message.assert_called_once_with(full)
         self.comm.tts.speak.assert_called_once_with(short)
         self.assertIn(full, self.instructions())
-        self.assertTrue(self.voice.start_listening.call_args.kwargs["beep"])
+        self.assertFalse(self.voice.start_listening.call_args.kwargs["beep"])
 
     def test_every_listening_stage_has_supported_command_template(self):
         parser = CommandParser()
@@ -112,6 +112,32 @@ class ContextRoutingTests(unittest.TestCase):
         self.comm.sync_state(self.context.state)
         self.assertEqual(self.voice.start_listening.call_count, count + 1)
         self.assertIn("lift_2", self.instructions())
+
+    def test_context_change_during_speech_discards_prepared_listener(self):
+        prepared = []
+
+        def speak(_):
+            prepared.append(self.voice.start_listening.call_args)
+            self.assertFalse(prepared[0].kwargs["capture_ready"].is_set())
+            self.context = VoiceContext(S.R_WAITING_RESPONSE, 1, "lift_2")
+
+        self.comm.tts.speak.side_effect = speak
+        self.comm.show_permission_request("May I lift panel one?")
+        self.assertEqual(self.voice.start_listening.call_count, 2)
+        self.assertIn("lift_2", self.instructions())
+        self.assertNotIn("May I lift panel one?", self.instructions())
+        prepared[0].args[0]("yes")
+        self.comm.poll()
+        self.sink.assert_not_called()
+
+    def test_off_state_after_speech_cancels_preparation(self):
+        def speak(_):
+            self.context = VoiceContext(None)
+
+        self.comm.tts.speak.side_effect = speak
+        self.comm.show_permission_request("May I lift?")
+        self.voice.start_listening.assert_called_once()
+        self.assertEqual(self.voice.method_calls[-1][0], "stop_listening")
 
     def test_silent_retry_and_clarification_preserve_original_question(self):
         self.comm.show_permission_request("Would you like me to lift the panel?")

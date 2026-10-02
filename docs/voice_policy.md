@@ -4,7 +4,7 @@ Task prompts have separate detailed CLI text and concise spoken text in
 `3_communication/message_manager.py` (`spoken=True`). CommunicationManager
 accepts the short version via `speech=` and sends only that version to TTS;
 without an override, it speaks the supplied message as before. The CLI and
-GPT question context retain the full text. Beep and listening rules are unchanged.
+GPT question context retain the full text.
 Speech keeps the requested action, completion commands (`done` / `screw done`),
 and deferred-start duration; command lists and task instance IDs stay on the CLI.
 
@@ -22,8 +22,32 @@ command after detected speech is unrecognized; without detected speech it is
 ignored. Vosk empty results are ignored, while nonempty text goes through the
 shared parser. Vosk has no additional local VAD in this version.
 
-Beep is enabled for a question or clarification, not for silent retries or
-background listening. `VOICE_MAX_ATTEMPTS > 1` allows one clarification; further
+CommunicationManager disables the ready beep for all listening, including
+questions and clarifications. This removes the blocking 0.4-second tone and its
+output-device startup. VoiceInterface retains its optional beep for direct
+callers, disabled by default.
+
+Before TTS, CommunicationManager starts a worker with a closed `capture_ready`
+event. Vosk queries the input device, creates its recognizer, and opens an
+inactive input stream in that worker while TTS runs. The Vosk model itself is
+already loaded at application startup. GPT prepares its connection/current
+instructions and an inactive stream in the same way. Neither backend starts
+the stream, buffers microphone audio, or recognizes speech during preparation.
+Constructing `RawInputStream` does not start it; capture requires `start()`.
+
+After TTS and `VOICE_POST_TTS_GUARD_SECONDS` (currently 0.1 seconds), the manager
+rechecks context and releases the event. The worker starts the prepared stream
+and only then starts the listening timeout. If preparation is slower than TTS,
+capture still waits for preparation to finish. Device startup and room echo
+remain hardware-dependent; this does not enable speaking over TTS or add echo
+cancellation.
+
+Context changes replace stale preparation, and cancellation/close releases the
+inactive stream without starting it. A TTS failure also cancels preparation.
+Preparation errors follow the normal voice-error retry policy. Silent retries
+and listening outside announcements have no TTS gate.
+
+`VOICE_MAX_ATTEMPTS > 1` allows one clarification; further
 unrecognized replies are handled silently until a new question/state.
 
 Worker callbacks enqueue results. `HRCSystem.process_events()` calls
@@ -66,7 +90,7 @@ even if the robot state name stays the same.
   alone must not be interpreted as finishing screwing.
 
 VoiceInterface sends the generated text through `session.update.instructions`
-and waits for a `session.updated` containing those instructions before beep and
+and waits for a `session.updated` containing those instructions before
 recording. An already usable socket is reused: unchanged instructions need no
 update, while changed instructions are updated on that socket. New connections
 receive the full configuration and current instructions. Interrupted audio or

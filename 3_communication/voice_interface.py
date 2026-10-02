@@ -1,6 +1,7 @@
 """Background microphone input using Vosk or OpenAI Realtime."""
 
 import base64
+from contextlib import closing
 import json
 import os
 import queue
@@ -181,7 +182,9 @@ class VoiceInterface:
             self._ws = None
             raise
 
-    def start_listening(self, on_text, on_failure, *, beep=False, instructions=None) -> None:
+    def start_listening(self, on_text, on_failure, *, beep=False, instructions=None,
+                        capture_ready=None) -> None:
+        """Prepare in the worker; a supplied event gates microphone capture."""
         self.stop_listening()
         if self._thread is not None and self._thread.is_alive():
             on_failure(VoiceOutcome.ERROR, "Previous microphone worker is still stopping")
@@ -190,18 +193,30 @@ class VoiceInterface:
         if self._gpt_enabled:
             self._thread = threading.Thread(
                 target=self._listen_once_gpt,
-                args=(on_text, on_failure, beep, instructions),
+                args=(on_text, on_failure, beep, instructions, capture_ready),
                 daemon=True,
             )
         else:
             self._thread = threading.Thread(
                 target=self._listen_once,
-                args=(on_text, on_failure, beep),
+                args=(on_text, on_failure, beep, capture_ready),
                 daemon=True,
             )
         self._thread.start()
 
-    def _listen_once_gpt(self, on_text, on_failure, beep=False, instructions=None) -> None:
+    def _wait_for_capture(self, capture_ready, beep) -> bool:
+        if capture_ready is not None:
+            while not self._stop.is_set():
+                if capture_ready.wait(timeout=0.05):
+                    break
+        if self._stop.is_set():
+            return False
+        if beep:
+            self._play_ready_beep()
+        return not self._stop.is_set()
+
+    def _listen_once_gpt(self, on_text, on_failure, beep=False, instructions=None,
+                         capture_ready=None) -> None:
         speech_seen = False
         try:
             if not self._connect_gpt(instructions):
@@ -209,16 +224,18 @@ class VoiceInterface:
 
             ws = self._ws
             ws.send(json.dumps({"type": "input_audio_buffer.clear"}))
-            if beep:
-                self._play_ready_beep()
-            started = time.monotonic()
-            with sd.RawInputStream(
+            # Opening a stream leaves it inactive; only start() begins capture.
+            with closing(sd.RawInputStream(
                 samplerate=SAMPLE_RATE,
                 blocksize=2400,
                 device=self._device,
                 dtype="int16",
                 channels=1,
-            ) as stream:
+            )) as stream:
+                if not self._wait_for_capture(capture_ready, beep):
+                    return
+                stream.start()
+                started = time.monotonic()
                 while not self._stop.is_set() and time.monotonic() - started < self._timeout:
                     audio, _ = stream.read(2400)
                     ws.send(json.dumps({
@@ -262,7 +279,7 @@ class VoiceInterface:
                 self._ws.close()
                 self._ws = None
 
-    def _listen_once(self, on_text, on_failure, beep=False) -> None:
+    def _listen_once(self, on_text, on_failure, beep=False, capture_ready=None) -> None:
         audio = queue.Queue()
 
         def callback(data, frames, time_info, status):
@@ -272,17 +289,18 @@ class VoiceInterface:
             device_info = sd.query_devices(self._device, "input")
             sample_rate = int(device_info["default_samplerate"])
             recognizer = KaldiRecognizer(self._model, sample_rate, self._grammar)
-            if beep:
-                self._play_ready_beep()
-            started = time.monotonic()
-            with sd.RawInputStream(
+            with closing(sd.RawInputStream(
                 samplerate=sample_rate,
                 blocksize=4000,
                 device=self._device,
                 dtype="int16",
                 channels=1,
                 callback=callback,
-            ):
+            )) as stream:
+                if not self._wait_for_capture(capture_ready, beep):
+                    return
+                stream.start()
+                started = time.monotonic()
                 while not self._stop.is_set() and time.monotonic() - started < self._timeout:
                     try:
                         data = audio.get(timeout=0.2)
@@ -320,7 +338,8 @@ class VoiceInterface:
 
 
 class NullVoiceInterface:
-    def start_listening(self, on_text, on_failure, *, beep=False, instructions=None) -> None:
+    def start_listening(self, on_text, on_failure, *, beep=False, instructions=None,
+                        capture_ready=None) -> None:
         pass
 
     def stop_listening(self) -> None:
