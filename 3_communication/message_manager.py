@@ -85,7 +85,7 @@ class MessageManager:
         if spoken:
             return f"Can I hand over the {item}?"
         return (f"Can I hand over the {item}? Yes opens the gripper, so hold it first. "
-                "Say yes or no after the beep, or type your reply.")
+                "Say yes or no, or type your reply.")
 
     def get_handover_wait_message(self, task, *, spoken=False) -> str:
         item = config.HANDOVER_ITEMS[task.task_id]
@@ -119,7 +119,7 @@ class MessageManager:
     def ask_permission_for_free_drive(self, *, spoken=False) -> str:
         if spoken:
             return "Panel lifted. Enable free drive for adjustment?"
-        return 'The panel is lifted. Would you like free drive for manual adjustment? Say yes or no after the beep, or type your reply. You can also say free drive.'
+        return 'The panel is lifted. Would you like free drive for manual adjustment? Say yes or no, or type your reply. You can also say free drive.'
 
     def get_left_panel_message(self, *, spoken=False) -> str:
         if spoken:

@@ -125,7 +125,7 @@ let the signals count.
 ## Dialogue for review
 
 Every task proposal ends with:
-“Say yes, no, or later after the beep, or type your reply.”
+“Say yes, no, or later, or type your reply.”
 
 | Moment | Draft system message | Human replies |
 |---|---|---|
@@ -136,7 +136,7 @@ Every task proposal ends with:
 | R2 proposal | Would you like me to release the panel and move away? | yes / no / later |
 | R2 complete; R3 proposal | I have moved away from the panel. Would you like me to bring the pipe connector? | yes / no / later |
 | R4 proposal | Would you like me to bring the clamping tool? | yes / no / later |
-| R3/R4 arrived | Can I hand over the pipe coupling / tool? Yes opens the gripper, so hold it first. Say yes or no after the beep, or type your reply. | yes / give me the … / no |
+| R3/R4 arrived | Can I hand over the pipe coupling / tool? Yes opens the gripper, so hold it first. Say yes or no, or type your reply. | yes / give me the … / no |
 | Not ready (no) | Okay, I will keep holding the tool. Let me know when you are ready to receive it: say or type "give me the tool". | give me the tool / give me the (pipe) coupling |
 | Pipe coupling handed over; R7 starts in 1 s | Opening the gripper. Here is the pipe coupling. I'm moving away. Say or type cancel to keep me here. | cancel |
 | Tool handed over; R7 proposal | Opening the gripper. Here is the tool. May I leave the hand-over position and move away? | yes / no / later |

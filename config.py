@@ -168,16 +168,16 @@ SEQUENCE_CONFIRM_EVENTS = 3
 RECOGNITION_ACTIVATION_S = 10.0
 
 PERMISSION_MESSAGES = {
-    TASK_LIFT_PANEL: "Would you like me to lift the panel? Say yes, no, or later after the beep, or type your reply.",
-    TASK_LEAVE: "Would you like me to release the panel and move away? Say yes, no, or later after the beep, or type your reply.",
+    TASK_LIFT_PANEL: "Would you like me to lift the panel? Say yes, no, or later, or type your reply.",
+    TASK_LEAVE: "Would you like me to release the panel and move away? Say yes, no, or later, or type your reply.",
     # No "I have moved away from the panel" here: it is said on its own after a leave
     # (MessageManager.get_left_panel_message), and this offer also comes from the
     # database rule when the robot never held the panel.
-    TASK_BRING_CONNECTOR: "Would you like me to bring the pipe connector? Say yes, no, or later after the beep, or type your reply.",
-    TASK_BRING_CLAMPING_TOOL: "Would you like me to bring the clamping tool? Say yes, no, or later after the beep, or type your reply.",
-    TASK_RETURN_CLAMPING_TOOL: "Would you like me to take the clamping tool back? Say yes, no, or later after the beep, or type your reply.",
-    TASK_PULL_CABLES: "Would you like me to pull the cables? Say yes, no, or later after the beep, or type your reply.",
-    TASK_LEAVE_HANDOVER: "May I leave the hand-over position and move away? Say yes, no, or later after the beep, or type your reply.",
+    TASK_BRING_CONNECTOR: "Would you like me to bring the pipe connector? Say yes, no, or later, or type your reply.",
+    TASK_BRING_CLAMPING_TOOL: "Would you like me to bring the clamping tool? Say yes, no, or later, or type your reply.",
+    TASK_RETURN_CLAMPING_TOOL: "Would you like me to take the clamping tool back? Say yes, no, or later, or type your reply.",
+    TASK_PULL_CABLES: "Would you like me to pull the cables? Say yes, no, or later, or type your reply.",
+    TASK_LEAVE_HANDOVER: "May I leave the hand-over position and move away? Say yes, no, or later, or type your reply.",
 }
 
 # Per-task overrides; unspecified values use the global durations above.
@@ -368,7 +368,7 @@ VOICE_INPUT_DEVICE_NAME = None
 VOICE_OUTPUT_DEVICE_NAME = None
 VOICE_LISTEN_TIMEOUT_SECONDS = 8.0
 VOICE_TTS_RATE = 220
-VOICE_POST_TTS_GUARD_SECONDS = 0.2
+VOICE_POST_TTS_GUARD_SECONDS = 0.1
 VOICE_MAX_ATTEMPTS = 2
 VOICE_ERROR_RETRY_SECONDS = 5.0
 

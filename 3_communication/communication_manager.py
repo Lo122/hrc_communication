@@ -2,6 +2,7 @@
 
 from enum import Enum, auto
 from queue import Empty, SimpleQueue
+from threading import Event
 import time
 
 from events import RobotTaskState
@@ -40,7 +41,7 @@ def listening_mode(context: VoiceContext) -> ListeningMode:
 
 class CommunicationManager:
     def __init__(self, cli, parser, voice, tts, event_sink, state_provider,
-                 guard_seconds=0.25, max_attempts=2, retry_seconds=5.0, logger=None,
+                 guard_seconds=0.1, max_attempts=2, retry_seconds=5.0, logger=None,
                  context_provider=None):
         self.cli = cli
         self.parser = parser
@@ -90,17 +91,30 @@ class CommunicationManager:
         self.voice.stop_listening()
         output = self.cli.show_permission_request if permission else self.cli.show_message
         output(message)
-        self.tts.speak(message if speech is None else speech)
-        time.sleep(self.guard_seconds)
         state = self.state_provider()
         context = self._current_context(state)
         new_question = context != self._context and STATE_MODES.get(state) is ListeningMode.SINGLE
         if new_question:
             self._question_context, self._question = context, message
-        beep = permission or new_question
-        self.sync_state(state, force=True, beep=beep)
+        capture_ready = Event()
+        self.sync_state(state, force=True, capture_ready=capture_ready)
+        try:
+            self.tts.speak(message if speech is None else speech)
+            time.sleep(self.guard_seconds)
+        except BaseException:
+            self._generation += 1
+            self._retry_at = None
+            self.voice.stop_listening()
+            raise
+        if self._closed:
+            return
+        # Replace stale preparation before allowing any microphone capture.
+        self.sync_state(self.state_provider())
+        if self._errors and self.mode is not ListeningMode.OFF:
+            self._retry_at = time.monotonic() + self.retry_seconds
+        capture_ready.set()
 
-    def sync_state(self, state, force=False, beep=False) -> None:
+    def sync_state(self, state, force=False, *, capture_ready=None) -> None:
         if self._closed:
             return
         context = self._current_context(state)
@@ -124,15 +138,16 @@ class CommunicationManager:
             if self._errors:
                 self._retry_at = time.monotonic() + self.retry_seconds
             else:
-                self._start_listening(beep=beep)
+                self._start_listening(capture_ready=capture_ready)
 
-    def _start_listening(self, beep=False) -> None:
+    def _start_listening(self, *, capture_ready=None) -> None:
         self._generation += 1
         generation = self._generation
         self.voice.start_listening(
             lambda text: self._on_voice_text(text, generation),
             lambda outcome, detail="": self._on_voice_failure(generation, outcome, detail),
-            beep=beep,
+            beep=False,
+            capture_ready=capture_ready,
             instructions=build_instructions(
                 self._context, self._question if self._question_context == self._context else None,
             ),
